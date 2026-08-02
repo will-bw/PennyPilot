@@ -20,6 +20,7 @@ import com.pennypilot.app.ui.chat.ChatScreen
 import com.pennypilot.app.ui.edit.EditTransactionScreen
 import com.pennypilot.app.ui.input.AiInputScreen
 import com.pennypilot.app.ui.placeholder.PlaceholderScreen
+import com.pennypilot.app.ui.report.ReportScreen
 import com.pennypilot.app.ui.settings.ColorOsGuideScreen
 import com.pennypilot.app.ui.settings.LlmSettingsScreen
 import com.pennypilot.app.ui.settings.SettingsScreen
@@ -60,7 +61,7 @@ fun PennyPilotNavGraph() {
                 "edit/{id}",
                 arguments = listOf(navArgument("id") { type = NavType.LongType })
             ) { EditTransactionScreen(onBack = { navController.popBackStack() }) }
-            composable(TabItem.REPORT.route) { PlaceholderScreen("报告") }
+            composable(TabItem.REPORT.route) { ReportScreen() }
             composable(TabItem.SETTINGS.route) {
                 val settingsViewModel = hiltViewModel<SettingsViewModel>()
                 SettingsScreen(

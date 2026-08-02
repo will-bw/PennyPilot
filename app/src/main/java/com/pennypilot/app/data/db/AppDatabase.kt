@@ -5,16 +5,18 @@ import androidx.room.*
 import com.pennypilot.app.data.db.converter.Converters
 import com.pennypilot.app.data.db.dao.CategoryDao
 import com.pennypilot.app.data.db.dao.InsightDao
+import com.pennypilot.app.data.db.dao.MonthlyReportDao
 import com.pennypilot.app.data.db.dao.ParseRuleDao
 import com.pennypilot.app.data.db.dao.TransactionDao
 import com.pennypilot.app.data.db.entity.CategoryEntity
+import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.domain.model.TxType
 
 @Database(
-    entities = [TransactionEntity::class, CategoryEntity::class, ParseRuleEntity::class],
-    version = 2,
+    entities = [TransactionEntity::class, CategoryEntity::class, ParseRuleEntity::class, MonthlyReportEntity::class],
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -23,6 +25,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun categoryDao(): CategoryDao
     abstract fun parseRuleDao(): ParseRuleDao
     abstract fun insightDao(): InsightDao
+    abstract fun monthlyReportDao(): MonthlyReportDao
 
     companion object {
         fun build(context: Context): AppDatabase {

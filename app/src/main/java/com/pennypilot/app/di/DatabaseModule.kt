@@ -4,6 +4,7 @@ import android.content.Context
 import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.dao.CategoryDao
 import com.pennypilot.app.data.db.dao.InsightDao
+import com.pennypilot.app.data.db.dao.MonthlyReportDao
 import com.pennypilot.app.data.db.dao.ParseRuleDao
 import com.pennypilot.app.data.db.dao.TransactionDao
 import dagger.Module
@@ -47,4 +48,7 @@ object DatabaseModule {
 
     @Provides
     fun provideInsightDao(db: AppDatabase): InsightDao = db.insightDao()
+
+    @Provides
+    fun provideMonthlyReportDao(db: AppDatabase): MonthlyReportDao = db.monthlyReportDao()
 }

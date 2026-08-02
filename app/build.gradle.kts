@@ -57,6 +57,7 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.security.crypto)
+    implementation(libs.work.runtime)
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
