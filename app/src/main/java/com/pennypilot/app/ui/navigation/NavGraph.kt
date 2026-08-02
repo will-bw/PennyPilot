@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavType
@@ -14,9 +15,11 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.pennypilot.app.data.settings.SecureKeyStore
 import com.pennypilot.app.ui.categories.CategoriesScreen
 import com.pennypilot.app.ui.edit.EditTransactionScreen
 import com.pennypilot.app.ui.placeholder.PlaceholderScreen
+import com.pennypilot.app.ui.settings.LlmSettingsScreen
 import com.pennypilot.app.ui.transactions.TransactionsScreen
 
 @Composable
@@ -50,15 +53,29 @@ fun PennyPilotNavGraph() {
             ) { EditTransactionScreen(onBack = { navController.popBackStack() }) }
             composable(TabItem.REPORT.route) { PlaceholderScreen("报告") }
             composable(TabItem.SETTINGS.route) {
-                SettingsPlaceholder(onNavigateToCategories = { navController.navigate("categories") })
+                SettingsPlaceholder(
+                    onNavigateToCategories = { navController.navigate("categories") },
+                    onNavigateToLlmSettings = { navController.navigate("llm_settings") }
+                )
             }
             composable("categories") { CategoriesScreen(onBack = { navController.popBackStack() }) }
+            composable("llm_settings") {
+                val context = LocalContext.current
+                // SecureKeyStore is cheap to create (just opens prefs)
+                LlmSettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    keyStore = SecureKeyStore(context)
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun SettingsPlaceholder(onNavigateToCategories: () -> Unit) {
+private fun SettingsPlaceholder(
+    onNavigateToCategories: () -> Unit,
+    onNavigateToLlmSettings: () -> Unit
+) {
     Column(
         Modifier.fillMaxSize().padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -72,6 +89,17 @@ private fun SettingsPlaceholder(onNavigateToCategories: () -> Unit) {
                 Column {
                     Text("分类管理", style = MaterialTheme.typography.titleMedium)
                     Text("增删改 · 排序 · 停用", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Card(onClick = onNavigateToLlmSettings, modifier = Modifier.fillMaxWidth()) {
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("✨", fontSize = 20.sp)
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text("AI 设置", style = MaterialTheme.typography.titleMedium)
+                    Text("LLM 供应商 · API Key", style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
