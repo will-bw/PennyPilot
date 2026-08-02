@@ -7,6 +7,7 @@ import java.util.Locale
 object MoneyUtil {
     private val symbols = DecimalFormatSymbols(Locale.US)
     private val yuanFormat = DecimalFormat("#,##0.00", symbols)
+    private val plainFormat = DecimalFormat("0.00", symbols)
 
     /** 流水列表显示：支出 "−18.00"（墨色），收入 "+8,000.00"（暖红） */
     fun formatForDisplay(amountCents: Long, isExpense: Boolean): String {
@@ -21,15 +22,15 @@ object MoneyUtil {
         return yuanFormat.format(amountCents / 100.0)
     }
 
-    /** 编辑框：分 → 纯数字字符串 "18.00" */
+    /** 编辑框：分 → 纯数字字符串 "18.00"（无千分位，便于解析） */
     fun centsToYuanString(amountCents: Long): String {
-        return yuanFormat.format(kotlin.math.abs(amountCents) / 100.0)
+        return plainFormat.format(kotlin.math.abs(amountCents) / 100.0)
     }
 
-    /** 用户输入元 → 分。无效输入返回 0 */
+    /** 用户输入元 → 分。无效输入返回 0。兼容千分位逗号 */
     fun parseYuanToCents(input: String): Long {
         return try {
-            val yuan = input.trim().toDouble()
+            val yuan = input.trim().replace(",", "").toDouble()
             (yuan * 100).toLong()
         } catch (_: NumberFormatException) {
             0L
