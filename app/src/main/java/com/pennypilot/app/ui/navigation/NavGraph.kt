@@ -18,6 +18,7 @@ import androidx.navigation.navArgument
 import com.pennypilot.app.data.settings.SecureKeyStore
 import com.pennypilot.app.ui.categories.CategoriesScreen
 import com.pennypilot.app.ui.edit.EditTransactionScreen
+import com.pennypilot.app.ui.input.AiInputScreen
 import com.pennypilot.app.ui.placeholder.PlaceholderScreen
 import com.pennypilot.app.ui.settings.LlmSettingsScreen
 import com.pennypilot.app.ui.transactions.TransactionsScreen
@@ -46,7 +47,12 @@ fun PennyPilotNavGraph() {
         ) {
             composable(TabItem.TRANSACTIONS.route) { TransactionsScreen() }
             composable(TabItem.CHAT.route) { PlaceholderScreen("问问") }
-            composable(TabItem.ADD.route) { EditTransactionScreen(onBack = { navController.popBackStack() }) }
+            composable(TabItem.ADD.route) {
+                AiInputScreen(onNavigateToManual = { navController.navigate("manual_add") })
+            }
+            composable("manual_add") {
+                EditTransactionScreen(onBack = { navController.popBackStack() })
+            }
             composable(
                 "edit/{id}",
                 arguments = listOf(navArgument("id") { type = NavType.LongType })
