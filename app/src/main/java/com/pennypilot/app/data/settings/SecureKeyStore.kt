@@ -1,0 +1,33 @@
+package com.pennypilot.app.data.settings
+
+import android.content.Context
+import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+
+class SecureKeyStore(context: Context) {
+
+    private val masterKey = MasterKey.Builder(context)
+        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+        .build()
+
+    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
+        context,
+        "pennypilot_secrets",
+        masterKey,
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+    )
+
+    var deepSeekKey: String
+        get() = prefs.getString("deepseek_key", "") ?: ""
+        set(value) = prefs.edit().putString("deepseek_key", value).apply()
+
+    var qwenKey: String
+        get() = prefs.getString("qwen_key", "") ?: ""
+        set(value) = prefs.edit().putString("qwen_key", value).apply()
+
+    var activeProvider: String
+        get() = prefs.getString("active_provider", "deepseek") ?: "deepseek"
+        set(value) = prefs.edit().putString("active_provider", value).apply()
+}

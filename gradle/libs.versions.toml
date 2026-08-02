@@ -39,6 +39,7 @@ turbine = { group = "app.cash.turbine", name = "turbine", version = "1.2.0" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+security-crypto = { group = "androidx.security", name = "security-crypto", version = "1.1.0-alpha06" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
