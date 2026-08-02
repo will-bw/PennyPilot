@@ -10,6 +10,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.pennypilot.app.ui.placeholder.PlaceholderScreen
+import com.pennypilot.app.ui.transactions.TransactionsScreen
 
 @Composable
 fun PennyPilotNavGraph() {
@@ -33,7 +34,7 @@ fun PennyPilotNavGraph() {
             startDestination = TabItem.TRANSACTIONS.route,
             modifier = Modifier.padding(padding)
         ) {
-            composable(TabItem.TRANSACTIONS.route) { PlaceholderScreen("流水") }
+            composable(TabItem.TRANSACTIONS.route) { TransactionsScreen() }
             composable(TabItem.CHAT.route) { PlaceholderScreen("问问") }
             composable(TabItem.ADD.route) { PlaceholderScreen("记一笔") }
             composable(TabItem.REPORT.route) { PlaceholderScreen("报告") }
