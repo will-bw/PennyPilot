@@ -95,7 +95,12 @@ fun InputDock(
             }
 
             // Text input (hidden when recording)
-            AnimatedVisibility(visible = !isRecording, enter = fadeIn(), exit = fadeOut()) {
+            AnimatedVisibility(
+                visible = !isRecording,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.weight(1f)
+            ) {
                 TextField(
                     value = text,
                     onValueChange = onTextChange,
@@ -108,7 +113,7 @@ fun InputDock(
                         unfocusedIndicatorColor = Color.Transparent,
                     ),
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .height(44.dp),
                     textStyle = MaterialTheme.typography.bodyLarge
                 )

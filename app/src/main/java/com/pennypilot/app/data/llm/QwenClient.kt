@@ -16,6 +16,8 @@ import java.util.concurrent.TimeUnit
 
 class QwenClient(
     private val apiKey: String,
+    private val baseUrl: String = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    private val model: String = "qwen-plus",
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -28,14 +30,14 @@ class QwenClient(
     override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String =
         withContext(Dispatchers.IO) {
             val request = ChatRequest(
-                model = "qwen-plus",
+                model = model,
                 messages = messages,
                 responseFormat = if (jsonMode) ResponseFormat() else null
             )
             val body = json.encodeToString(ChatRequest.serializer(), request)
 
             val httpRequest = Request.Builder()
-                .url("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+                .url("$baseUrl/chat/completions")
                 .addHeader("Authorization", "Bearer $apiKey")
                 .addHeader("Content-Type", "application/json")
                 .post(body.toRequestBody(mediaType))
@@ -56,7 +58,7 @@ class QwenClient(
     override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools =
         withContext(Dispatchers.IO) {
             val requestJson = buildJsonObject {
-                put("model", "qwen-plus")
+                put("model", model)
                 put("temperature", 0.1)
                 putJsonArray("messages") {
                     messages.forEach { msg ->
@@ -74,7 +76,7 @@ class QwenClient(
             }
 
             val httpRequest = Request.Builder()
-                .url("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+                .url("$baseUrl/chat/completions")
                 .addHeader("Authorization", "Bearer $apiKey")
                 .addHeader("Content-Type", "application/json")
                 .post(requestJson.toString().toRequestBody(mediaType))

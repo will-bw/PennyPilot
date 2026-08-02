@@ -1,9 +1,11 @@
 package com.pennypilot.app.ui.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -91,11 +93,16 @@ fun ChatScreen(vm: ChatViewModel = hiltViewModel()) {
         // Suggestion chips
         if (state.suggestions.isNotEmpty()) {
             Row(
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                modifier = Modifier
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 state.suggestions.forEach { s ->
-                    SuggestionChip(onClick = { vm.send(s) }, label = { Text(s, fontSize = 12.sp) })
+                    SuggestionChip(
+                        onClick = { vm.send(s) },
+                        label = { Text(s, fontSize = 12.sp, maxLines = 1) }
+                    )
                 }
             }
         }

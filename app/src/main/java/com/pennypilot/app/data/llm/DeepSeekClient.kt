@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 
 class DeepSeekClient(
     private val apiKey: String,
+    private val model: String = "deepseek-chat",
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -28,7 +29,7 @@ class DeepSeekClient(
     override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String =
         withContext(Dispatchers.IO) {
             val request = ChatRequest(
-                model = "deepseek-chat",
+                model = model,
                 messages = messages,
                 responseFormat = if (jsonMode) ResponseFormat() else null
             )
@@ -56,7 +57,7 @@ class DeepSeekClient(
     override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools =
         withContext(Dispatchers.IO) {
             val requestJson = buildJsonObject {
-                put("model", "deepseek-chat")
+                put("model", model)
                 put("temperature", 0.1)
                 putJsonArray("messages") {
                     messages.forEach { msg ->

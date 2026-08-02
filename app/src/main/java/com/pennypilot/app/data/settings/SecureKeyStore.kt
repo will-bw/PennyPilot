@@ -30,4 +30,16 @@ class SecureKeyStore(context: Context) {
     var activeProvider: String
         get() = prefs.getString("active_provider", "deepseek") ?: "deepseek"
         set(value) = prefs.edit().putString("active_provider", value).apply()
+
+    var qwenBaseUrl: String
+        get() = prefs.getString("qwen_base_url", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1") ?: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        set(value) = prefs.edit().putString("qwen_base_url", value).apply()
+
+    var qwenModel: String
+        get() = prefs.getString("qwen_model", "qwen-plus") ?: "qwen-plus"
+        set(value) = prefs.edit().putString("qwen_model", value).apply()
+
+    var deepSeekModel: String
+        get() = prefs.getString("deepseek_model", "deepseek-chat") ?: "deepseek-chat"
+        set(value) = prefs.edit().putString("deepseek_model", value).apply()
 }

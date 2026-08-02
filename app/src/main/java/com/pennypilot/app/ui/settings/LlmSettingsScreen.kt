@@ -17,6 +17,9 @@ fun LlmSettingsScreen(
     var deepSeekKey by remember { mutableStateOf(keyStore.deepSeekKey) }
     var qwenKey by remember { mutableStateOf(keyStore.qwenKey) }
     var provider by remember { mutableStateOf(keyStore.activeProvider) }
+    var deepSeekModel by remember { mutableStateOf(keyStore.deepSeekModel) }
+    var qwenModel by remember { mutableStateOf(keyStore.qwenModel) }
+    var qwenBaseUrl by remember { mutableStateOf(keyStore.qwenBaseUrl) }
     var saved by remember { mutableStateOf(false) }
 
     Column(
@@ -41,22 +44,52 @@ fun LlmSettingsScreen(
             )
         }
 
-        // DeepSeek key
+        HorizontalDivider()
+
+        // DeepSeek section
+        Text("DeepSeek 配置", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
             value = deepSeekKey,
             onValueChange = { deepSeekKey = it },
-            label = { Text("DeepSeek API Key") },
+            label = { Text("API Key") },
             placeholder = { Text("sk-...") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+        OutlinedTextField(
+            value = deepSeekModel,
+            onValueChange = { deepSeekModel = it },
+            label = { Text("模型名称") },
+            placeholder = { Text("deepseek-chat") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
 
-        // Qwen key
+        HorizontalDivider()
+
+        // Qwen section
+        Text("通义千问 / 百炼配置", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
             value = qwenKey,
             onValueChange = { qwenKey = it },
-            label = { Text("百炼 API Key") },
+            label = { Text("API Key") },
             placeholder = { Text("sk-...") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = qwenBaseUrl,
+            onValueChange = { qwenBaseUrl = it },
+            label = { Text("Base URL") },
+            placeholder = { Text("https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = qwenModel,
+            onValueChange = { qwenModel = it },
+            label = { Text("模型名称") },
+            placeholder = { Text("qwen-plus") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
@@ -68,13 +101,18 @@ fun LlmSettingsScreen(
                 keyStore.deepSeekKey = deepSeekKey.trim()
                 keyStore.qwenKey = qwenKey.trim()
                 keyStore.activeProvider = provider
+                keyStore.deepSeekModel = deepSeekModel.trim().ifBlank { "deepseek-chat" }
+                keyStore.qwenModel = qwenModel.trim().ifBlank { "qwen-plus" }
+                keyStore.qwenBaseUrl = qwenBaseUrl.trim().ifBlank {
+                    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+                }
                 saved = true
             },
             modifier = Modifier.fillMaxWidth().height(50.dp)
         ) { Text(if (saved) "✓ 已保存（重启生效）" else "保存") }
 
         Text(
-            "切换供应商后需重启 App 生效。API Key 加密存储于本机。",
+            "切换供应商或模型后需重启 App 生效。API Key 加密存储于本机。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

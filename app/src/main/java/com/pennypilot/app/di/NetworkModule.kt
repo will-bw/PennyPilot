@@ -26,8 +26,15 @@ object NetworkModule {
     @Singleton
     fun provideLLMClient(keyStore: SecureKeyStore): LLMClient {
         return when (keyStore.activeProvider) {
-            "qwen" -> QwenClient(apiKey = keyStore.qwenKey)
-            else -> DeepSeekClient(apiKey = keyStore.deepSeekKey)
+            "qwen" -> QwenClient(
+                apiKey = keyStore.qwenKey,
+                baseUrl = keyStore.qwenBaseUrl,
+                model = keyStore.qwenModel
+            )
+            else -> DeepSeekClient(
+                apiKey = keyStore.deepSeekKey,
+                model = keyStore.deepSeekModel
+            )
         }
     }
 }
