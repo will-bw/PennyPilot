@@ -3,6 +3,7 @@ package com.pennypilot.app.service
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import javax.inject.Inject
 import javax.inject.Singleton
 
 data class ServiceHealth(
@@ -12,7 +13,7 @@ data class ServiceHealth(
 )
 
 @Singleton
-class CaptureServiceMonitor {
+class CaptureServiceMonitor @Inject constructor() {
     private val _health = MutableStateFlow(ServiceHealth())
     val health: StateFlow<ServiceHealth> = _health.asStateFlow()
 

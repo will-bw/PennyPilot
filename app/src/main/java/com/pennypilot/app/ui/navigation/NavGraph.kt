@@ -4,11 +4,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -20,7 +19,10 @@ import com.pennypilot.app.ui.categories.CategoriesScreen
 import com.pennypilot.app.ui.edit.EditTransactionScreen
 import com.pennypilot.app.ui.input.AiInputScreen
 import com.pennypilot.app.ui.placeholder.PlaceholderScreen
+import com.pennypilot.app.ui.settings.ColorOsGuideScreen
 import com.pennypilot.app.ui.settings.LlmSettingsScreen
+import com.pennypilot.app.ui.settings.SettingsScreen
+import com.pennypilot.app.ui.settings.SettingsViewModel
 import com.pennypilot.app.ui.transactions.TransactionsScreen
 
 @Composable
@@ -59,11 +61,15 @@ fun PennyPilotNavGraph() {
             ) { EditTransactionScreen(onBack = { navController.popBackStack() }) }
             composable(TabItem.REPORT.route) { PlaceholderScreen("报告") }
             composable(TabItem.SETTINGS.route) {
-                SettingsPlaceholder(
+                val settingsViewModel = hiltViewModel<SettingsViewModel>()
+                SettingsScreen(
                     onNavigateToCategories = { navController.navigate("categories") },
-                    onNavigateToLlmSettings = { navController.navigate("llm_settings") }
+                    onNavigateToLlmSettings = { navController.navigate("llm_settings") },
+                    onNavigateToColorOsGuide = { navController.navigate("coloros_guide") },
+                    serviceMonitor = settingsViewModel.serviceMonitor
                 )
             }
+            composable("coloros_guide") { ColorOsGuideScreen(onBack = { navController.popBackStack() }) }
             composable("categories") { CategoriesScreen(onBack = { navController.popBackStack() }) }
             composable("llm_settings") {
                 val context = LocalContext.current
@@ -72,42 +78,6 @@ fun PennyPilotNavGraph() {
                     onBack = { navController.popBackStack() },
                     keyStore = SecureKeyStore(context)
                 )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsPlaceholder(
-    onNavigateToCategories: () -> Unit,
-    onNavigateToLlmSettings: () -> Unit
-) {
-    Column(
-        Modifier.fillMaxSize().padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text("我的", style = MaterialTheme.typography.headlineLarge)
-        Spacer(Modifier.height(8.dp))
-        Card(onClick = onNavigateToCategories, modifier = Modifier.fillMaxWidth()) {
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("🏷️", fontSize = 20.sp)
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text("分类管理", style = MaterialTheme.typography.titleMedium)
-                    Text("增删改 · 排序 · 停用", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-        Card(onClick = onNavigateToLlmSettings, modifier = Modifier.fillMaxWidth()) {
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("✨", fontSize = 20.sp)
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text("AI 设置", style = MaterialTheme.typography.titleMedium)
-                    Text("LLM 供应商 · API Key", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
             }
         }
     }
