@@ -98,11 +98,26 @@
 |---|---|---|
 | id | Long PK | |
 | name | String | 分类名 |
-| icon | String | Material Icon 名 |
+| icon | String | emoji 字符（如 "🍜"、"🚕"），与 UI 原型一致 |
+| color_index | Int | 浅彩底色索引（0-6），新增分类自动循环分配，对应 7 组预设色对 |
 | type | Enum | EXPENSE / INCOME |
 | sort_order | Int | 排序 |
 | enabled | Boolean | 停用而非删除 |
 | is_preset | Boolean | 预设不可删，只能停用 |
+
+**color_index 色对映射（与 UI 原型 §7.1 分类图标一致）：**
+
+| index | 底色 (bg) | 前景 (fg) | 预设对应 |
+|---|---|---|---|
+| 0 | `#FFEFE2` | `#D96A24` | 餐饮 |
+| 1 | `#E7F0FF` | `#3B6FE0` | 交通 |
+| 2 | `#FDE9F1` | `#D8498B` | 购物 |
+| 3 | `#E4F6F0` | `#1E9E7E` | 居住 |
+| 4 | `#F0EAFF` | `#7A5AE0` | 娱乐 |
+| 5 | `#FDECEC` | `#D84C4C` | 医疗 |
+| 6 | `#FCEBE8` | `#DF4438` | 收入 |
+
+新增分类时 `color_index = (当前最大 index + 1) % 7`，自动循环。明暗主题下色对保持一致。
 
 预置分类：
 - 支出：餐饮、交通、购物、居住、娱乐、医疗、教育、人情、其他
@@ -144,6 +159,39 @@
 ### 3.6 金额约定
 
 所有金额用 Long 存分，UI 边界做 Long ↔ 字符串转换，中间层永远用 Long，避免浮点误差。
+
+**存储与显示符号对照：**
+
+| 类型 | 存储值 (amount) | 显示值 | 显示色彩 |
+|---|---|---|---|
+| 支出 ¥18.00 | `+1800` | `−18.00` | 墨色 (ink) |
+| 收入 ¥8000.00 | `-800000` | `+8,000.00` | 暖红 (income) |
+
+**显示层公式：**
+- 单笔显示值 = `-amount`（支出 1800 → −18.00；收入 −800000 → +8000.00）
+- 月度总支出 = `SUM(amount) WHERE type='EXPENSE'`（正数）
+- 月度总收入 = `-SUM(amount) WHERE type='INCOME'`（正数）
+- 日/月结余 = `-SUM(amount)`（正数=收大于支）
+- 日均支出 = 月度总支出 / 已过天数
+
+### 3.7 source 枚举显示映射
+
+| 枚举值 | UI 中文标签 |
+|---|---|
+| MANUAL | 手动记账 |
+| NOTIFICATION | 通知自动捕获 |
+| AI_TEXT | AI 文字录入 |
+| AI_VOICE | AI 语音录入 |
+
+### 3.8 运行时状态与偏好存储
+
+| 数据 | 存储方式 | 说明 |
+|---|---|---|
+| 捕获服务健康状态 | `CaptureServiceMonitor`（Hilt @Singleton，StateFlow） | 持有：服务绑定状态、最近通知时间戳、今日捕获计数。Service 写入，UI 观察 |
+| 最近备份时间 | DataStore (`last_backup_at: Long`) | 设置页显示"X月X日" |
+| LLM 供应商选择 | DataStore (`llm_provider: String`) | DeepSeek / Qwen 切换 |
+| API Keys | EncryptedSharedPreferences | 加密存储 |
+| 引导页完成状态 | DataStore (`onboarding_done: Boolean`) | 首次启动 ColorOS 引导 |
 
 ## 4. 通知捕获流程
 
@@ -193,14 +241,15 @@
 
 ### 4.5 权限
 
-| 权限 | 用途 |
-|---|---|
-| 通知使用权（特殊） | 捕获交易通知 |
-| POST_NOTIFICATIONS | App 发通知（Android 13+） |
-| RECEIVE_BOOT_COMPLETED | 开机自启 |
-| INTERNET | LLM/ASR |
+| 权限 | 用途 | 必要性 |
+|---|---|---|
+| 通知使用权（特殊） | 捕获交易通知 | 核心 |
+| POST_NOTIFICATIONS | App 发通知（Android 13+） | 核心 |
+| RECORD_AUDIO | 语音录入（ASR 录音） | 核心（运行时权限） |
+| RECEIVE_BOOT_COMPLETED | 开机自启 | 推荐 |
+| INTERNET | LLM/ASR | 核心 |
 
-不需要 READ_SMS。
+不需要 READ_SMS。RECORD_AUDIO 为运行时权限，首次点击麦克风按钮时请求。
 
 ## 5. AI 录入流
 
@@ -264,6 +313,33 @@ Tool 定义（第一版 3 个）：
 - Tool 结果原样回喂，LLM 只翻译+建议，不允许自己算数
 - 非法 tool call → 重试一次 → 仍失败返回友好提示
 - 对话上下文保留最近 10 轮
+
+**图表数据协议：**
+
+Tool 执行结果在返回给 LLM 的同时，UI 层直接提取结构化图表数据渲染 MiniChart，不依赖 LLM 输出图表：
+
+```kotlin
+data class ChartData(
+    val labels: List<String>,   // ["第1周", "第2周", "第3周", "本周"]
+    val values: List<Long>,     // [9800, 14200, 12600, 12050]（分）
+    val highlightIndex: Int,    // 当前周期高亮柱（通常为最后一个）
+    val unit: String = "元"     // 图表单位标签
+)
+```
+
+生成规则：`aggregate_by` 和 `compare_periods` 的返回结果自动附带 ChartData；`query_transactions` 不附带（明细列表无需图表）。InsightUseCase 将 ChartData 通过 SharedFlow 传给 UI，与 LLM 文字回答并行渲染。
+
+**推荐问题 chips：**
+
+第一版硬编码 6 条常见问题，每次进入问问 Tab 随机展示 3 条：
+- "这个月花了多少"
+- "餐饮占比多少"
+- "和上月比怎么样"
+- "最大一笔支出是什么"
+- "这周交通花了多少"
+- "最近哪天花得最多"
+
+后期可基于最近交易数据动态生成（如检测到高频商户则推荐"XX 这个月花了多少"）。
 
 ### 6.2 月度报告
 
