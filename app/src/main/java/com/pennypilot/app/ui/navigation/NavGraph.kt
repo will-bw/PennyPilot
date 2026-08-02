@@ -16,6 +16,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.pennypilot.app.data.settings.SecureKeyStore
 import com.pennypilot.app.ui.categories.CategoriesScreen
+import com.pennypilot.app.ui.chat.ChatScreen
 import com.pennypilot.app.ui.edit.EditTransactionScreen
 import com.pennypilot.app.ui.input.AiInputScreen
 import com.pennypilot.app.ui.placeholder.PlaceholderScreen
@@ -48,7 +49,7 @@ fun PennyPilotNavGraph() {
             modifier = Modifier.padding(padding)
         ) {
             composable(TabItem.TRANSACTIONS.route) { TransactionsScreen() }
-            composable(TabItem.CHAT.route) { PlaceholderScreen("问问") }
+            composable(TabItem.CHAT.route) { ChatScreen() }
             composable(TabItem.ADD.route) {
                 AiInputScreen(onNavigateToManual = { navController.navigate("manual_add") })
             }
