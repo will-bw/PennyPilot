@@ -41,8 +41,8 @@ class MonthlyReportWorker(
         val summary = try {
             val keyStore = SecureKeyStore(applicationContext)
             val client: LLMClient = when (keyStore.activeProvider) {
-                "qwen" -> QwenClient(keyStore.qwenKey)
-                else -> DeepSeekClient(keyStore.deepSeekKey)
+                "qwen" -> QwenClient(keyStore.qwenKey, baseUrl = keyStore.qwenBaseUrl, model = keyStore.qwenModel)
+                else -> DeepSeekClient(keyStore.deepSeekKey, model = keyStore.deepSeekModel)
             }
             client.chat(listOf(Message("user", prompt)), jsonMode = false)
         } catch (e: Exception) {

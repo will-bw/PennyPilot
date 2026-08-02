@@ -42,10 +42,12 @@ fun AiInputScreen(
         // Hint card (indigo gradient)
         Card(
             shape = RoundedCornerShape(22.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = LightPrimary)
         ) {
             Box(
                 modifier = Modifier
+                    .fillMaxWidth()
                     .background(
                         Brush.linearGradient(listOf(LightPrimary, LightPrimaryDeep))
                     )
