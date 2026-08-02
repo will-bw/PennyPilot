@@ -29,6 +29,7 @@ class ParseTextUseCaseTest {
     private fun createUseCase(llmResponse: String = fakeLlmResponse): ParseTextUseCase {
         val fakeClient = object : LLMClient {
             override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String = llmResponse
+            override suspend fun chatWithTools(messages: List<Message>, tools: List<com.pennypilot.app.data.llm.ToolDefinition>): com.pennypilot.app.data.llm.ChatResponseWithTools = throw UnsupportedOperationException()
         }
         val fakeDao = object : CategoryDao {
             override suspend fun insert(cat: CategoryEntity): Long = 0
@@ -67,6 +68,9 @@ class ParseTextUseCaseTest {
     fun `LLM failure returns error`() = runTest {
         val failingClient = object : LLMClient {
             override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String {
+                throw RuntimeException("Network timeout")
+            }
+            override suspend fun chatWithTools(messages: List<Message>, tools: List<com.pennypilot.app.data.llm.ToolDefinition>): com.pennypilot.app.data.llm.ChatResponseWithTools {
                 throw RuntimeException("Network timeout")
             }
         }
