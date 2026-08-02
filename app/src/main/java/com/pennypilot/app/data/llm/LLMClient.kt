@@ -12,6 +12,12 @@ interface LLMClient {
      * @return 助手回复文本内容，失败抛异常
      */
     suspend fun chat(messages: List<Message>, jsonMode: Boolean = false): String
+
+    /**
+     * 携带工具定义的对话请求（Function Calling）。
+     * 返回原始响应，由调用方解析 tool_calls。
+     */
+    suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools
 }
 
 class LLMException(message: String, cause: Throwable? = null) : Exception(message, cause)
