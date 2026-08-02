@@ -1,5 +1,6 @@
 package com.pennypilot.app.ui.navigation
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -76,7 +77,8 @@ private fun TabButton(
     Column(
         modifier = Modifier
             .width(56.dp)
-            .padding(top = 10.dp),
+            .padding(top = 10.dp)
+            .clickable { onTabClick(item) },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(text = item.icon, fontSize = 21.sp)
