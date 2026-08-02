@@ -28,11 +28,24 @@ fun ChatScreen(vm: ChatViewModel = hiltViewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
 
     Column(Modifier.fillMaxSize()) {
-        // Header
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
-            Text("问问", style = MaterialTheme.typography.headlineLarge)
-            Text("用自然语言查账 · Function Calling 驱动",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Header – page-head: flex row, align bottom, space between, marginBottom 18dp
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(top = 16.dp, bottom = 18.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text("问问", style = MaterialTheme.typography.headlineLarge)
+                Text(
+                    "用自然语言查账 · Function Calling 驱动",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
         }
 
         // Messages

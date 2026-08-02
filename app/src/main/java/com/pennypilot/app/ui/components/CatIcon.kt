@@ -21,6 +21,6 @@ fun CatIcon(colorIndex: Int, emoji: String, size: Int = 42) {
             .background(pair.bg, RoundedCornerShape(15.dp)),
         contentAlignment = Alignment.Center
     ) {
-        Text(emoji, fontSize = (size * 0.45).sp)
+        Text(emoji, fontSize = 19.sp)
     }
 }

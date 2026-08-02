@@ -1,5 +1,6 @@
 package com.pennypilot.app.ui.navigation
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,14 +27,21 @@ fun PennyPilotBottomBar(
     onTabClick: (TabItem) -> Unit
 ) {
     Surface(
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
         tonalElevation = 0.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline,
+                shape = RoundedCornerShape(0.dp)
+            )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(80.dp)
-                .padding(horizontal = 8.dp),
+                .height(92.dp)
+                .padding(start = 8.dp, end = 8.dp, top = 10.dp, bottom = 26.dp),
             verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.SpaceAround
         ) {
@@ -53,6 +61,7 @@ fun PennyPilotBottomBar(
                     shape = RoundedCornerShape(19.dp),
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = Color.White,
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp),
                 ) {
                     Text("+", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 }
@@ -77,7 +86,6 @@ private fun TabButton(
     Column(
         modifier = Modifier
             .width(56.dp)
-            .padding(top = 10.dp)
             .clickable { onTabClick(item) },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -87,7 +95,8 @@ private fun TabButton(
             text = item.label,
             fontSize = 10.sp,
             color = color,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.5.sp
         )
     }
 }

@@ -43,7 +43,7 @@ fun AiInputScreen(
         Card(
             shape = RoundedCornerShape(22.dp),
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = LightPrimary)
+            colors = CardDefaults.cardColors(containerColor = Color.Transparent)
         ) {
             Box(
                 modifier = Modifier
