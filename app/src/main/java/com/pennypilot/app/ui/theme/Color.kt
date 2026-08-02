@@ -1,0 +1,41 @@
+package com.pennypilot.app.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+// Light
+val LightPrimary = Color(0xFF3B54E1)
+val LightPrimaryDeep = Color(0xFF2B3CB8)
+val LightPrimarySoft = Color(0xFFEDEFFD)
+val LightPrimaryInk = Color(0xFF33429F)
+val LightBackground = Color(0xFFF3F5FA)
+val LightSurface = Color(0xFFFFFFFF)
+val LightSurface2 = Color(0xFFFAFBFE)
+val LightInk = Color(0xFF181C2E)
+val LightSub = Color(0xFF6E7494)
+val LightFaint = Color(0xFFA6ABC6)
+val LightHairline = Color(0xFFE8EBF4)
+val LightIncome = Color(0xFFDF4438)
+val LightIncomeSoft = Color(0xFFFCEBE8)
+val LightAmber = Color(0xFFB45309)
+val LightAmberSoft = Color(0xFFFFF3DF)
+val LightGreen = Color(0xFF1E9E6A)
+val LightGreenSoft = Color(0xFFE4F6EE)
+
+// Dark
+val DarkPrimary = Color(0xFF8B9AFF)
+val DarkPrimaryDeep = Color(0xFF6B7CF5)
+val DarkPrimarySoft = Color(0x218B9AFF)
+val DarkPrimaryInk = Color(0xFFB3BEFF)
+val DarkBackground = Color(0xFF0E1122)
+val DarkSurface = Color(0xFF181C33)
+val DarkSurface2 = Color(0xFF1D2240)
+val DarkInk = Color(0xFFECEDFA)
+val DarkSub = Color(0xFF9BA1C7)
+val DarkFaint = Color(0xFF62688E)
+val DarkHairline = Color(0xFF272C4B)
+val DarkIncome = Color(0xFFFF8172)
+val DarkIncomeSoft = Color(0x1FFF8172)
+val DarkAmber = Color(0xFFFFB84D)
+val DarkAmberSoft = Color(0x1FFFB84D)
+val DarkGreen = Color(0xFF4ADE9C)
+val DarkGreenSoft = Color(0x1F4ADE9C)
