@@ -4,24 +4,28 @@ import android.content.Context
 import androidx.room.*
 import com.pennypilot.app.data.db.converter.Converters
 import com.pennypilot.app.data.db.dao.CategoryDao
+import com.pennypilot.app.data.db.dao.ParseRuleDao
 import com.pennypilot.app.data.db.dao.TransactionDao
 import com.pennypilot.app.data.db.entity.CategoryEntity
+import com.pennypilot.app.data.db.entity.ParseRuleEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.domain.model.TxType
 
 @Database(
-    entities = [TransactionEntity::class, CategoryEntity::class],
-    version = 1,
+    entities = [TransactionEntity::class, CategoryEntity::class, ParseRuleEntity::class],
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
     abstract fun categoryDao(): CategoryDao
+    abstract fun parseRuleDao(): ParseRuleDao
 
     companion object {
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(context, AppDatabase::class.java, "pennypilot.db")
+                .fallbackToDestructiveMigration()
                 .build()
         }
 
@@ -38,6 +42,41 @@ abstract class AppDatabase : RoomDatabase() {
             CategoryEntity(name = "工资", icon = "💼", colorIndex = 6, type = TxType.INCOME, sortOrder = 9, isPreset = true),
             CategoryEntity(name = "红包", icon = "🧧", colorIndex = 6, type = TxType.INCOME, sortOrder = 10, isPreset = true),
             CategoryEntity(name = "其他", icon = "💰", colorIndex = 6, type = TxType.INCOME, sortOrder = 11, isPreset = true),
+        )
+
+        val PRESET_RULES = listOf(
+            // WeChat pay
+            ParseRuleEntity(
+                appPackage = "com.tencent.mm",
+                regexAmount = """(?:付款|支付)[^\d]*(\d+(?:\.\d{1,2})?)""",
+                regexMerchant = """(?:向|给)(.+?)(?:付款|支付)""",
+                directionHint = "EXPENSE", priority = 1
+            ),
+            ParseRuleEntity(
+                appPackage = "com.tencent.mm",
+                regexAmount = """微信支付[^\d]*(\d+(?:\.\d{1,2})?)""",
+                regexMerchant = null,
+                directionHint = "EXPENSE", priority = 2
+            ),
+            ParseRuleEntity(
+                appPackage = "com.tencent.mm",
+                regexAmount = """收款[^\d]*(\d+(?:\.\d{1,2})?)""",
+                regexMerchant = null,
+                directionHint = "INCOME", priority = 3
+            ),
+            // Alipay
+            ParseRuleEntity(
+                appPackage = "com.eg.android.AlipayGphone",
+                regexAmount = """(?:付款|支付|消费)[^\d]*(\d+(?:\.\d{1,2})?)""",
+                regexMerchant = """(?:向|在)(.+?)(?:付款|支付|消费)""",
+                directionHint = "EXPENSE", priority = 1
+            ),
+            ParseRuleEntity(
+                appPackage = "com.eg.android.AlipayGphone",
+                regexAmount = """(?:收入|到账)[^\d]*(\d+(?:\.\d{1,2})?)""",
+                regexMerchant = null,
+                directionHint = "INCOME", priority = 2
+            ),
         )
     }
 }

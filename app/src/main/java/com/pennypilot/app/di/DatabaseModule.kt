@@ -3,6 +3,7 @@ package com.pennypilot.app.di
 import android.content.Context
 import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.dao.CategoryDao
+import com.pennypilot.app.data.db.dao.ParseRuleDao
 import com.pennypilot.app.data.db.dao.TransactionDao
 import dagger.Module
 import dagger.Provides
@@ -27,6 +28,9 @@ object DatabaseModule {
             if (db.categoryDao().maxColorIndex() == -1) {
                 db.categoryDao().insertAll(AppDatabase.PRESET_CATEGORIES)
             }
+            if (db.parseRuleDao().count() == 0) {
+                db.parseRuleDao().insertAll(AppDatabase.PRESET_RULES)
+            }
         }
         return db
     }
@@ -36,4 +40,7 @@ object DatabaseModule {
 
     @Provides
     fun provideCategoryDao(db: AppDatabase): CategoryDao = db.categoryDao()
+
+    @Provides
+    fun provideParseRuleDao(db: AppDatabase): ParseRuleDao = db.parseRuleDao()
 }
