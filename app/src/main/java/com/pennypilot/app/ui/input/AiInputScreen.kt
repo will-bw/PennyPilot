@@ -1,6 +1,12 @@
 package com.pennypilot.app.ui.input
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -9,16 +15,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennypilot.app.ui.components.CatIcon
 import com.pennypilot.app.ui.components.InputDock
-import com.pennypilot.app.ui.theme.LightPrimary
-import com.pennypilot.app.ui.theme.LightPrimaryDeep
+import com.pennypilot.app.ui.theme.faintColor
+import com.pennypilot.app.ui.theme.priGradient
 import com.pennypilot.app.util.MoneyUtil
 
 @Composable
@@ -27,6 +36,15 @@ fun AiInputScreen(
     vm: AiInputViewModel = hiltViewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+
+    // 录音运行时权限：按住麦克风前先检查/申请，避免 SpeechRecognizer 静默失败
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) vm.startRecording()
+        else vm.setError("未获得录音权限，请在系统设置中开启麦克风权限后重试")
+    }
 
     Column(
         modifier = Modifier
@@ -49,7 +67,7 @@ fun AiInputScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(
-                        Brush.linearGradient(listOf(LightPrimary, LightPrimaryDeep))
+                        Brush.linearGradient(MaterialTheme.priGradient)
                     )
                     .padding(18.dp)
             ) {
@@ -100,6 +118,7 @@ fun AiInputScreen(
             PreviewCard(
                 items = state.previewItems,
                 onRemove = vm::removePreviewItem,
+                onEditAll = onNavigateToManual,
                 onSaveAll = { vm.saveAll { /* stay on page, show feedback */ } }
             )
         }
@@ -133,6 +152,16 @@ fun AiInputScreen(
             )
         }
 
+        // 底部提示（原型 add-tip）
+        Text(
+            "按住 🎤 说话，松手转文字，可修改后再发送\nLLM 解析失败时自动降级为手动表单",
+            fontSize = 11.5.sp,
+            lineHeight = 20.sp,
+            color = MaterialTheme.faintColor,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+
         Spacer(Modifier.weight(1f))
 
         // InputDock at bottom
@@ -140,10 +169,19 @@ fun AiInputScreen(
             text = state.inputText,
             onTextChange = vm::updateInput,
             onSend = { vm.sendForParsing() },
-            onMicPress = { vm.startRecording() },
+            onMicPress = {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                    == PackageManager.PERMISSION_GRANTED
+                ) {
+                    vm.startRecording()
+                } else {
+                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
             onMicRelease = { vm.stopRecording() },
             isRecording = state.isRecording,
-            modifier = Modifier.padding(bottom = 12.dp)
+            // 底部预留 26dp：FAB 凸出 TabBar 16dp + 10dp 间隙，避免 dock 与 FAB 互相遮挡
+            modifier = Modifier.padding(bottom = 26.dp)
         )
     }
 }
@@ -152,6 +190,7 @@ fun AiInputScreen(
 private fun PreviewCard(
     items: List<PreviewItem>,
     onRemove: (Int) -> Unit,
+    onEditAll: () -> Unit,
     onSaveAll: () -> Unit
 ) {
     Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
@@ -161,7 +200,7 @@ private fun PreviewCard(
                 modifier = Modifier.padding(15.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("✦", color = LightPrimary, fontSize = 15.sp)
+                Text("✦", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
                 Spacer(Modifier.width(7.dp))
                 Text("AI 解析预览", fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
                 Spacer(Modifier.weight(1f))
@@ -169,9 +208,9 @@ private fun PreviewCard(
                     "${items.size} 笔",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    color = LightPrimary,
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
-                        .background(LightPrimary.copy(alpha = 0.1f), RoundedCornerShape(99.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(99.dp))
                         .padding(horizontal = 9.dp, vertical = 3.dp)
                 )
             }
@@ -206,11 +245,11 @@ private fun PreviewCard(
                             item.categoryName,
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = LightPrimary,
+                            color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier
                                 .padding(top = 5.dp)
                                 .background(
-                                    LightPrimary.copy(alpha = 0.1f),
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
                                     RoundedCornerShape(8.dp)
                                 )
                                 .padding(horizontal = 9.dp, vertical = 4.dp)
@@ -227,19 +266,40 @@ private fun PreviewCard(
                 }
             }
 
-            // Footer buttons
+            // Footer buttons：15dp 圆角，主按钮靛蓝渐变（原型 btn）
             Row(
                 modifier = Modifier.padding(14.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                OutlinedButton(onClick = onSaveAll) {
-                    Text("再改改")
-                }
-                Button(
-                    onClick = onSaveAll,
-                    modifier = Modifier.weight(1f)
+                // 「再改改」跳转手动记账，不再与「保存全部」重复触发保存
+                OutlinedButton(
+                    onClick = onEditAll,
+                    shape = RoundedCornerShape(15.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 ) {
-                    Text("保存全部 · ${items.size} 笔")
+                    Text("再改改", fontWeight = FontWeight.Bold)
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(
+                            Brush.linearGradient(MaterialTheme.priGradient),
+                            RoundedCornerShape(15.dp)
+                        )
+                        .clickable { onSaveAll() }
+                        .padding(vertical = 13.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "保存全部 · ${items.size} 笔",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }

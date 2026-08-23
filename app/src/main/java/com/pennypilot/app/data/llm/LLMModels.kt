@@ -6,8 +6,12 @@ import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class Message(
-    @SerialName("role") val role: String,  // "system", "user", "assistant"
-    @SerialName("content") val content: String
+    @SerialName("role") val role: String,  // "system", "user", "assistant", "tool"
+    @SerialName("content") val content: String,
+    /** role = "tool" 时必填：对应 assistant 消息中的 tool_call id */
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    /** role = "assistant" 且模型发起工具调用时需回传 */
+    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null
 )
 
 @Serializable

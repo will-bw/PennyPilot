@@ -3,13 +3,12 @@ package com.pennypilot.app.worker
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
-import com.pennypilot.app.data.llm.DeepSeekClient
+import com.pennypilot.app.data.llm.DynamicLlmClient
 import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
-import com.pennypilot.app.data.llm.QwenClient
 import com.pennypilot.app.data.settings.SecureKeyStore
+import com.pennypilot.app.di.AppDatabaseHolder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -23,7 +22,7 @@ class MonthlyReportWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        val db = AppDatabase.build(applicationContext)
+        val db = AppDatabaseHolder.get(applicationContext)
         val lastMonth = LocalDate.now().minusMonths(1)
         val ym = "${lastMonth.year}-${lastMonth.monthValue.toString().padStart(2, '0')}"
 
@@ -31,6 +30,8 @@ class MonthlyReportWorker(
         val end = lastMonth.plusMonths(1).withDayOfMonth(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
         val expense = db.insightDao().totalExpense(start, end)
+        // 收入在库中以负数存储（支出为正），报表展示取正数
+        val income = -db.insightDao().totalIncome(start, end)
         val categories = db.insightDao().aggregateByCategory(start, end, null, null)
         val top3 = categories.take(3)
 
@@ -40,10 +41,8 @@ class MonthlyReportWorker(
 
         val summary = try {
             val keyStore = SecureKeyStore(applicationContext)
-            val client: LLMClient = when (keyStore.activeProvider) {
-                "qwen" -> QwenClient(keyStore.qwenKey, baseUrl = keyStore.qwenBaseUrl, model = keyStore.qwenModel)
-                else -> DeepSeekClient(keyStore.deepSeekKey, model = keyStore.deepSeekModel)
-            }
+            // 动态路由到用户当前选择的供应商；未配置时回退到内置模板文案
+            val client: LLMClient = DynamicLlmClient(keyStore)
             client.chat(listOf(Message("user", prompt)), jsonMode = false)
         } catch (e: Exception) {
             "本月支出${expense / 100}元，Top分类：$catSummary"
@@ -59,10 +58,12 @@ class MonthlyReportWorker(
             }
         }.toString()
 
+        // 重新生成时先删除同月旧报告，避免重复行
+        db.monthlyReportDao().deleteByMonth(ym)
         db.monthlyReportDao().insert(MonthlyReportEntity(
             yearMonth = ym,
             totalExpense = expense,
-            totalIncome = 0, // simplified
+            totalIncome = income,
             byCategoryJson = catJson,
             llmSummary = summary
         ))

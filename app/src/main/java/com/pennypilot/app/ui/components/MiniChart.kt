@@ -8,9 +8,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pennypilot.app.domain.usecase.ChartData
+import com.pennypilot.app.ui.theme.priGradient
 import com.pennypilot.app.util.MoneyUtil
 
 @Composable
@@ -50,10 +52,15 @@ fun MiniChart(data: ChartData, modifier: Modifier = Modifier) {
                         modifier = Modifier
                             .width(34.dp)
                             .height(((value.toFloat() / maxVal) * 50).dp.coerceAtLeast(4.dp))
-                            .background(
-                                if (isHighlight) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.primaryContainer,
-                                RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)
+                            .then(
+                                // 原型：高亮柱为靛蓝纵向渐变，普通柱为浅靛蓝底
+                                if (isHighlight) Modifier.background(
+                                    Brush.verticalGradient(MaterialTheme.priGradient),
+                                    RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)
+                                ) else Modifier.background(
+                                    MaterialTheme.colorScheme.primaryContainer,
+                                    RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)
+                                )
                             )
                     )
                     Spacer(Modifier.height(4.dp))

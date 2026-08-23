@@ -1,6 +1,7 @@
 package com.pennypilot.app.data.parser
 
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
+import kotlin.math.roundToLong
 
 data class NotificationParseResult(
     val amountCents: Long,
@@ -19,7 +20,8 @@ object ParseRuleEngine {
             val amountMatch = Regex(rule.regexAmount).find(text) ?: continue
             val amountStr = amountMatch.groupValues.getOrNull(1) ?: continue
             val amountYuan = amountStr.toDoubleOrNull() ?: continue
-            val amountCents = (amountYuan * 100).toLong()
+            // roundToLong 避免浮点截断（如 19.9 * 100 = 1989.999…）
+            val amountCents = (amountYuan * 100).roundToLong()
             if (amountCents <= 0) continue
 
             val merchant = rule.regexMerchant?.let { regex ->

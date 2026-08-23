@@ -30,7 +30,7 @@ interface InsightDao {
         """
         SELECT c.name as categoryName, COALESCE(SUM(t.amount), 0) as total, COUNT(*) as count
         FROM transactions t JOIN categories c ON t.category_id = c.id
-        WHERE t.status = 'CONFIRMED' AND t.occurred_at BETWEEN :start AND :end
+        WHERE t.status = 'CONFIRMED' AND t.type = 'EXPENSE' AND t.occurred_at BETWEEN :start AND :end
         AND (:category IS NULL OR c.name = :category)
         AND (:keyword IS NULL OR t.merchant LIKE '%' || :keyword || '%' OR t.note LIKE '%' || :keyword || '%')
         GROUP BY c.name ORDER BY total DESC
@@ -77,4 +77,12 @@ interface InsightDao {
         """
     )
     suspend fun totalExpense(start: Long, end: Long): Long
+
+    @Query(
+        """
+        SELECT COALESCE(SUM(amount), 0) FROM transactions
+        WHERE status = 'CONFIRMED' AND type = 'INCOME' AND occurred_at BETWEEN :start AND :end
+        """
+    )
+    suspend fun totalIncome(start: Long, end: Long): Long
 }

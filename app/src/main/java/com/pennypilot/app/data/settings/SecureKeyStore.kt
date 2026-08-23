@@ -27,8 +27,9 @@ class SecureKeyStore(context: Context) {
         get() = prefs.getString("qwen_key", "") ?: ""
         set(value) = prefs.edit().putString("qwen_key", value).apply()
 
+    /** 当前激活供应商："deepseek" / "qwen"；空串表示未选择（无默认值，须用户手动选择） */
     var activeProvider: String
-        get() = prefs.getString("active_provider", "deepseek") ?: "deepseek"
+        get() = prefs.getString("active_provider", "") ?: ""
         set(value) = prefs.edit().putString("active_provider", value).apply()
 
     var qwenBaseUrl: String

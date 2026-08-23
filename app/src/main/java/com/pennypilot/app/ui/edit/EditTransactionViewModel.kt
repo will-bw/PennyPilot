@@ -12,6 +12,7 @@ import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.util.MoneyUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -39,12 +40,24 @@ class EditTransactionViewModel @Inject constructor(
     val state: StateFlow<EditUiState> = _state.asStateFlow()
 
     init {
+        // 分类列表跟随交易类型联动：编辑收入账单时展示收入分类，避免选中错误类型的分类
+        @OptIn(ExperimentalCoroutinesApi::class)
+        val categoriesByType = _state
+            .map { it.type }
+            .distinctUntilChanged()
+            .flatMapLatest { type -> catDao.observeByType(type) }
+
         viewModelScope.launch {
-            catDao.observeByType(TxType.EXPENSE).collect { cats ->
+            categoriesByType.collect { cats ->
                 _state.update { s ->
                     s.copy(
                         categories = cats,
-                        selectedCategoryId = s.selectedCategoryId ?: cats.firstOrNull()?.id
+                        // 当前选中分类不在列表内（如类型切换/分类被删）时回退到第一个
+                        selectedCategoryId = if (cats.any { it.id == s.selectedCategoryId }) {
+                            s.selectedCategoryId
+                        } else {
+                            cats.firstOrNull()?.id
+                        }
                     )
                 }
             }

@@ -2,6 +2,7 @@ package com.pennypilot.app.ui.transactions
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,6 +12,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -27,10 +29,26 @@ import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.components.CatIcon
 import com.pennypilot.app.ui.theme.*
 import com.pennypilot.app.util.MoneyUtil
+import java.time.LocalDate
+import java.time.format.TextStyle
+import java.util.Locale
 
 @Composable
-fun TransactionsScreen(vm: TransactionsViewModel = hiltViewModel()) {
+fun TransactionsScreen(
+    onEditTx: (Long) -> Unit = {},
+    vm: TransactionsViewModel = hiltViewModel()
+) {
     val state by vm.uiState.collectAsStateWithLifecycle()
+    val strip by vm.stripData.collectAsStateWithLifecycle()
+
+    // 英文月份 eyebrow（原型 "AUGUST · 本月支出"）
+    val monthEyebrow = state.selectedMonth.month
+        .getDisplayName(TextStyle.FULL, Locale.ENGLISH).uppercase(Locale.ENGLISH) + " · 本月支出"
+    // 日均支出 = 月度总支出 / 已过天数（历史月取全月天数）
+    val today = LocalDate.now()
+    val daysElapsed = if (state.selectedMonth.year == today.year && state.selectedMonth.month == today.month)
+        today.dayOfMonth else state.selectedMonth.lengthOfMonth()
+    val dailyAvg = if (daysElapsed > 0) state.monthExpense / daysElapsed else 0L
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -41,15 +59,30 @@ fun TransactionsScreen(vm: TransactionsViewModel = hiltViewModel()) {
             MonthHero(
                 expense = state.monthExpense,
                 income = state.monthIncome,
-                monthLabel = "${state.selectedMonth.year}年${state.selectedMonth.monthValue}月",
+                dailyAvg = dailyAvg,
+                monthLabel = monthEyebrow,
                 onPrev = { vm.shiftMonth(-1) },
                 onNext = { vm.shiftMonth(1) }
             )
         }
 
+        // 近 30 日支出节奏条（定稿保留）
+        item {
+            MonthStrip(
+                values = strip.first,
+                windowStart = strip.second,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
+        }
+
         // Chips row (filter tabs)
         item {
-            ChipsRow(pendingCount = state.pendingCount)
+            ChipsRow(
+                pendingCount = state.pendingCount,
+                filter = state.filter,
+                expenseCategories = state.expenseCategories,
+                onSelect = { vm.setFilter(it) }
+            )
         }
 
         // Day groups
@@ -64,11 +97,19 @@ fun TransactionsScreen(vm: TransactionsViewModel = hiltViewModel()) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        group.label,
-                        style = DayHeadDateStyle,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            group.label,
+                            style = DayHeadDateStyle,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            group.dateText,
+                            style = DayHeadInfoStyle,
+                            color = MaterialTheme.faintColor
+                        )
+                    }
                     Text(
                         if (group.netAmount >= 0) "结余 +¥${MoneyUtil.formatHeroAmount(group.netAmount)}"
                         else "支出 ¥${MoneyUtil.formatHeroAmount(-group.netAmount)}",
@@ -101,7 +142,8 @@ fun TransactionsScreen(vm: TransactionsViewModel = hiltViewModel()) {
                             TransactionRow(
                                 item = txWithCat,
                                 onConfirm = { vm.confirmTx(txWithCat.tx.id) },
-                                onIgnore = { vm.ignoreTx(txWithCat.tx.id) }
+                                onIgnore = { vm.ignoreTx(txWithCat.tx.id) },
+                                onEdit = { onEditTx(txWithCat.tx.id) }
                             )
                         }
                     }
@@ -132,6 +174,7 @@ fun TransactionsScreen(vm: TransactionsViewModel = hiltViewModel()) {
 private fun MonthHero(
     expense: Long,
     income: Long,
+    dailyAvg: Long,
     monthLabel: String,
     onPrev: () -> Unit,
     onNext: () -> Unit
@@ -195,47 +238,103 @@ private fun MonthHero(
             )
         }
 
-        // Pills row: meta info
+        // Pills row: 收入（红点 + 暖红浅底）+ 日均支出（描边 pill）
         Row(
             modifier = Modifier.padding(top = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Income pill (red)
-            Pill(
-                text = "收入 ¥${MoneyUtil.formatHeroAmount(income)}",
-                bgColor = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
-                textColor = MaterialTheme.colorScheme.error
-            )
-            // Balance pill (green)
-            val balance = income - expense
-            if (balance >= 0) {
-                Pill(
-                    text = "结余 ¥${MoneyUtil.formatHeroAmount(balance)}",
-                    bgColor = LightGreenSoft,
-                    textColor = LightGreen
+            // Income pill：红点 + red-soft 底
+            Row(
+                modifier = Modifier
+                    .background(MaterialTheme.incomeSoftColor, RoundedCornerShape(99.dp))
+                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .background(MaterialTheme.colorScheme.error, CircleShape)
+                )
+                Text(
+                    "收入 ¥${MoneyUtil.formatHeroAmount(income)}",
+                    style = PillTextStyle,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            // 日均 pill：卡片底 + 发丝描边
+            Box(
+                modifier = Modifier
+                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(99.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(99.dp))
+                    .padding(horizontal = 11.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    "日均 ¥${MoneyUtil.formatHeroAmount(dailyAvg)}",
+                    style = PillTextStyle,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
     }
 }
 
+/** 近 30 日支出节奏条：30 根圆角小柱，当天高亮主色 */
 @Composable
-private fun Pill(text: String, bgColor: Color, textColor: Color) {
-    Box(
-        modifier = Modifier
-            .background(bgColor, RoundedCornerShape(99.dp))
-            .padding(horizontal = 11.dp, vertical = 5.dp)
-    ) {
-        Text(
-            text = text,
-            style = PillTextStyle,
-            color = textColor
-        )
+private fun MonthStrip(values: List<Long>, windowStart: LocalDate, modifier: Modifier = Modifier) {
+    val maxVal = values.maxOrNull()?.coerceAtLeast(1) ?: 1L
+    val isDark = MaterialTheme.colorScheme.primary == DarkPrimary
+    val barColor = if (isDark) DarkPrimary.copy(alpha = 0.28f) else Color(0xFFD9E0FA)
+    val windowEnd = windowStart.plusDays(29)
+    val today = LocalDate.now()
+
+    Column(modifier.padding(top = 20.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            values.forEachIndexed { i, v ->
+                val hot = i == values.lastIndex
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(((v.toFloat() / maxVal) * 44).dp.coerceAtLeast(4.dp))
+                        .background(
+                            if (hot) MaterialTheme.colorScheme.primary else barColor,
+                            RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp, bottomStart = 1.5.dp, bottomEnd = 1.5.dp)
+                        )
+                )
+            }
+        }
+        Spacer(Modifier.height(7.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                "${windowStart.monthValue}月${windowStart.dayOfMonth}日",
+                fontSize = 10.sp, color = MaterialTheme.faintColor
+            )
+            Text("近 30 日支出节奏", fontSize = 10.sp, color = MaterialTheme.faintColor)
+            Text(
+                if (windowEnd == today) "今天" else "${windowEnd.monthValue}月${windowEnd.dayOfMonth}日",
+                fontSize = 10.sp, color = MaterialTheme.faintColor
+            )
+        }
     }
 }
 
 @Composable
-private fun ChipsRow(pendingCount: Int) {
+private fun ChipsRow(
+    pendingCount: Int,
+    filter: TxFilter,
+    expenseCategories: List<com.pennypilot.app.data.db.entity.CategoryEntity>,
+    onSelect: (TxFilter) -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -244,20 +343,40 @@ private fun ChipsRow(pendingCount: Int) {
             .padding(horizontal = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // "全部" chip (selected by default)
-        ChipItem(label = "全部", selected = true, badgeCount = 0)
-        // "待确认" chip with pending badge
-        ChipItem(label = "待确认", selected = false, badgeCount = pendingCount)
-        // Category chips
-        ChipItem(label = "餐饮", selected = false, badgeCount = 0)
-        ChipItem(label = "交通", selected = false, badgeCount = 0)
-        ChipItem(label = "购物", selected = false, badgeCount = 0)
-        ChipItem(label = "生活", selected = false, badgeCount = 0)
+        ChipItem(
+            label = "全部",
+            selected = filter == TxFilter.All,
+            badgeCount = 0,
+            selectedBadge = false,
+            onClick = { onSelect(TxFilter.All) }
+        )
+        ChipItem(
+            label = "待确认",
+            selected = filter == TxFilter.Pending,
+            badgeCount = pendingCount,
+            selectedBadge = filter == TxFilter.Pending,
+            onClick = { onSelect(TxFilter.Pending) }
+        )
+        expenseCategories.forEach { cat ->
+            ChipItem(
+                label = cat.name,
+                selected = (filter as? TxFilter.Category)?.categoryId == cat.id,
+                badgeCount = 0,
+                selectedBadge = false,
+                onClick = { onSelect(TxFilter.Category(cat.id)) }
+            )
+        }
     }
 }
 
 @Composable
-private fun ChipItem(label: String, selected: Boolean, badgeCount: Int) {
+private fun ChipItem(
+    label: String,
+    selected: Boolean,
+    badgeCount: Int,
+    selectedBadge: Boolean,
+    onClick: () -> Unit
+) {
     val bgColor = if (selected) MaterialTheme.colorScheme.primary
                   else MaterialTheme.colorScheme.surface
     val textColor = if (selected) MaterialTheme.colorScheme.onPrimary
@@ -269,6 +388,7 @@ private fun ChipItem(label: String, selected: Boolean, badgeCount: Int) {
         modifier = Modifier
             .background(bgColor, RoundedCornerShape(99.dp))
             .border(1.dp, borderColor, RoundedCornerShape(99.dp))
+            .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp)
@@ -279,17 +399,20 @@ private fun ChipItem(label: String, selected: Boolean, badgeCount: Int) {
             color = textColor
         )
         if (badgeCount > 0) {
-            // Pending count badge
+            // Pending count badge：选中态为半透明白底（原型 .chip.on .cnt）
             Box(
                 modifier = Modifier
-                    .background(LightAmberSoft, RoundedCornerShape(99.dp))
+                    .background(
+                        if (selectedBadge) Color.White.copy(alpha = 0.25f) else MaterialTheme.pendingAmberSoftColor,
+                        RoundedCornerShape(99.dp)
+                    )
                     .padding(horizontal = 6.dp, vertical = 1.5.dp)
             ) {
                 Text(
                     text = "$badgeCount",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    color = LightAmber
+                    color = if (selectedBadge) MaterialTheme.colorScheme.onPrimary else MaterialTheme.pendingAmberColor
                 )
             }
         }
@@ -297,10 +420,20 @@ private fun ChipItem(label: String, selected: Boolean, badgeCount: Int) {
 }
 
 @Composable
-private fun TransactionRow(item: TxWithCategory, onConfirm: () -> Unit, onIgnore: () -> Unit) {
+private fun TransactionRow(
+    item: TxWithCategory,
+    onConfirm: () -> Unit,
+    onIgnore: () -> Unit,
+    onEdit: () -> Unit
+) {
     val tx = item.tx
     val cat = item.category
     val isPending = tx.status == TxStatus.PENDING
+    // 原型副标题：「HH:mm · 来源」
+    val timeText = remember(tx.occurredAt) {
+        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date(tx.occurredAt))
+    }
 
     Row(
         modifier = Modifier
@@ -309,8 +442,8 @@ private fun TransactionRow(item: TxWithCategory, onConfirm: () -> Unit, onIgnore
                 if (isPending) Modifier.background(
                     Brush.horizontalGradient(
                         colors = listOf(
-                            LightAmberSoft,
-                            LightAmberSoft.copy(alpha = 0f)
+                            MaterialTheme.pendingAmberSoftColor,
+                            MaterialTheme.pendingAmberSoftColor.copy(alpha = 0f)
                         ),
                         startX = 0f,
                         endX = Float.POSITIVE_INFINITY
@@ -328,50 +461,55 @@ private fun TransactionRow(item: TxWithCategory, onConfirm: () -> Unit, onIgnore
             size = 42
         )
 
-        // Title + sub
+        // Title(+badge) + sub + pending actions
         Column(Modifier.weight(1f)) {
-            Text(
-                tx.merchant ?: tx.note ?: cat?.name ?: "未命名",
-                style = TxTitleStyle,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(3.dp))
-            if (isPending) {
-                // Pending badge + actions
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // Pending badge
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                Text(
+                    tx.merchant ?: tx.note ?: cat?.name ?: "未命名",
+                    style = TxTitleStyle,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (isPending) {
+                    // 待确认 badge 与标题同行（原型 .badge-pending）
                     Box(
                         modifier = Modifier
-                            .background(LightAmberSoft, RoundedCornerShape(99.dp))
+                            .background(MaterialTheme.pendingAmberSoftColor, RoundedCornerShape(99.dp))
                             .border(
                                 1.dp,
-                                LightAmber.copy(alpha = 0.25f),
+                                MaterialTheme.pendingAmberColor.copy(alpha = 0.25f),
                                 RoundedCornerShape(99.dp)
                             )
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
                     ) {
                         Text(
                             "待确认",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            color = LightAmber
+                            color = MaterialTheme.pendingAmberColor
                         )
                     }
-                    // Action pills
+                }
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "$timeText · ${tx.source.label}",
+                style = TxSubStyle,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (isPending) {
+                Spacer(Modifier.height(7.dp))
+                // 行内操作：记入 / 忽略 / 编辑（原型 .pend-actions）
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     PendingActionPill(text = "记入", onClick = onConfirm, isPrimary = true)
                     PendingActionPill(text = "忽略", onClick = onIgnore, isPrimary = false)
+                    PendingActionPill(text = "编辑", onClick = onEdit, isPrimary = false)
                 }
-            } else {
-                Text(
-                    tx.source.label,
-                    style = TxSubStyle,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         }
 
@@ -405,9 +543,8 @@ private fun PendingActionPill(text: String, onClick: () -> Unit, isPrimary: Bool
     val textColor = if (isPrimary) MaterialTheme.colorScheme.onPrimary
                     else MaterialTheme.colorScheme.onSurfaceVariant
 
-    TextButton(
-        onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 5.dp),
+    // 用 Box + clickable 而非 TextButton，避免 M3 默认最小高度撑大胶囊（原型 5×12dp 内边距的紧凑胶囊）
+    Box(
         modifier = Modifier
             .background(bgColor, RoundedCornerShape(99.dp))
             .border(
@@ -415,6 +552,8 @@ private fun PendingActionPill(text: String, onClick: () -> Unit, isPrimary: Bool
                 MaterialTheme.colorScheme.outline,
                 RoundedCornerShape(99.dp)
             )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 5.dp)
     ) {
         Text(
             text = text,

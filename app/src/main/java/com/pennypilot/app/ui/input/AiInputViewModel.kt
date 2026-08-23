@@ -57,6 +57,11 @@ class AiInputViewModel @Inject constructor(
         _state.update { it.copy(inputText = text, error = null) }
     }
 
+    /** 供 UI 层上报错误（如录音权限被拒） */
+    fun setError(message: String) {
+        _state.update { it.copy(error = message, isRecording = false) }
+    }
+
     fun sendForParsing() {
         val text = _state.value.inputText.trim()
         if (text.isBlank()) return
@@ -97,6 +102,9 @@ class AiInputViewModel @Inject constructor(
         val items = _state.value.previewItems
         if (items.isEmpty()) return
 
+        // 先清空预览再入库，防止快速双击「保存全部」导致重复插入
+        _state.update { it.copy(previewItems = emptyList()) }
+
         viewModelScope.launch {
             items.forEach { item ->
                 val amount = if (item.type == TxType.EXPENSE) item.amount else -item.amount
@@ -113,7 +121,7 @@ class AiInputViewModel @Inject constructor(
                     )
                 )
             }
-            _state.update { it.copy(previewItems = emptyList(), savedCount = items.size) }
+            _state.update { it.copy(savedCount = items.size) }
             onDone()
         }
     }

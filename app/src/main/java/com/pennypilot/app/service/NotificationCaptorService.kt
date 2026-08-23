@@ -4,9 +4,9 @@ import android.app.Notification
 import android.content.ComponentName
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
-import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.parser.ParseRuleEngine
+import com.pennypilot.app.di.AppDatabaseHolder
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
@@ -57,7 +57,8 @@ class NotificationCaptorService : NotificationListenerService() {
 
         scope.launch {
             try {
-                val db = AppDatabase.build(applicationContext)
+                // 通过持有器获取单例数据库，避免每条通知都 build 新实例
+                val db = AppDatabaseHolder.get(applicationContext)
                 val rules = db.parseRuleDao().getRulesForPackage(sbn.packageName)
                 val result = ParseRuleEngine.parse(text, rules) ?: return@launch
 

@@ -3,6 +3,7 @@ package com.pennypilot.app.util
 import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
 import java.util.Locale
+import kotlin.math.roundToLong
 
 object MoneyUtil {
     private val symbols = DecimalFormatSymbols(Locale.US)
@@ -31,7 +32,8 @@ object MoneyUtil {
     fun parseYuanToCents(input: String): Long {
         return try {
             val yuan = input.trim().replace(",", "").toDouble()
-            (yuan * 100).toLong()
+            // roundToLong 避免浮点截断（如 4.35 * 100 = 434.999…）
+            (yuan * 100).roundToLong()
         } catch (_: NumberFormatException) {
             0L
         }

@@ -9,7 +9,6 @@ import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ToolDefinition
 import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -124,19 +123,26 @@ class InsightUseCase @Inject constructor(
                 return InsightResult(choice.message?.content ?: "无法回答")
             }
 
-            // 执行工具调用并回填结果
+            // 执行工具调用并回填结果（遵循 OpenAI 兼容协议：
+            // assistant 消息携带 tool_calls，tool 消息携带对应 tool_call_id）
             var chartData: ChartData? = null
-            val toolResults = toolCalls.map { tc ->
+            val toolMessages = toolCalls.map { tc ->
                 val result = executeToolCall(tc.function.name, tc.function.arguments)
                 if (tc.function.name == "aggregate_by" || tc.function.name == "compare_periods") {
                     chartData = buildChartData(tc.function.name, tc.function.arguments)
                 }
-                """{"tool_call_id":"${tc.id}","role":"tool","content":${json.encodeToString(String.serializer(), result)}}"""
+                Message(role = "tool", content = result, toolCallId = tc.id)
             }
 
             val followUpMessages = messages.toMutableList()
-            followUpMessages.add(Message("assistant", choice.message?.content ?: ""))
-            toolResults.forEach { followUpMessages.add(Message("tool", it)) }
+            followUpMessages.add(
+                Message(
+                    role = "assistant",
+                    content = choice.message?.content ?: "",
+                    toolCalls = toolCalls
+                )
+            )
+            followUpMessages.addAll(toolMessages)
 
             val finalResponse = llmClient.chat(followUpMessages, jsonMode = false)
             InsightResult(answer = finalResponse, chartData = chartData)
@@ -201,13 +207,25 @@ class InsightUseCase @Inject constructor(
         val end = parseDate(args["end"]?.jsonPrimitive?.content)
         return when (toolName) {
             "aggregate_by" -> {
-                val results = insightDao.aggregateByCategory(start, end, null, null)
-                if (results.isEmpty()) null
-                else ChartData(
-                    labels = results.take(5).map { it.categoryName },
-                    values = results.take(5).map { it.total },
-                    highlightIndex = 0
-                )
+                val groupBy = args["group_by"]?.jsonPrimitive?.content ?: "category"
+                if (groupBy == "day") {
+                    // 按天分组时取最近 7 天数据，高亮最后一天
+                    val results = insightDao.aggregateByDay(start, end).takeLast(7)
+                    if (results.isEmpty()) null
+                    else ChartData(
+                        labels = results.map { it.day.takeLast(5) },
+                        values = results.map { it.total },
+                        highlightIndex = results.lastIndex
+                    )
+                } else {
+                    val results = insightDao.aggregateByCategory(start, end, null, null)
+                    if (results.isEmpty()) null
+                    else ChartData(
+                        labels = results.take(5).map { it.categoryName },
+                        values = results.take(5).map { it.total },
+                        highlightIndex = 0
+                    )
+                }
             }
             else -> null
         }

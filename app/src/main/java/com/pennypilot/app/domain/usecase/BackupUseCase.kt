@@ -39,6 +39,9 @@ class BackupUseCase @Inject constructor() {
 
             val dbFile = context.getDatabasePath("pennypilot.db")
             backupFile.copyTo(dbFile, overwrite = true)
+            // 清理旧的 WAL / SHM，避免残留日志覆盖恢复的数据（需重启 App 重新打开数据库）
+            File(dbFile.path + "-wal").delete()
+            File(dbFile.path + "-shm").delete()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

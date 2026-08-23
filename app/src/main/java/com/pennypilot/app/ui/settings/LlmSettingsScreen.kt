@@ -29,8 +29,15 @@ fun LlmSettingsScreen(
         TextButton(onClick = onBack) { Text("← 返回") }
         Text("AI 设置", style = MaterialTheme.typography.headlineLarge)
 
-        // Provider selector
+        // Provider selector（无默认值，需手动选择）
         Text("主力供应商", style = MaterialTheme.typography.titleMedium)
+        if (provider.isBlank()) {
+            Text(
+                "尚未选择供应商，请手动选择要使用的 AI 服务",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             FilterChip(
                 selected = provider == "deepseek",
@@ -108,11 +115,12 @@ fun LlmSettingsScreen(
                 }
                 saved = true
             },
+            enabled = provider.isNotBlank(),
             modifier = Modifier.fillMaxWidth().height(50.dp)
-        ) { Text(if (saved) "✓ 已保存（重启生效）" else "保存") }
+        ) { Text(if (saved) "✓ 已保存（立即生效）" else "保存") }
 
         Text(
-            "切换供应商或模型后需重启 App 生效。API Key 加密存储于本机。",
+            "切换供应商或模型后立即生效，无需重启 App。API Key 加密存储于本机。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

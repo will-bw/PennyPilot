@@ -4,8 +4,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
@@ -24,7 +24,9 @@ class QwenClient(
         .build()
 ) : LLMClient {
 
-    private val json = Json { ignoreUnknownKeys = true }
+    // explicitNulls = false：普通消息不序列化空的 tool_call_id / tool_calls 字段
+    // encodeDefaults = true：序列化有默认值的必填字段（如 ToolDefinition.type / ResponseFormat.type），否则 Qwen 会校验报错
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
     private val mediaType = "application/json".toMediaType()
 
     override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String =
@@ -45,7 +47,8 @@ class QwenClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                throw LLMException("Qwen API error: ${response.code} ${response.message}")
+                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
+                throw LLMException("Qwen API error: ${response.code} ${response.message} $errBody".trim())
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("Qwen API returned empty body")
@@ -62,10 +65,8 @@ class QwenClient(
                 put("temperature", 0.1)
                 putJsonArray("messages") {
                     messages.forEach { msg ->
-                        addJsonObject {
-                            put("role", msg.role)
-                            put("content", msg.content)
-                        }
+                        // 完整序列化消息（含 tool_call_id / tool_calls），保证工具调用协议正确
+                        add(json.encodeToJsonElement(Message.serializer(), msg))
                     }
                 }
                 putJsonArray("tools") {
@@ -84,7 +85,8 @@ class QwenClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                throw LLMException("Qwen API error: ${response.code} ${response.message}")
+                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
+                throw LLMException("Qwen API error: ${response.code} ${response.message} $errBody".trim())
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("Qwen API returned empty body")

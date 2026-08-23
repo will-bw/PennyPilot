@@ -11,10 +11,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 import javax.inject.Inject
 
 data class ChatMessage(
-    val id: Long = System.nanoTime(),
+    // UUID 避免 LazyColumn key 碰撞（nanoTime 在快速连续发送时可能重复）
+    val id: String = UUID.randomUUID().toString(),
     val role: String, // "user" or "ai"
     val text: String,
     val chartData: ChartData? = null
@@ -60,8 +62,9 @@ class ChatViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            // Build history for context (last 10 rounds = 20 messages)
-            val history = _state.value.messages.takeLast(20).map {
+            // 构建上下文历史（最近 10 轮 = 20 条）；
+            // dropLast(1) 排除刚追加的本次用户问题，ask() 内部会再追加，避免重复
+            val history = _state.value.messages.dropLast(1).takeLast(20).map {
                 Message(role = if (it.role == "user") "user" else "assistant", content = it.text)
             }
 

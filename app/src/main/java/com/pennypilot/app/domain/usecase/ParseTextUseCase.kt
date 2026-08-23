@@ -37,6 +37,12 @@ class ParseTextUseCase @Inject constructor(
     suspend fun execute(input: String): ParseResult {
         return try {
             val categories = categoryDao.observeEnabled().first()
+            if (categories.isEmpty()) {
+                return ParseResult(
+                    transactions = emptyList(),
+                    error = "没有可用分类，请先在「设置 → 分类管理」中添加或启用分类"
+                )
+            }
             val systemPrompt = buildSystemPrompt(categories)
             val messages = listOf(
                 Message(role = "system", content = systemPrompt),
@@ -44,7 +50,10 @@ class ParseTextUseCase @Inject constructor(
             )
 
             val response = llmClient.chat(messages, jsonMode = true)
-            val parsed = json.decodeFromString(ParsedResult.serializer(), response)
+            val parsed = json.decodeFromString(ParsedResult.serializer(), stripCodeFence(response))
+            if (parsed.transactions.isEmpty()) {
+                return ParseResult(transactions = emptyList(), error = "未能从输入中解析出账单，请换个说法试试")
+            }
 
             val resolved = parsed.transactions.map { tx ->
                 resolveTransaction(tx, categories)
@@ -54,6 +63,15 @@ class ParseTextUseCase @Inject constructor(
         } catch (e: Exception) {
             ParseResult(transactions = emptyList(), error = e.message ?: "解析失败")
         }
+    }
+
+    /** 容忍部分模型在 JSON 外包裹 markdown 代码围栏 */
+    private fun stripCodeFence(raw: String): String {
+        return raw.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
     }
 
     private fun buildSystemPrompt(categories: List<CategoryEntity>): String {
@@ -79,8 +97,11 @@ class ParseTextUseCase @Inject constructor(
 
     private fun resolveTransaction(tx: ParsedTransaction, categories: List<CategoryEntity>): ResolvedTransaction {
         val type = if (tx.type.equals("INCOME", ignoreCase = true)) TxType.INCOME else TxType.EXPENSE
-        val category = categories.find { it.name == tx.category && it.type == type }
+        // 兼容模型输出带引号/空白的分类名；全部未命中时回退到同类型第一个分类
+        val catName = tx.category.trim().removeSurrounding("\"")
+        val category = categories.find { it.name == catName && it.type == type }
             ?: categories.find { it.name == "其他" && it.type == type }
+            ?: categories.firstOrNull { it.type == type }
             ?: categories.first()
 
         val occurredAt = try {

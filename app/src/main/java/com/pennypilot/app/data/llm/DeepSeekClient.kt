@@ -4,8 +4,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
@@ -23,7 +23,9 @@ class DeepSeekClient(
         .build()
 ) : LLMClient {
 
-    private val json = Json { ignoreUnknownKeys = true }
+    // explicitNulls = false：普通消息不序列化空的 tool_call_id / tool_calls 字段
+    // encodeDefaults = true：序列化有默认值的必填字段（如 ToolDefinition.type / ResponseFormat.type）
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
     private val mediaType = "application/json".toMediaType()
 
     override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String =
@@ -44,7 +46,8 @@ class DeepSeekClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                throw LLMException("DeepSeek API error: ${response.code} ${response.message}")
+                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
+                throw LLMException("DeepSeek API error: ${response.code} ${response.message} $errBody".trim())
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("DeepSeek API returned empty body")
@@ -61,10 +64,8 @@ class DeepSeekClient(
                 put("temperature", 0.1)
                 putJsonArray("messages") {
                     messages.forEach { msg ->
-                        addJsonObject {
-                            put("role", msg.role)
-                            put("content", msg.content)
-                        }
+                        // 完整序列化消息（含 tool_call_id / tool_calls），保证工具调用协议正确
+                        add(json.encodeToJsonElement(Message.serializer(), msg))
                     }
                 }
                 putJsonArray("tools") {
@@ -83,7 +84,8 @@ class DeepSeekClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                throw LLMException("DeepSeek API error: ${response.code} ${response.message}")
+                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
+                throw LLMException("DeepSeek API error: ${response.code} ${response.message} $errBody".trim())
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("DeepSeek API returned empty body")
