@@ -2,6 +2,7 @@ package com.pennypilot.app.data.db.dao
 
 import androidx.room.*
 import com.pennypilot.app.data.db.entity.TransactionEntity
+import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import kotlinx.coroutines.flow.Flow
 
@@ -30,6 +31,14 @@ interface TransactionDao {
 
     @Query("SELECT COUNT(*) FROM transactions WHERE status = 'PENDING'")
     fun observePendingCount(): Flow<Int>
+
+    /** 统计指定来源在 since 之后入库的笔数（用于捕获服务今日计数回填） */
+    @Query("SELECT COUNT(*) FROM transactions WHERE source = :source AND created_at >= :since")
+    suspend fun countBySourceSince(source: TxSource, since: Long): Int
+
+    /** 分类被删除时把名下交易改挂到目标分类 */
+    @Query("UPDATE transactions SET category_id = :newId WHERE category_id = :oldId")
+    suspend fun reassignCategory(oldId: Long, newId: Long)
 
     @Query("DELETE FROM transactions WHERE id = :id")
     suspend fun deleteById(id: Long)

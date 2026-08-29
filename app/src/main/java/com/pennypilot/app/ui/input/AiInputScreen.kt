@@ -8,11 +8,15 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -24,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.ui.components.CatIcon
 import com.pennypilot.app.ui.components.InputDock
 import com.pennypilot.app.ui.theme.faintColor
@@ -36,6 +41,7 @@ fun AiInputScreen(
     vm: AiInputViewModel = hiltViewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val allCategories by vm.allCategories.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // 录音运行时权限：按住麦克风前先检查/申请，避免 SpeechRecognizer 静默失败
@@ -117,7 +123,9 @@ fun AiInputScreen(
         if (state.previewItems.isNotEmpty()) {
             PreviewCard(
                 items = state.previewItems,
+                categories = allCategories,
                 onRemove = vm::removePreviewItem,
+                onChangeCategory = vm::changePreviewCategory,
                 onEditAll = onNavigateToManual,
                 onSaveAll = { vm.saveAll { /* stay on page, show feedback */ } }
             )
@@ -189,10 +197,15 @@ fun AiInputScreen(
 @Composable
 private fun PreviewCard(
     items: List<PreviewItem>,
+    categories: List<CategoryEntity>,
     onRemove: (Int) -> Unit,
+    onChangeCategory: (Int, CategoryEntity) -> Unit,
     onEditAll: () -> Unit,
     onSaveAll: () -> Unit
 ) {
+    // 当前弹出分类选择器的条目下标（null = 未弹出）
+    var pickerIndex by remember { mutableStateOf<Int?>(null) }
+
     Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
         Column {
             // Header
@@ -233,6 +246,15 @@ private fun PreviewCard(
                             item.merchant ?: item.note ?: item.categoryName,
                             style = MaterialTheme.typography.titleMedium
                         )
+                        // 推断时间备注（设计 §7.3）
+                        Text(
+                            remember(item.occurredAt) {
+                                java.text.SimpleDateFormat("M月d日 HH:mm", java.util.Locale.getDefault())
+                                    .format(java.util.Date(item.occurredAt))
+                            },
+                            fontSize = 11.sp,
+                            color = MaterialTheme.faintColor
+                        )
                         if (item.note != null && item.merchant != null) {
                             Text(
                                 item.note,
@@ -240,7 +262,7 @@ private fun PreviewCard(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        // Category chip
+                        // Category chip：可点 → 弹分类网格选择器
                         Text(
                             item.categoryName,
                             fontSize = 11.5.sp,
@@ -252,6 +274,7 @@ private fun PreviewCard(
                                     MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
                                     RoundedCornerShape(8.dp)
                                 )
+                                .clickable { pickerIndex = index }
                                 .padding(horizontal = 9.dp, vertical = 4.dp)
                         )
                     }
@@ -304,4 +327,65 @@ private fun PreviewCard(
             }
         }
     }
+
+    // 分类网格选择器（设计 §7.3：分类为可点 chip → 弹出分类网格）
+    pickerIndex?.let { idx ->
+        // items 可能在显示期间被删减，下标越界时静默不弹
+        items.getOrNull(idx)?.let { item ->
+            CategoryPickerDialog(
+                categories = categories.filter { it.type == item.type && it.enabled },
+                selectedId = item.categoryId,
+                onSelect = { cat ->
+                    onChangeCategory(idx, cat)
+                    pickerIndex = null
+                },
+                onDismiss = { pickerIndex = null }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CategoryPickerDialog(
+    categories: List<CategoryEntity>,
+    selectedId: Long,
+    onSelect: (CategoryEntity) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择分类") },
+        text = {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(4),
+                modifier = Modifier.height(280.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(categories) { cat ->
+                    val selected = cat.id == selectedId
+                    Column(
+                        modifier = Modifier
+                            .clickable { onSelect(cat) }
+                            .alpha(if (selected) 1f else 0.6f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CatIcon(colorIndex = cat.colorIndex, emoji = cat.icon, size = 42)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            cat.name,
+                            fontSize = 11.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }

@@ -20,6 +20,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.ui.components.CatIcon
@@ -81,7 +82,10 @@ fun ReportScreen(vm: ReportViewModel = hiltViewModel()) {
                     TextButton(
                         onClick = {
                             WorkManager.getInstance(context).enqueue(
-                                OneTimeWorkRequestBuilder<MonthlyReportWorker>().build()
+                                OneTimeWorkRequestBuilder<MonthlyReportWorker>()
+                                    // 手动重生成：跳过 Worker 内的幂等守卫
+                                    .setInputData(workDataOf(MonthlyReportWorker.KEY_FORCE to true))
+                                    .build()
                             )
                         },
                         contentPadding = PaddingValues(0.dp),
@@ -223,7 +227,9 @@ private fun ReportHero(report: MonthlyReportEntity, prev: MonthlyReportEntity?) 
                     Spacer(Modifier.width(4.dp))
                     Text(
                         MoneyUtil.formatHeroAmount(report.totalExpense),
-                        style = MaterialTheme.typography.displayMedium,
+                        fontFamily = FontFamily.Serif,
+                        fontSize = 37.sp,
+                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }

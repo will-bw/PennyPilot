@@ -23,6 +23,8 @@ data class EditUiState(
     val selectedCategoryId: Long? = null,
     val note: String = "",
     val merchant: String = "",
+    val accountTag: String = "",
+    val occurredAt: Long = System.currentTimeMillis(),
     val categories: List<CategoryEntity> = emptyList(),
     val isEditing: Boolean = false
 )
@@ -72,6 +74,8 @@ class EditTransactionViewModel @Inject constructor(
                             selectedCategoryId = tx.categoryId,
                             note = tx.note ?: "",
                             merchant = tx.merchant ?: "",
+                            accountTag = tx.accountTag ?: "",
+                            occurredAt = tx.occurredAt,
                             isEditing = true
                         )
                     }
@@ -83,7 +87,11 @@ class EditTransactionViewModel @Inject constructor(
     fun updateAmount(v: String) { _state.update { it.copy(amountText = v) } }
     fun updateNote(v: String) { _state.update { it.copy(note = v) } }
     fun updateMerchant(v: String) { _state.update { it.copy(merchant = v) } }
+    fun updateAccountTag(v: String) { _state.update { it.copy(accountTag = v) } }
     fun selectCategory(id: Long) { _state.update { it.copy(selectedCategoryId = id) } }
+    /** 切换支出/收入：分类列表随 type 联动刷新，选中分类失效时自动回退第一个 */
+    fun setType(t: TxType) { _state.update { it.copy(type = t) } }
+    fun setOccurredAt(ms: Long) { _state.update { it.copy(occurredAt = ms) } }
 
     fun save(onDone: () -> Unit) {
         val s = _state.value
@@ -97,14 +105,17 @@ class EditTransactionViewModel @Inject constructor(
                 txDao.update(existing.copy(
                     amount = amount, type = s.type,
                     categoryId = s.selectedCategoryId, note = s.note.ifBlank { null },
-                    merchant = s.merchant.ifBlank { null }
+                    merchant = s.merchant.ifBlank { null },
+                    accountTag = s.accountTag.ifBlank { null },
+                    occurredAt = s.occurredAt
                 ))
             } else {
                 txDao.insert(TransactionEntity(
                     amount = amount, type = s.type,
                     categoryId = s.selectedCategoryId, note = s.note.ifBlank { null },
                     merchant = s.merchant.ifBlank { null },
-                    occurredAt = System.currentTimeMillis(), source = TxSource.MANUAL, status = TxStatus.CONFIRMED
+                    accountTag = s.accountTag.ifBlank { null },
+                    occurredAt = s.occurredAt, source = TxSource.MANUAL, status = TxStatus.CONFIRMED
                 ))
             }
             onDone()

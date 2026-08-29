@@ -142,6 +142,11 @@ class TransactionsViewModel @Inject constructor(
         txDao.updateStatus(id, TxStatus.IGNORED)
     }
 
+    /** 已确认行左滑删除（编辑页删除共用同一入口） */
+    fun deleteTx(id: Long) = viewModelScope.launch {
+        txDao.deleteById(id)
+    }
+
     private fun groupByDay(txs: List<TransactionEntity>, catMap: Map<Long, CategoryEntity>): List<DayGroup> {
         val today = LocalDate.now()
         val weekdays = arrayOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")

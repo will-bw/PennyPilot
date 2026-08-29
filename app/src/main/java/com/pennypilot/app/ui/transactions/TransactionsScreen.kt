@@ -12,7 +12,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -40,6 +42,8 @@ fun TransactionsScreen(
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     val strip by vm.stripData.collectAsStateWithLifecycle()
+    // 左滑删除的确认目标（null = 无待确认删除）
+    var deleteTarget by remember { mutableStateOf<TxWithCategory?>(null) }
 
     // 英文月份 eyebrow（原型 "AUGUST · 本月支出"）
     val monthEyebrow = state.selectedMonth.month
@@ -50,6 +54,7 @@ fun TransactionsScreen(
         today.dayOfMonth else state.selectedMonth.lengthOfMonth()
     val dailyAvg = if (daysElapsed > 0) state.monthExpense / daysElapsed else 0L
 
+    Column(Modifier.fillMaxSize()) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 16.dp, bottom = 108.dp),
@@ -139,12 +144,21 @@ fun TransactionsScreen(
                                     modifier = Modifier.padding(horizontal = 16.dp)
                                 )
                             }
-                            TransactionRow(
-                                item = txWithCat,
-                                onConfirm = { vm.confirmTx(txWithCat.tx.id) },
-                                onIgnore = { vm.ignoreTx(txWithCat.tx.id) },
-                                onEdit = { onEditTx(txWithCat.tx.id) }
-                            )
+                            if (txWithCat.tx.status == TxStatus.PENDING) {
+                                TransactionRow(
+                                    item = txWithCat,
+                                    onConfirm = { vm.confirmTx(txWithCat.tx.id) },
+                                    onIgnore = { vm.ignoreTx(txWithCat.tx.id) },
+                                    onEdit = { onEditTx(txWithCat.tx.id) }
+                                )
+                            } else {
+                                // 已确认行：左滑删除，点击进入编辑（设计 §7.3）
+                                SwipeableTxRow(
+                                    item = txWithCat,
+                                    onEdit = { onEditTx(txWithCat.tx.id) },
+                                    onRequestDelete = { deleteTarget = txWithCat }
+                                )
+                            }
                         }
                     }
                 }
@@ -167,6 +181,28 @@ fun TransactionsScreen(
                 }
             }
         }
+    }
+
+    // 左滑删除二次确认
+    deleteTarget?.let { target ->
+        val title = target.tx.merchant ?: target.tx.note ?: target.category?.name ?: "该笔账目"
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除这笔记录？") },
+            text = { Text("将删除「$title」，删除后不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteTx(target.tx.id)
+                    deleteTarget = null
+                }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            }
+        )
+    }
     }
 }
 
@@ -419,12 +455,63 @@ private fun ChipItem(
     }
 }
 
+/** 已确认行左滑删除：滑到阈值弹确认对话框，不直接移除行（设计 §7.3） */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeableTxRow(
+    item: TxWithCategory,
+    onEdit: () -> Unit,
+    onRequestDelete: () -> Unit
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        positionalThreshold = { total -> total * 0.35f },
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) onRequestDelete()
+            // 始终返回 false：行本身不消失，由确认对话框确认后 VM 删除驱动列表刷新
+            false
+        }
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = true,
+        backgroundContent = {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.CenterEnd
+            ) {
+                Text(
+                    "删除",
+                    color = MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(end = 24.dp)
+                )
+            }
+        }
+    ) {
+        // 不透明底避免滑动时背景穿透
+        Box(Modifier.background(MaterialTheme.colorScheme.surface)) {
+            TransactionRow(
+                item = item,
+                onConfirm = {},
+                onIgnore = {},
+                onEdit = onEdit,
+                onClick = onEdit
+            )
+        }
+    }
+}
+
 @Composable
 private fun TransactionRow(
     item: TxWithCategory,
     onConfirm: () -> Unit,
     onIgnore: () -> Unit,
-    onEdit: () -> Unit
+    onEdit: () -> Unit,
+    onClick: () -> Unit = {}
 ) {
     val tx = item.tx
     val cat = item.category
@@ -448,7 +535,7 @@ private fun TransactionRow(
                         startX = 0f,
                         endX = Float.POSITIVE_INFINITY
                     )
-                ) else Modifier
+                ) else Modifier.clickable(onClick = onClick)
             )
             .padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,

@@ -26,27 +26,40 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pennypilot.app.domain.usecase.BackupUseCase
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.Lifecycle
 import com.pennypilot.app.service.CaptureServiceMonitor
 import com.pennypilot.app.service.NotificationCaptorService
 import com.pennypilot.app.ui.theme.PageSubStyle
 import com.pennypilot.app.ui.theme.faintColor
 import com.pennypilot.app.ui.theme.successColor
+import java.time.Instant
+import java.time.ZoneId
 
 @Composable
 fun SettingsScreen(
     onNavigateToCategories: () -> Unit,
     onNavigateToLlmSettings: () -> Unit,
     onNavigateToColorOsGuide: () -> Unit,
-    serviceMonitor: CaptureServiceMonitor
+    onNavigateToParseRules: () -> Unit,
+    viewModel: SettingsViewModel
 ) {
     val context = LocalContext.current
+    val serviceMonitor = viewModel.serviceMonitor
     val health by serviceMonitor.health.collectAsState()
+    val lastBackupAt by viewModel.lastBackupAt.collectAsState()
 
-    // Check if notification listener is enabled
-    val isListenerEnabled = remember {
+    // 备份/恢复/关于弹窗状态
+    var showBackupDialog by remember { mutableStateOf(false) }
+    var showRestoreDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
+
+    // 通知使用权状态：RESUME 时重查，从系统设置授权返回后立即刷新
+    var isListenerEnabled by remember { mutableStateOf(false) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         val cn = ComponentName(context, NotificationCaptorService::class.java)
-        Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+        isListenerEnabled = Settings.Secure
+            .getString(context.contentResolver, "enabled_notification_listeners")
             ?.contains(cn.flattenToString()) == true
     }
 
@@ -140,7 +153,7 @@ fun SettingsScreen(
                 icon = "🧩", iconBg = Color(0xFFE4F6F0), iconFg = Color(0xFF1E9E7E),
                 title = "通知解析规则", subtitle = "正则热更新 · 优先级匹配",
                 isLast = false,
-                onClick = null
+                onClick = onNavigateToParseRules
             )
             SettingsRow(
                 icon = "🛡️", iconBg = Color(0xFFFFF3DF), iconFg = Color(0xFFB45309),
@@ -165,7 +178,7 @@ fun SettingsScreen(
             )
             SettingsRow(
                 icon = "🎙️", iconBg = Color(0xFFE7F0FF), iconFg = Color(0xFF3B6FE0),
-                title = "语音识别", subtitle = "Paraformer 流式识别",
+                title = "语音识别", subtitle = "系统离线识别引擎",
                 value = "已开启", valueColor = MaterialTheme.successColor,
                 onClick = null
             )
@@ -179,22 +192,15 @@ fun SettingsScreen(
         SettingsGroup {
             SettingsRow(
                 icon = "💾", iconBg = Color(0xFFFDE9F1), iconFg = Color(0xFFD8498B),
-                title = "备份与恢复", subtitle = "导出 .db 到 Documents/PennyPilot",
+                title = "备份与恢复", subtitle = backupSubtitle(lastBackupAt),
                 isLast = false,
-                onClick = {
-                    val result = BackupUseCase().exportDb(context)
-                    Toast.makeText(
-                        context,
-                        result.fold({ "已备份：$it" }, { "备份失败：${it.message}" }),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
+                onClick = { showBackupDialog = true }
             )
             SettingsRow(
                 icon = "🧭", iconBg = Color(0xFFFCEBE8), iconFg = Color(0xFFDF4438),
                 title = "关于 PennyPilot", subtitle = "自用 AI 记账 · 不上架",
-                value = "v0.1.0",
-                onClick = null
+                value = appVersionName(context),
+                onClick = { showAboutDialog = true }
             )
         }
 
@@ -207,6 +213,139 @@ fun SettingsScreen(
             modifier = Modifier.align(Alignment.CenterHorizontally)
         )
     }
+
+    // 备份/恢复入口弹窗
+    if (showBackupDialog) {
+        AlertDialog(
+            onDismissRequest = { showBackupDialog = false },
+            title = { Text("备份与恢复") },
+            text = { Text("备份导出到 Documents/PennyPilot，可将该目录指向网盘同步。恢复会覆盖当前数据。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showBackupDialog = false
+                    val result = viewModel.exportDb(context)
+                    Toast.makeText(
+                        context,
+                        result.fold({ "已备份：$it" }, { "备份失败：${it.message}" }),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }) { Text("立即备份") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showBackupDialog = false
+                    showRestoreDialog = true
+                }) { Text("从备份恢复") }
+            }
+        )
+    }
+
+    // 恢复：选文件 + 二次确认
+    if (showRestoreDialog) {
+        RestoreDialog(
+            backups = remember { viewModel.listBackups() },
+            onRestore = { file ->
+                showRestoreDialog = false
+                val result = viewModel.restoreDb(context, file.absolutePath)
+                Toast.makeText(
+                    context,
+                    result.fold(
+                        { "恢复成功，请手动重启 App 生效" },
+                        { "恢复失败：${it.message}" }
+                    ),
+                    Toast.LENGTH_LONG
+                ).show()
+            },
+            onDismiss = { showRestoreDialog = false }
+        )
+    }
+
+    // 关于弹窗
+    if (showAboutDialog) {
+        AlertDialog(
+            onDismissRequest = { showAboutDialog = false },
+            title = { Text("PennyPilot") },
+            text = {
+                Text(
+                    "版本 ${appVersionName(context)}\n\n" +
+                        "自用 AI 记账 App：一句话智能记账、微信/支付宝通知自动捕获、" +
+                        "对话查账与月度报告。数据仅存本机，永不上架。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showAboutDialog = false }) { Text("好的") }
+            }
+        )
+    }
+}
+
+/** 备份副标题：未备份 / 上次备份 X月X日 */
+private fun backupSubtitle(lastBackupAt: Long): String {
+    if (lastBackupAt <= 0) return "未备份 · 导出 .db 到 Documents"
+    val date = Instant.ofEpochMilli(lastBackupAt).atZone(ZoneId.systemDefault())
+    return "上次备份 ${date.monthValue}月${date.dayOfMonth}日"
+}
+
+/** 从 PackageManager 读版本号，避免引入 BuildConfig */
+private fun appVersionName(context: android.content.Context): String {
+    return try {
+        "v" + context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    } catch (_: Exception) {
+        "v?"
+    }
+}
+
+/** 恢复弹窗：列出已有备份 → 选中后二次确认 */
+@Composable
+private fun RestoreDialog(
+    backups: List<java.io.File>,
+    onRestore: (java.io.File) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var pendingFile by remember { mutableStateOf<java.io.File?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(pendingFile?.let { "确认恢复？" } ?: "选择备份文件") },
+        text = {
+            if (pendingFile == null) {
+                if (backups.isEmpty()) {
+                    Text("Documents/PennyPilot 目录下没有备份文件。")
+                } else {
+                    Column {
+                        backups.forEach { file ->
+                            Text(
+                                file.name,
+                                fontSize = 13.5.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { pendingFile = file }
+                                    .padding(vertical = 9.dp)
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 1.dp)
+                        }
+                    }
+                }
+            } else {
+                Text("恢复将用 ${pendingFile!!.name} 覆盖当前全部账单与设置，不可撤销。确定继续？")
+            }
+        },
+        confirmButton = {
+            if (pendingFile == null) {
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            } else {
+                TextButton(onClick = { pendingFile?.let(onRestore) }) {
+                    Text("确认恢复", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        dismissButton = {
+            if (pendingFile != null) {
+                TextButton(onClick = { pendingFile = null }) { Text("返回") }
+            }
+        }
+    )
 }
 
 /** 绿色呼吸点：内实心 + 外圈扩散动画 */

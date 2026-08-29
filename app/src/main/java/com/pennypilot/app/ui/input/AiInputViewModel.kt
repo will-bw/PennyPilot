@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.pennypilot.app.data.asr.SpeechRecognizerManager
 import com.pennypilot.app.data.db.dao.CategoryDao
 import com.pennypilot.app.data.db.dao.TransactionDao
+import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
@@ -13,8 +14,10 @@ import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.domain.usecase.ParseTextUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -50,6 +53,10 @@ class AiInputViewModel @Inject constructor(
 
     private val _state = MutableStateFlow(AiInputUiState())
     val state: StateFlow<AiInputUiState> = _state.asStateFlow()
+
+    // 预览卡分类选择器数据源：按条目类型在 UI 层过滤
+    val allCategories = categoryDao.observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val speechManager = SpeechRecognizerManager(application)
 
@@ -95,6 +102,20 @@ class AiInputViewModel @Inject constructor(
     fun removePreviewItem(index: Int) {
         _state.update { s ->
             s.copy(previewItems = s.previewItems.filterIndexed { i, _ -> i != index })
+        }
+    }
+
+    /** 预览卡分类 chip 点击后改选分类（设计 §7.3：可点 chip → 分类网格选择器） */
+    fun changePreviewCategory(index: Int, category: CategoryEntity) {
+        _state.update { s ->
+            s.copy(previewItems = s.previewItems.mapIndexed { i, item ->
+                if (i == index) item.copy(
+                    categoryId = category.id,
+                    categoryName = category.name,
+                    categoryColorIndex = category.colorIndex,
+                    categoryIcon = category.icon
+                ) else item
+            })
         }
     }
 

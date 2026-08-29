@@ -9,6 +9,7 @@ import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.settings.SecureKeyStore
 import com.pennypilot.app.di.AppDatabaseHolder
+import com.pennypilot.app.service.NotificationHelper
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -21,10 +22,19 @@ class MonthlyReportWorker(
     params: WorkerParameters
 ) : CoroutineWorker(context, params) {
 
+    companion object {
+        /** 报告页手动「重新生成」时携带，跳过幂等守卫 */
+        const val KEY_FORCE = "force"
+    }
+
     override suspend fun doWork(): Result {
         val db = AppDatabaseHolder.get(applicationContext)
         val lastMonth = LocalDate.now().minusMonths(1)
         val ym = "${lastMonth.year}-${lastMonth.monthValue.toString().padStart(2, '0')}"
+
+        // 幂等守卫：30 天周期可能漂移重复触发，上月报告已存在则直接返回（手动强制重生成除外）
+        val force = inputData.getBoolean(KEY_FORCE, false)
+        if (!force && db.monthlyReportDao().getByMonth(ym) != null) return Result.success()
 
         val start = lastMonth.withDayOfMonth(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val end = lastMonth.plusMonths(1).withDayOfMonth(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
@@ -67,6 +77,13 @@ class MonthlyReportWorker(
             byCategoryJson = catJson,
             llmSummary = summary
         ))
+
+        // 生成完成提醒，点击打开 App 查看
+        NotificationHelper.postReportNotification(
+            applicationContext,
+            title = "${lastMonth.monthValue} 月账本已生成",
+            text = "总支出 ${expense / 100} 元，点击查看 AI 点评"
+        )
 
         return Result.success()
     }

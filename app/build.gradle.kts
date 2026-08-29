@@ -32,6 +32,10 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    testOptions {
+        // Robolectric 跑 Room DAO 单测需要 Android 资源支持
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 dependencies {
@@ -59,9 +63,12 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.security.crypto)
     implementation(libs.work.runtime)
+    implementation(libs.datastore.preferences)
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
     testImplementation(libs.room.testing)
     testImplementation(libs.turbine)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

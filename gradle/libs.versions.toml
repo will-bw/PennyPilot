@@ -13,6 +13,9 @@ activity-compose = "1.9.3"
 okhttp = "4.12.0"
 kotlinx-serialization = "1.7.3"
 work-runtime = "2.9.1"
+datastore = "1.1.1"
+robolectric = "4.13"
+androidx-test-core = "1.6.1"
 
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
@@ -43,6 +46,9 @@ okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor",
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
 security-crypto = { group = "androidx.security", name = "security-crypto", version = "1.1.0-alpha06" }
 work-runtime = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work-runtime" }
+datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
+androidx-test-core = { module = "androidx.test:core", version.ref = "androidx-test-core" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

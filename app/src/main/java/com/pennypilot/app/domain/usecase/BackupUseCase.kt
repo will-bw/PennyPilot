@@ -9,13 +9,23 @@ import javax.inject.Inject
 
 class BackupUseCase @Inject constructor() {
 
+    private fun backupDir(): File = File(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+        "PennyPilot"
+    )
+
+    /** 列出已有备份文件（按文件名倒序，日期后缀天然有序） */
+    fun listBackups(): List<File> =
+        backupDir().listFiles { f -> f.name.startsWith("backup-") && f.name.endsWith(".db") }
+            ?.sortedByDescending { it.name }
+            ?: emptyList()
+
     fun exportDb(context: Context): Result<String> {
         return try {
             val dbFile = context.getDatabasePath("pennypilot.db")
             if (!dbFile.exists()) return Result.failure(Exception("数据库不存在"))
 
-            val backupDir = File(Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DOCUMENTS), "PennyPilot")
+            val backupDir = backupDir()
             backupDir.mkdirs()
 
             val dateStr = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())

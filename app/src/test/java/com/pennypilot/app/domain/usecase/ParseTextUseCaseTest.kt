@@ -40,6 +40,7 @@ class ParseTextUseCaseTest {
             override fun observeByType(type: TxType): Flow<List<CategoryEntity>> = flowOf(fakeCategories)
             override suspend fun maxColorIndex(): Int = 6
             override suspend fun getById(id: Long): CategoryEntity? = fakeCategories.find { it.id == id }
+            override suspend fun deleteById(id: Long) {}
         }
         return ParseTextUseCase(fakeClient, fakeDao)
     }
@@ -83,6 +84,7 @@ class ParseTextUseCaseTest {
             override fun observeByType(type: TxType): Flow<List<CategoryEntity>> = flowOf(fakeCategories)
             override suspend fun maxColorIndex(): Int = 6
             override suspend fun getById(id: Long): CategoryEntity? = null
+            override suspend fun deleteById(id: Long) {}
         }
         val useCase = ParseTextUseCase(failingClient, fakeDao)
         val result = useCase.execute("test")

@@ -32,6 +32,11 @@ class CaptureServiceMonitor @Inject constructor() {
         )
     }
 
+    /** 服务重连/进程重启后按数据库回填今日捕获计数，避免计数丢失 */
+    fun setTodayCount(count: Int) {
+        _health.value = _health.value.copy(todayCaptureCount = count)
+    }
+
     fun resetDailyCount() {
         _health.value = _health.value.copy(todayCaptureCount = 0)
     }

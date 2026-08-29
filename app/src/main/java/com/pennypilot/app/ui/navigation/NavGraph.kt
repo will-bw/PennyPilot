@@ -18,8 +18,8 @@ import com.pennypilot.app.ui.categories.CategoriesScreen
 import com.pennypilot.app.ui.chat.ChatScreen
 import com.pennypilot.app.ui.edit.EditTransactionScreen
 import com.pennypilot.app.ui.input.AiInputScreen
-import com.pennypilot.app.ui.placeholder.PlaceholderScreen
 import com.pennypilot.app.ui.report.ReportScreen
+import com.pennypilot.app.ui.rules.ParseRulesScreen
 import com.pennypilot.app.ui.settings.ColorOsGuideScreen
 import com.pennypilot.app.ui.settings.LlmSettingsScreen
 import com.pennypilot.app.ui.settings.LlmSettingsViewModel
@@ -28,7 +28,7 @@ import com.pennypilot.app.ui.settings.SettingsViewModel
 import com.pennypilot.app.ui.transactions.TransactionsScreen
 
 @Composable
-fun PennyPilotNavGraph(startEditTxId: Long = -1L) {
+fun PennyPilotNavGraph(startEditTxId: Long = -1L, startRoute: String? = null) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
@@ -37,6 +37,13 @@ fun PennyPilotNavGraph(startEditTxId: Long = -1L) {
     LaunchedEffect(startEditTxId) {
         if (startEditTxId > 0) {
             navController.navigate("edit/$startEditTxId") { launchSingleTop = true }
+        }
+    }
+
+    // 系统提醒通知深链（如开机后通知使用权未授权 → ColorOS 引导页）
+    LaunchedEffect(startRoute) {
+        if (!startRoute.isNullOrBlank()) {
+            navController.navigate(startRoute) { launchSingleTop = true }
         }
     }
 
@@ -79,11 +86,13 @@ fun PennyPilotNavGraph(startEditTxId: Long = -1L) {
                     onNavigateToCategories = { navController.navigate("categories") },
                     onNavigateToLlmSettings = { navController.navigate("llm_settings") },
                     onNavigateToColorOsGuide = { navController.navigate("coloros_guide") },
-                    serviceMonitor = settingsViewModel.serviceMonitor
+                    onNavigateToParseRules = { navController.navigate("parse_rules") },
+                    viewModel = settingsViewModel
                 )
             }
             composable("coloros_guide") { ColorOsGuideScreen(onBack = { navController.popBackStack() }) }
             composable("categories") { CategoriesScreen(onBack = { navController.popBackStack() }) }
+            composable("parse_rules") { ParseRulesScreen(onBack = { navController.popBackStack() }) }
             composable("llm_settings") {
                 // 复用 Hilt 单例 SecureKeyStore，避免重复创建加密存储实例
                 val llmSettingsVm = hiltViewModel<LlmSettingsViewModel>()

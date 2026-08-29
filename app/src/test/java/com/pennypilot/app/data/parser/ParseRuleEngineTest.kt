@@ -70,4 +70,36 @@ class ParseRuleEngineTest {
         assertEquals(8620L, result!!.amountCents)
         assertEquals("美团外卖", result.merchant)
     }
+
+    @Test
+    fun `alipay income`() {
+        val alipayRules = listOf(
+            ParseRuleEntity(id = 5, appPackage = "com.eg.android.AlipayGphone",
+                regexAmount = """(?:收入|到账)[^\d]*(\d+(?:\.\d{1,2})?)""",
+                regexMerchant = null,
+                directionHint = "INCOME", priority = 2),
+        )
+        val text = "支付宝到账1000.00元"
+        val result = ParseRuleEngine.parse(text, alipayRules)
+        assertNotNull(result)
+        assertEquals(100000L, result!!.amountCents)
+        assertEquals("INCOME", result.direction)
+    }
+
+    @Test
+    fun `empty rules returns null`() {
+        assertNull(ParseRuleEngine.parse("微信支付￥35.50", emptyList()))
+    }
+
+    @Test
+    fun `zero amount rule is skipped`() {
+        val rules = listOf(
+            ParseRuleEntity(id = 6, appPackage = "com.tencent.mm",
+                regexAmount = """付款[^\d]*(\d+(?:\.\d{1,2})?)""",
+                regexMerchant = null,
+                directionHint = "EXPENSE", priority = 1),
+        )
+        // 金额 0 不算交易，应返回 null（避免脏数据入库）
+        assertNull(ParseRuleEngine.parse("你向某商户付款0.00元", rules))
+    }
 }

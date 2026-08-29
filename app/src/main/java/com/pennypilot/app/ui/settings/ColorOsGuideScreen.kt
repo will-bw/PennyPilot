@@ -75,8 +75,9 @@ fun ColorOsGuideScreen(onBack: () -> Unit) {
     }
 }
 
+/** 引导步骤卡片：首次启动引导页（ui.onboarding）也复用此组件 */
 @Composable
-private fun GuideStep(step: Int, title: String, desc: String, buttonText: String, onAction: () -> Unit) {
+fun GuideStep(step: Int, title: String, desc: String, buttonText: String, onAction: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Step $step", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)

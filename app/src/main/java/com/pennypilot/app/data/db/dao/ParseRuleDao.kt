@@ -15,6 +15,18 @@ interface ParseRuleDao {
     @Insert
     suspend fun insertAll(rules: List<ParseRuleEntity>)
 
+    @Insert
+    suspend fun insert(rule: ParseRuleEntity): Long
+
+    @Update
+    suspend fun update(rule: ParseRuleEntity)
+
+    @Delete
+    suspend fun delete(rule: ParseRuleEntity)
+
+    @Query("DELETE FROM parse_rules")
+    suspend fun deleteAll()
+
     @Query("SELECT COUNT(*) FROM parse_rules")
     suspend fun count(): Int
 }
