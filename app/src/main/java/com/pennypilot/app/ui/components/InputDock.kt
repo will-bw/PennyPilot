@@ -3,6 +3,9 @@ package com.pennypilot.app.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,14 +13,16 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -48,12 +53,14 @@ fun InputDock(
     val currentMicRelease by rememberUpdatedState(onMicRelease)
     val canSend = enabled && !isSending && !isRecording && !isRecognizing && text.isNotBlank()
     val microphoneEnabled = enabled && !isRecognizing
+    val microphoneInteraction = remember { MutableInteractionSource() }
+    var inputFocused by remember { mutableStateOf(false) }
 
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, if (isRecording) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+        border = BorderStroke(1.dp, if (isRecording || inputFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
     ) {
         Row(
             modifier = Modifier.padding(6.dp),
@@ -65,6 +72,7 @@ fun InputDock(
                         .size(48.dp)
                         .clip(CircleShape)
                         .background(if (isRecording) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer)
+                        .indication(microphoneInteraction, ripple(bounded = true))
                         .semantics(mergeDescendants = true) {
                             contentDescription = if (isRecording) "结束录音" else "语音输入"
                             role = Role.Button
@@ -80,17 +88,25 @@ fun InputDock(
                         .pointerInput(microphoneEnabled) {
                             if (microphoneEnabled) {
                                 detectTapGestures(onPress = {
-                                    currentMicPress()
-                                    tryAwaitRelease()
-                                    currentMicRelease()
+                                    val press = PressInteraction.Press(it)
+                                    microphoneInteraction.emit(press)
+                                    var released = false
+                                    try {
+                                        currentMicPress()
+                                        released = tryAwaitRelease()
+                                    } finally {
+                                        microphoneInteraction.tryEmit(if (released) PressInteraction.Release(press) else PressInteraction.Cancel(press))
+                                        currentMicRelease()
+                                    }
                                 })
                             }
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
+                        if (isRecording) Icons.Default.Stop else Icons.Outlined.Mic,
                         contentDescription = null,
+                        modifier = Modifier.size(22.dp),
                         tint = if (isRecording) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
@@ -115,9 +131,11 @@ fun InputDock(
                         minLines = 1,
                         maxLines = 4,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = { if (canSend) onSend(text) }),
-                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "输入内容" },
+                        modifier = Modifier.fillMaxWidth().onFocusChanged { inputFocused = it.isFocused }
+                            .semantics { contentDescription = "输入内容" },
                         decorationBox = { innerTextField ->
                             if (text.isEmpty()) {
                                 Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -131,16 +149,20 @@ fun InputDock(
             FilledIconButton(
                 onClick = { onSend(text) },
                 enabled = canSend,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.size(48.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    disabledContainerColor = if (isSending) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                )
             ) {
                 if (isSending) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(22.dp).semantics { contentDescription = "正在处理" },
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 } else {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
+                    Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = "发送", modifier = Modifier.size(22.dp))
                 }
             }
         }

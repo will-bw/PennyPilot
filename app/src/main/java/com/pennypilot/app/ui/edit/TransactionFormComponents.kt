@@ -7,9 +7,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.outlined.AccessTime
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.DateRange
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -17,9 +17,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.domain.model.TxType
@@ -60,31 +65,42 @@ internal fun TransactionCategorySelection(
         val columns = (maxWidth / 88.dp).toInt().coerceIn(2, 6)
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             categories.chunked(columns).forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { category ->
                         val selected = category.id == selectedId
                         val shape = RoundedCornerShape(14.dp)
-                        Column(
+                        val label = category.name + if (!category.enabled) "（已停用）" else ""
+                        Box(
                             modifier = Modifier
                                 .weight(1f)
+                                .fillMaxHeight()
                                 .clip(shape)
                                 .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh)
                                 .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, shape)
                                 .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = { onSelect(category.id) })
-                                .semantics(mergeDescendants = true) {}
-                                .heightIn(min = 88.dp)
-                                .padding(horizontal = 4.dp, vertical = 10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                .semantics(mergeDescendants = true) { contentDescription = label }
+                                .heightIn(min = 96.dp)
                         ) {
-                            CatIcon(category.colorIndex, category.icon, size = 34)
-                            Text(
-                                category.name + if (!category.enabled) "（已停用）" else "",
-                                style = MaterialTheme.typography.labelMedium,
-                                textAlign = TextAlign.Center,
-                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
-                            )
-                            if (selected) Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                            Column(
+                                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 12.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                CatIcon(category.colorIndex, category.icon, size = 34)
+                                Text(
+                                    label,
+                                    modifier = Modifier.clearAndSetSemantics {},
+                                    style = MaterialTheme.typography.labelMedium,
+                                    textAlign = TextAlign.Center,
+                                    minLines = 2,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            if (selected) Icon(Icons.Outlined.Check, contentDescription = null,
+                                modifier = Modifier.align(Alignment.TopEnd).padding(5.dp).size(14.dp),
+                                tint = MaterialTheme.colorScheme.primary)
                         }
                     }
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
@@ -95,40 +111,21 @@ internal fun TransactionCategorySelection(
 }
 
 /** 日期和时刻分别提交，取消任一弹窗都不会修改另一个字段。 */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun TransactionDateTimeFields(occurredAt: Long, enabled: Boolean = true, onChange: (Long) -> Unit) {
     var showDate by rememberSaveable { mutableStateOf(false) }
     var showTime by rememberSaveable { mutableStateOf(false) }
     val local = remember(occurredAt) { Instant.ofEpochMilli(occurredAt).atZone(ZoneId.systemDefault()) }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(
-            onClick = { showDate = true },
-            enabled = enabled,
-            modifier = Modifier.weight(1f).heightIn(min = 56.dp),
-            shape = RoundedCornerShape(14.dp),
-            contentPadding = PaddingValues(12.dp)
-        ) {
-            Icon(Icons.Default.DateRange, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(8.dp))
-            Column {
-                Text("日期", style = MaterialTheme.typography.labelMedium)
-                Text(local.format(DateTimeFormatter.ofPattern("yyyy年M月d日")), style = MaterialTheme.typography.bodyMedium)
-            }
-        }
-        OutlinedButton(
-            onClick = { showTime = true },
-            enabled = enabled,
-            modifier = Modifier.weight(1f).heightIn(min = 56.dp),
-            shape = RoundedCornerShape(14.dp),
-            contentPadding = PaddingValues(12.dp)
-        ) {
-            Icon(Icons.Default.AccessTime, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(8.dp))
-            Column {
-                Text("时间", style = MaterialTheme.typography.labelMedium)
-                Text(local.format(DateTimeFormatter.ofPattern("HH:mm")), style = MaterialTheme.typography.bodyMedium)
-            }
+    val fontScale = LocalDensity.current.fontScale
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val stacked = maxWidth < 340.dp || fontScale > 1.2f
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
+            maxItemsInEachRow = if (stacked) 1 else 2) {
+            DateTimeField("日期", local.format(DateTimeFormatter.ofPattern("yyyy年M月d日")), Icons.Outlined.DateRange,
+                enabled, Modifier.weight(1f), onClick = { showDate = true })
+            DateTimeField("时间", local.format(DateTimeFormatter.ofPattern("HH:mm")), Icons.Outlined.AccessTime,
+                enabled, Modifier.weight(1f), onClick = { showTime = true })
         }
     }
     if (showDate) {
@@ -161,6 +158,20 @@ internal fun TransactionDateTimeFields(occurredAt: Long, enabled: Boolean = true
             },
             dismissButton = { TextButton(onClick = { showTime = false }) { Text("取消") } }
         )
+    }
+}
+
+@Composable
+private fun DateTimeField(label: String, value: String, icon: ImageVector, enabled: Boolean,
+    modifier: Modifier, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = 60.dp),
+        shape = RoundedCornerShape(14.dp), contentPadding = PaddingValues(12.dp)) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium)
+            Text(value, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 

@@ -1,10 +1,13 @@
 package com.pennypilot.app.ui.input
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Backspace
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -13,13 +16,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.pennypilot.app.R
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.edit.DiscardChangesDialog
@@ -78,12 +81,14 @@ fun KeypadSheet(
         containerColor = MaterialTheme.colorScheme.surface,
         dragHandle = null
     ) {
-        Column(Modifier.fillMaxWidth().imePadding()) {
+        Column(Modifier.fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+            .imePadding()) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("手动记账", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f))
+                Text("手动记账", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f).semantics { heading() })
                 TextButton(onClick = requestDismiss, enabled = !isSaving, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") }
             }
             Column(
@@ -99,7 +104,8 @@ fun KeypadSheet(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("金额（元）", style = MaterialTheme.typography.labelMedium)
-                        Text("¥ ${amount.display}", style = MaterialTheme.typography.headlineLarge)
+                        Text("¥ ${amount.display}", style = MaterialTheme.typography.headlineLarge, maxLines = 1,
+                            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()))
                         if (noteFocused) Text("点此继续输入金额", style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -144,10 +150,16 @@ fun KeypadSheet(
                     onClick = { focus.clearFocus(); onSave(txType, selectedId!!, amount.cents, note.trim(), occurredAt) },
                     enabled = amount.cents > 0 && selectedCategory != null && !isSaving,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                    shape = MaterialTheme.shapes.large
+                    shape = MaterialTheme.shapes.large,
+                    colors = ButtonDefaults.buttonColors(
+                        disabledContainerColor = if (isSaving) MaterialTheme.colorScheme.primaryContainer
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                        disabledContentColor = if (isSaving) MaterialTheme.colorScheme.onPrimaryContainer
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    )
                 ) {
                     if (isSaving) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimaryContainer)
                         Spacer(Modifier.width(8.dp))
                     }
                     Text(if (isSaving) "正在保存…" else "保存账目")
@@ -189,7 +201,7 @@ private fun KeypadGrid(enabled: Boolean, onDigit: (Char) -> Unit, onDot: () -> U
                         shape = MaterialTheme.shapes.large,
                         contentPadding = PaddingValues(8.dp)
                     ) {
-                        if (key == '⌫') Icon(painterResource(R.drawable.ic_backspace), contentDescription = "删除最后一位")
+                        if (key == '⌫') Icon(Icons.AutoMirrored.Outlined.Backspace, contentDescription = "删除最后一位", modifier = Modifier.size(22.dp))
                         else Text(key.toString(), style = MaterialTheme.typography.titleLarge)
                     }
                 }

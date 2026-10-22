@@ -1,6 +1,11 @@
 package com.pennypilot.app.ui.navigation
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -78,6 +83,15 @@ fun PennyPilotNavGraph(startEditTxId: Long = -1L, startRoute: String? = null) {
                     NavHost(
                         navController = navController,
                         startDestination = TabItem.TRANSACTIONS.route,
+                        // Tabs respond immediately. Detail pages fade through the background, avoiding overlapping text.
+                        enterTransition = {
+                            if (isTabChange(initialState.destination.route, targetState.destination.route)) EnterTransition.None
+                            else fadeIn(tween(durationMillis = 140, delayMillis = 90))
+                        },
+                        exitTransition = {
+                            if (isTabChange(initialState.destination.route, targetState.destination.route)) ExitTransition.None
+                            else fadeOut(tween(durationMillis = 90))
+                        },
                         modifier = Modifier.widthIn(max = 840.dp).fillMaxSize()
                     ) {
                         composable(TabItem.TRANSACTIONS.route) {
@@ -122,3 +136,6 @@ fun PennyPilotNavGraph(startEditTxId: Long = -1L, startRoute: String? = null) {
         }
     }
 }
+
+private fun isTabChange(from: String?, to: String?): Boolean =
+    TabItem.entries.any { it.route == from } && TabItem.entries.any { it.route == to }

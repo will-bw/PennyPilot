@@ -1,7 +1,6 @@
 package com.pennypilot.app.ui.transactions
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -12,15 +11,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -53,7 +53,7 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(top = 16.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item(key = "month") {
                 MonthHero(state, daysElapsed, vm::shiftMonth, vm::returnToCurrentMonth)
@@ -89,7 +89,7 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
                     LedgerFilter("支出", state.filter == TxFilter.Type(TxType.EXPENSE)) { vm.setFilter(TxFilter.Type(TxType.EXPENSE)) }
                     LedgerFilter("收入", state.filter == TxFilter.Type(TxType.INCOME)) { vm.setFilter(TxFilter.Type(TxType.INCOME)) }
                     val category = (state.filter as? TxFilter.Category)?.let { f -> state.categories.find { it.id == f.categoryId } }
-                    LedgerFilter(category?.name ?: "分类", state.filter is TxFilter.Category) { showCategories = true }
+                    LedgerFilter(category?.name ?: "分类", state.filter is TxFilter.Category, opensMenu = true) { showCategories = true }
                 }
             }
             when {
@@ -123,7 +123,7 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
                     }
                     state.dayGroups.forEach { group ->
                         item(key = "day_${group.date}") {
-                            Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text("${group.label} · ${group.dateText}", style = DayHeadDateStyle,
                                     modifier = Modifier.semantics { heading() })
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -175,14 +175,18 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
 @Composable
 private fun MonthHero(state: TransactionsUiState, daysElapsed: Int, shift: (Int) -> Unit, returnToCurrent: () -> Unit) {
     Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("${state.selectedMonth.year} 年 ${state.selectedMonth.monthValue} 月", style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.semantics { heading() })
-                Text("本月支出 · 已确认", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth < 340.dp || LocalDensity.current.fontScale > 1.2f) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MonthHeading(state)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { MonthNavigation(shift) }
+                }
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    MonthHeading(state, Modifier.weight(1f))
+                    MonthNavigation(shift)
+                }
             }
-            IconButton(onClick = { shift(-1) }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.ChevronLeft, "上一个月") }
-            IconButton(onClick = { shift(1) }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.ChevronRight, "下一个月") }
         }
         if (YearMonth.from(state.selectedMonth) != YearMonth.from(state.today)) {
             TextButton(onClick = returnToCurrent, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回本月") }
@@ -200,6 +204,21 @@ private fun MonthHero(state: TransactionsUiState, daysElapsed: Int, shift: (Int)
             }
         }
     }
+}
+
+@Composable
+private fun MonthHeading(state: TransactionsUiState, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text("${state.selectedMonth.year} 年 ${state.selectedMonth.monthValue} 月", style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.semantics { heading() })
+        Text("本月支出 · 已确认", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun MonthNavigation(shift: (Int) -> Unit) {
+    IconButton(onClick = { shift(-1) }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.ChevronLeft, "上一个月") }
+    IconButton(onClick = { shift(1) }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.ChevronRight, "下一个月") }
 }
 
 @Composable
@@ -236,11 +255,13 @@ private fun MonthStrip(values: List<Long>, windowStart: LocalDate, today: LocalD
 }
 
 @Composable
-private fun LedgerFilter(label: String, selected: Boolean, onClick: () -> Unit) {
-    FilterChip(selected = selected, onClick = onClick, label = { Text(label) },
-        modifier = Modifier.heightIn(min = 48.dp), shape = CircleShape,
+private fun LedgerFilter(label: String, selected: Boolean, opensMenu: Boolean = false, onClick: () -> Unit) {
+    FilterChip(selected = selected, onClick = onClick, label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        trailingIcon = if (opensMenu) ({ Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp)) }) else null,
+        modifier = Modifier.heightIn(min = 48.dp).widthIn(max = 220.dp), shape = CircleShape,
         colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary,
-            selectedLabelColor = MaterialTheme.colorScheme.onPrimary))
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+            selectedTrailingIconColor = MaterialTheme.colorScheme.onPrimary))
 }
 
 @Composable
@@ -294,7 +315,7 @@ private fun TransactionRow(item: TxWithCategory, busy: Boolean, onEdit: () -> Un
     val time = remember(tx.occurredAt) { java.time.Instant.ofEpochMilli(tx.occurredAt).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")) }
     val title = tx.merchant?.takeIf { it.isNotBlank() } ?: tx.note?.takeIf { it.isNotBlank() } ?: item.category?.name ?: "未命名账目"
     BoxWithConstraints(Modifier.fillMaxWidth().background(if (pending) MaterialTheme.pendingAmberSoftColor else MaterialTheme.colorScheme.surface)) {
-        val compact = maxWidth < 380.dp || LocalDensity.current.fontScale > 1.2f
+        val compact = maxWidth < 340.dp || LocalDensity.current.fontScale > 1.2f
         Column(
             Modifier.fillMaxWidth().then(if (!pending) Modifier.clickable(enabled = !busy, onClickLabel = "编辑账目", onClick = onEdit) else Modifier)
                 .padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 10.dp),
@@ -308,13 +329,15 @@ private fun TransactionRow(item: TxWithCategory, busy: Boolean, onEdit: () -> Un
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (compact) AmountText(tx.amount, tx.type, Modifier.fillMaxWidth(), TxAmountStyle)
                 }
-                if (!compact) AmountText(tx.amount, tx.type, style = TxAmountStyle)
+                if (!compact) AmountText(tx.amount, tx.type, Modifier.widthIn(max = 136.dp), TxAmountStyle)
                 if (!pending && onDelete != null) {
                     Box {
-                        IconButton(onClick = { menuOpen = true }, enabled = !busy) { Icon(Icons.Default.MoreVert, "账目操作") }
+                        IconButton(onClick = { menuOpen = true }, enabled = !busy) { Icon(Icons.Default.MoreVert, "$title，更多操作") }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(text = { Text("编辑") }, onClick = { menuOpen = false; onEdit() })
-                            DropdownMenuItem(text = { Text("删除", color = MaterialTheme.colorScheme.error) }, onClick = { menuOpen = false; onDelete() })
+                            DropdownMenuItem(text = { Text("编辑") }, onClick = { menuOpen = false; onEdit() },
+                                leadingIcon = { Icon(Icons.Outlined.Edit, null) })
+                            DropdownMenuItem(text = { Text("删除", color = MaterialTheme.colorScheme.error) }, onClick = { menuOpen = false; onDelete() },
+                                leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) })
                         }
                     }
                 }

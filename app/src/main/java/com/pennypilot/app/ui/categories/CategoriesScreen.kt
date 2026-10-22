@@ -1,26 +1,39 @@
 package com.pennypilot.app.ui.categories
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.components.CatIcon
+import com.pennypilot.app.ui.components.CategoryIconOptions
 import com.pennypilot.app.ui.components.LedgerState
 import com.pennypilot.app.ui.settings.ManagementHeader
 import com.pennypilot.app.ui.settings.ManagementMessage
@@ -54,7 +67,7 @@ fun CategoriesScreen(onBack: () -> Unit, vm: CategoriesViewModel = hiltViewModel
                 }
                 Spacer(Modifier.height(16.dp))
                 Button(onClick = { vm.clearError(); adding = true }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Icon(Icons.Default.Add, contentDescription = null)
+                    Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("新增${if (selectedType == TxType.EXPENSE) "支出" else "收入"}分类")
                 }
@@ -102,20 +115,26 @@ private fun CategoryRow(category: CategoryEntity, busy: Boolean, canMoveUp: Bool
             CatIcon(colorIndex = category.colorIndex, emoji = category.icon, size = 40)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(category.name, style = MaterialTheme.typography.titleMedium)
+                Text(category.name, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text("${if (category.enabled) "已启用" else "已停用"} · ${if (category.isPreset) "预设" else "自定义"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Switch(checked = category.enabled, onCheckedChange = { onToggle() }, enabled = !busy,
                 modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "${category.name}分类${if (category.enabled) "已启用" else "已停用"}" })
             Box {
                 IconButton(onClick = { menuOpen = true }, enabled = !busy, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "管理${category.name}分类")
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "管理${category.name}分类", modifier = Modifier.size(22.dp))
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("编辑分类") }, onClick = { menuOpen = false; onEdit() }, modifier = Modifier.heightIn(min = 48.dp))
-                    DropdownMenuItem(text = { Text("上移") }, onClick = { menuOpen = false; onMove(-1) }, enabled = canMoveUp, modifier = Modifier.heightIn(min = 48.dp))
-                    DropdownMenuItem(text = { Text("下移") }, onClick = { menuOpen = false; onMove(1) }, enabled = canMoveDown, modifier = Modifier.heightIn(min = 48.dp))
-                    if (!category.isPreset) DropdownMenuItem(text = { Text("删除分类", color = MaterialTheme.colorScheme.error) }, onClick = { menuOpen = false; onDelete() }, modifier = Modifier.heightIn(min = 48.dp))
+                    DropdownMenuItem(text = { Text("编辑分类") }, leadingIcon = { Icon(Icons.Outlined.Edit, null, Modifier.size(20.dp)) },
+                        onClick = { menuOpen = false; onEdit() }, modifier = Modifier.heightIn(min = 48.dp))
+                    DropdownMenuItem(text = { Text("上移") }, leadingIcon = { Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(20.dp)) },
+                        onClick = { menuOpen = false; onMove(-1) }, enabled = canMoveUp, modifier = Modifier.heightIn(min = 48.dp))
+                    DropdownMenuItem(text = { Text("下移") }, leadingIcon = { Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(20.dp)) },
+                        onClick = { menuOpen = false; onMove(1) }, enabled = canMoveDown, modifier = Modifier.heightIn(min = 48.dp))
+                    if (!category.isPreset) DropdownMenuItem(text = { Text("删除分类", color = MaterialTheme.colorScheme.error) },
+                        leadingIcon = { Icon(Icons.Outlined.Delete, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.error) },
+                        onClick = { menuOpen = false; onDelete() }, modifier = Modifier.heightIn(min = 48.dp))
                 }
             }
         }
@@ -127,11 +146,22 @@ private fun CategoryEditDialog(category: CategoryEntity?, initialType: TxType, b
     onDismiss: () -> Unit, onChange: () -> Unit, onSave: (String, String, TxType) -> Unit) {
     var name by rememberSaveable(category?.id) { mutableStateOf(category?.name.orEmpty()) }
     var icon by rememberSaveable(category?.id) { mutableStateOf(category?.icon ?: "📌") }
+    var customIcon by rememberSaveable(category?.id) {
+        mutableStateOf(CategoryIconOptions.none { it.value.replace("\uFE0F", "") == icon.replace("\uFE0F", "") })
+    }
     var type by rememberSaveable(category?.id) { mutableStateOf(category?.type ?: initialType) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text(if (category == null) "新增分类" else "编辑分类") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(value = name, onValueChange = { name = it; onChange() }, label = { Text("分类名称") }, supportingText = { Text("同类型下不重名 · ${name.trim().length}/20 字") }, isError = name.trim().length > 20, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = icon, onValueChange = { icon = it; onChange() }, label = { Text("分类图标") }, supportingText = { Text("输入一个常用 Emoji，例如餐饮用 🍜。") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
+            CategoryIconPicker(icon, enabled = !busy, onSelect = { icon = it; customIcon = false; onChange() })
+            if (customIcon) {
+                OutlinedTextField(value = icon, onValueChange = { icon = it; onChange() }, label = { Text("自定义符号") },
+                    supportingText = { Text("输入一个习惯使用的符号，或从上方选择常用图标。") },
+                    singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
+            } else {
+                TextButton(onClick = { customIcon = true; icon = ""; onChange() }, enabled = !busy,
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text("使用自定义符号") }
+            }
             if (category == null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(TxType.EXPENSE to "支出", TxType.INCOME to "收入").forEach { (value, label) ->
                     FilterChip(selected = type == value, onClick = { type = value; onChange() }, label = { Text(label) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
@@ -141,4 +171,35 @@ private fun CategoryEditDialog(category: CategoryEntity?, initialType: TxType, b
         } },
         confirmButton = { TextButton(onClick = { onSave(name, icon, type) }, enabled = !busy && name.isNotBlank() && icon.isNotBlank() && name.trim().length <= 20, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (busy) "保存中…" else "保存分类") } },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") } })
+}
+
+@Composable
+private fun CategoryIconPicker(value: String, enabled: Boolean, onSelect: (String) -> Unit) {
+    val normalized = value.replace("\uFE0F", "")
+    val choice = CategoryIconOptions.firstOrNull { it.value.replace("\uFE0F", "") == normalized }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("分类图标 · ${choice?.label ?: "自定义"}", style = MaterialTheme.typography.titleSmall)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val columns = (maxWidth / 52.dp).toInt().coerceIn(3, 6)
+            Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                CategoryIconOptions.chunked(columns).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        row.forEach { option ->
+                            val selected = option == choice
+                            Box(Modifier.weight(1f).heightIn(min = 48.dp)
+                                .clip(MaterialTheme.shapes.small)
+                                .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else Color.Transparent, MaterialTheme.shapes.small)
+                                .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = { onSelect(option.value) })
+                                .semantics { contentDescription = "${option.label}图标" }, contentAlignment = Alignment.Center) {
+                                Icon(option.icon, contentDescription = null, modifier = Modifier.size(22.dp),
+                                    tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+        }
+    }
 }

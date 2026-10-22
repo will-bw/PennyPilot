@@ -16,7 +16,6 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -72,9 +71,11 @@ fun ReportScreen(vm: ReportViewModel = hiltViewModel()) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedButton(onClick = { vm.regenerate(lastMonth) }, enabled = !generation.busy,
                     modifier = Modifier.heightIn(min = 48.dp)) {
-                    Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
+                    if (generation.busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary)
+                    else Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("${if (hasLastMonth) "重新生成" else "生成"} ${lastMonth.year} 年 ${lastMonth.monthValue} 月报告")
+                    Text(if (generation.busy) "正在生成报告…" else "${if (hasLastMonth) "重新生成" else "生成"} ${lastMonth.year} 年 ${lastMonth.monthValue} 月报告")
                 }
             }
         }

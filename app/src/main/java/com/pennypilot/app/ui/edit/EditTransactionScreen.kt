@@ -6,8 +6,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -54,13 +54,13 @@ fun EditTransactionScreen(
                 title = { Text(if (state.isEditing) "编辑账目" else "手动记账") },
                 navigationIcon = {
                     IconButton(onClick = leave, enabled = !state.isSaving) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
                     if (state.isEditing && !state.isLoading && !state.loadFailed) {
                         IconButton(onClick = { focusManager.clearFocus(); showDelete = true }, enabled = !state.isSaving) {
-                            Icon(Icons.Default.DeleteOutline, contentDescription = "删除这笔账目", tint = MaterialTheme.colorScheme.error)
+                            Icon(Icons.Outlined.Delete, contentDescription = "删除这笔账目", tint = MaterialTheme.colorScheme.error)
                         }
                     }
                 },
@@ -82,7 +82,7 @@ fun EditTransactionScreen(
                             shape = MaterialTheme.shapes.large
                         ) {
                             if (state.isSaving) {
-                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                CircularProgressIndicator(Modifier.size(18.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
                                 Spacer(Modifier.width(8.dp))
                             }
                             Text(if (state.isSaving) "正在保存…" else "保存账目")

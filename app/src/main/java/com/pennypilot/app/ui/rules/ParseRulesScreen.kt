@@ -7,7 +7,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
@@ -61,7 +62,7 @@ fun ParseRulesScreen(onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { vm.clearError(); adding = true }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("新增${PACKAGE_LABELS[selectedPackage]}规则")
+                    Icon(Icons.Outlined.Add, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("新增${PACKAGE_LABELS[selectedPackage]}规则")
                 }
             }
             if (error != null && !adding && editRule == null && !resetting) item { ManagementMessage(error!!, error = true) }
@@ -74,7 +75,8 @@ fun ParseRulesScreen(onBack: () -> Unit) {
                         Row(Modifier.fillMaxWidth().clickable(enabled = !busy) { vm.clearError(); editId = rule.id }.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("${if (rule.directionHint == "INCOME") "收入" else "支出"} · 优先级 ${rule.priority}", style = MaterialTheme.typography.titleMedium)
-                                Text(rule.regexAmount, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3)
+                                Text(rule.regexAmount, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
                                 Text(if (rule.enabled) "已启用" else "已停用", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Switch(checked = rule.enabled, onCheckedChange = { vm.toggleEnabled(rule) }, enabled = !busy,

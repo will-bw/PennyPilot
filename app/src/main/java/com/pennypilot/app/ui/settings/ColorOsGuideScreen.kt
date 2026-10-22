@@ -8,6 +8,8 @@ import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material3.*
 import com.pennypilot.app.service.NotificationCaptorService
 import androidx.compose.runtime.Composable
@@ -23,8 +25,6 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 
 @Composable
 fun ColorOsGuideScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-
     Column(
         modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -82,7 +82,11 @@ fun GuideStep(step: Int, title: String, desc: String, buttonText: String, onActi
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("$step. $title", style = MaterialTheme.typography.titleMedium)
             Text(desc, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            FilledTonalButton(onClick = onAction, modifier = Modifier.heightIn(min = 48.dp)) { Text(buttonText) }
+            FilledTonalButton(onClick = onAction, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(buttonText, modifier = Modifier.weight(1f, fill = false))
+                Spacer(Modifier.width(8.dp))
+                Icon(Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(20.dp))
+            }
         }
     }
 }

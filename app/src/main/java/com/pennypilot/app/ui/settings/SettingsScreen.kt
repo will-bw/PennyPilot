@@ -104,12 +104,13 @@ fun SettingsScreen(
                 SettingRow(Icons.Outlined.BatteryChargingFull, "后台运行引导", "检查通知、电池与自启动设置", onClick = onNavigateToColorOsGuide)
             }
             SettingsSection("智能助手") {
-                SettingRow(Icons.Outlined.AutoAwesome, "AI 服务设置", "选择供应商、模型与密钥", onClick = onNavigateToLlmSettings)
+                SettingRow(Icons.Outlined.AutoAwesome, "AI 服务设置", "账号登录、套餐用量与服务模型", onClick = onNavigateToLlmSettings)
                 SettingRow(Icons.Outlined.Mic, "语音识别", "使用设备提供的语音服务")
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(horizontal = 16.dp))
                 Row(Modifier.fillMaxWidth().toggleable(value = cloudParsingEnabled, enabled = !savingCloud,
                     role = Role.Switch, onValueChange = viewModel::setCloudParsingEnabled).padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    SettingIcon(Icons.Outlined.CloudQueue)
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("通知云端解析", style = MaterialTheme.typography.titleMedium)
                         Text("默认关闭。开启后，本地筛选出的支付通知正文会发送给所选 AI 服务，补充解析。",
@@ -217,13 +218,23 @@ private fun SettingRow(icon: ImageVector, title: String, subtitle: String, enabl
     Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick) else Modifier)
         .heightIn(min = 72.dp).padding(16.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.primaryContainer) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.padding(10.dp).size(22.dp))
-        }
+        SettingIcon(icon, muted = onClick == null)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(title, style = if (onClick == null) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium,
+                color = if (onClick == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (onClick != null) Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (onClick != null) Icon(Icons.Outlined.ChevronRight, contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+    }
+}
+
+@Composable
+private fun SettingIcon(icon: ImageVector, muted: Boolean = false) {
+    Surface(shape = MaterialTheme.shapes.small,
+        color = if (muted) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.primaryContainer) {
+        Icon(icon, contentDescription = null,
+            tint = if (muted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.padding(10.dp).size(22.dp))
     }
 }

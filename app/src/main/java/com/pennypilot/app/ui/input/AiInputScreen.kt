@@ -9,7 +9,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -17,15 +18,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.pennypilot.app.R
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.components.CatIcon
 import com.pennypilot.app.ui.components.InputDock
@@ -66,7 +67,7 @@ fun AiInputScreen(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("记一笔", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f))
+            Text("记一笔", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f).semantics { heading() })
             TextButton(
                 onClick = { focus.clearFocus(); vm.clearError(); showKeypad = true },
                 enabled = !state.isSaving && !state.isRecording && !state.isRecognizing,
@@ -133,10 +134,16 @@ fun AiInputScreen(
                         onClick = { focus.clearFocus(); vm.saveAll {} },
                         enabled = !state.isSaving && !state.isParsing,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                        shape = MaterialTheme.shapes.large
+                        shape = MaterialTheme.shapes.large,
+                        colors = ButtonDefaults.buttonColors(
+                            disabledContainerColor = if (state.isSaving) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                            disabledContentColor = if (state.isSaving) MaterialTheme.colorScheme.onPrimaryContainer
+                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        )
                     ) {
                         if (state.isSaving) {
-                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimaryContainer)
                             Spacer(Modifier.width(8.dp))
                         }
                         Text(if (state.isSaving) "正在保存…" else "保存 ${state.previewItems.size} 笔账目")
@@ -190,14 +197,17 @@ fun AiInputScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PreviewCard(item: PreviewItem, enabled: Boolean, onEdit: () -> Unit, onRemove: () -> Unit) {
-    Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 CatIcon(item.categoryColorIndex, item.categoryIcon, size = 40)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text(item.merchant ?: item.note ?: item.categoryName, style = MaterialTheme.typography.titleMedium)
+                    Text(item.merchant ?: item.note ?: item.categoryName, style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(item.categoryName, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         remember(item.occurredAt) { SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.getDefault()).format(Date(item.occurredAt)) },
@@ -211,15 +221,15 @@ private fun PreviewCard(item: PreviewItem, enabled: Boolean, onEdit: () -> Unit,
                 style = MaterialTheme.typography.titleLarge,
                 color = if (item.type == TxType.INCOME) MaterialTheme.incomeColor else MaterialTheme.colorScheme.onSurface
             )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = onRemove, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Outlined.Close, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("移除")
                 }
-                Spacer(Modifier.width(8.dp))
                 FilledTonalButton(onClick = onEdit, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) {
-                    Icon(painterResource(R.drawable.ic_pencil), contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Outlined.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("修改")
                 }

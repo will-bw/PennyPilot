@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -15,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -42,17 +44,35 @@ internal fun ChatContent(
 ) {
     val listState = rememberLazyListState()
     var confirmClear by rememberSaveable { mutableStateOf(false) }
+    var followLatest by rememberSaveable { mutableStateOf(true) }
+    var autoScrolling by remember { mutableStateOf(false) }
+    val showLatestShortcut by remember {
+        derivedStateOf { !followLatest && listState.canScrollForward }
+    }
     val keyboardHeight = WindowInsets.ime.getBottom(LocalDensity.current)
-    LaunchedEffect(state.messages.size, state.isLoading, keyboardHeight) {
+    LaunchedEffect(listState) {
+        snapshotFlow { Triple(listState.isScrollInProgress, listState.canScrollForward, autoScrolling) }
+            .collect { (scrolling, canScrollForward, automatic) ->
+                if (scrolling && !automatic) followLatest = !canScrollForward
+            }
+    }
+    LaunchedEffect(state.messages.lastOrNull()?.id, state.isLoading, keyboardHeight, followLatest) {
         val total = state.messages.size + if (state.isLoading) 1 else 0
-        if (total > 0) listState.animateScrollToItem(total - 1)
+        if (total > 0 && followLatest) {
+            autoScrolling = true
+            try {
+                listState.animateScrollToItem(total - 1)
+            } finally {
+                autoScrolling = false
+            }
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("问问", style = MaterialTheme.typography.headlineLarge)
+                Text("问问", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
                 Text("查收支、看变化，让账目更清楚", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
             }
@@ -66,9 +86,10 @@ internal fun ChatContent(
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             if (state.messages.isEmpty()) item {
                 LedgerState("从一个问题开始", "试着问问最近的支出、某个分类，或两个月的变化。回答可长按复制。")
-                FlowRow(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     state.suggestions.forEach { question ->
-                        SuggestionChip(onClick = { onSuggestion(question) }, enabled = !state.isLoading,
+                        SuggestionChip(onClick = { followLatest = true; onSuggestion(question) }, enabled = !state.isLoading,
                             label = { Text(question, style = MaterialTheme.typography.labelLarge) },
                             modifier = Modifier.heightIn(min = 48.dp))
                     }
@@ -92,7 +113,7 @@ internal fun ChatContent(
                             SelectionContainer { Text(message.text, style = MaterialTheme.typography.bodyLarge) }
                             message.chartData?.let { MiniChart(data = it) }
                             if (message.isError && state.failedQuestion != null) {
-                                TextButton(onClick = onRetry, enabled = !state.isLoading) { Text("重试这条问题") }
+                                TextButton(onClick = { followLatest = true; onRetry() }, enabled = !state.isLoading) { Text("重试这条问题") }
                             }
                         }
                     }
@@ -108,7 +129,14 @@ internal fun ChatContent(
                 }
             }
         }
-        InputDock(text = state.inputText, onTextChange = onInputChange, onSend = { onSend() },
+        if (showLatestShortcut && state.messages.isNotEmpty()) {
+            TextButton(onClick = { followLatest = true }, modifier = Modifier.align(Alignment.CenterHorizontally).heightIn(min = 48.dp)) {
+                Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("回到最新消息")
+            }
+        }
+        InputDock(text = state.inputText, onTextChange = onInputChange, onSend = { followLatest = true; onSend() },
             onMicPress = {}, onMicRelease = {}, showMicrophone = false,
             isSending = state.isLoading, placeholder = "例如：上周吃饭花了多少？",
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp))

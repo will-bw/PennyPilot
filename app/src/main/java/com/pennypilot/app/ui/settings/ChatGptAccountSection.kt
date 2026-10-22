@@ -2,11 +2,13 @@ package com.pennypilot.app.ui.settings
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -14,11 +16,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 internal const val CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage"
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ChatGptAccountSection(
     viewModel: LlmSettingsViewModel,
@@ -56,7 +62,7 @@ internal fun ChatGptAccountSection(
                     RadioButton(selected = account?.id == item.id, onClick = null, enabled = canAct)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(item.email, style = MaterialTheme.typography.bodyLarge)
+                        Text(item.email, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Text("账号 ${item.id.takeLast(6)} · ${if (!item.isSignedIn) "已退出，点按重新登录" else if (item.canUsePlan) "套餐已授权" else "尚未授权套餐"}",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -72,7 +78,7 @@ internal fun ChatGptAccountSection(
         }
         Text("完成授权后返回 PennyPilot。取消或超时后可以重新开始。",
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = {
                 auth.loginUrl?.let { try { openBrowser(it) } catch (_: Exception) { viewModel.showBrowserError() } }
             }, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("继续浏览器登录") }
@@ -82,6 +88,7 @@ internal fun ChatGptAccountSection(
     } else {
         Button(onClick = { viewModel.signIn(openBrowser = openBrowser) }, enabled = canAct,
             colors = ButtonDefaults.buttonColors(containerColor = Color.Black, contentColor = Color.White),
+            border = BorderStroke(1.dp, if (canAct) Color(0xFF646464) else MaterialTheme.colorScheme.outlineVariant),
             modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
             Text(if (auth.accounts.isEmpty()) "Continue with ChatGPT" else "添加 ChatGPT 账号")
         }
@@ -98,7 +105,7 @@ internal fun ChatGptAccountSection(
                 viewModel.signIn(account.id, requestPlanPermission = true, openBrowser = openBrowser)
             }, enabled = canAct, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("授权使用 ChatGPT 套餐") }
         } else {
-            Text("使用 ChatGPT 套餐", style = MaterialTheme.typography.titleMedium)
+            Text("AI 模型", style = MaterialTheme.typography.titleMedium)
             Text("额度与模型权限由账号及工作空间决定。达到限制时会提示，不会自动切换到其他付费服务。",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Box(Modifier.fillMaxWidth()) {
@@ -106,16 +113,25 @@ internal fun ChatGptAccountSection(
                 OutlinedButton(onClick = { modelMenu = true },
                     enabled = canAct && !models.loading && models.models.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
-                    Text(selected?.displayName ?: "选择可用模型", modifier = Modifier.weight(1f))
-                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                    Text(selected?.displayName ?: "选择可用模型", modifier = Modifier.weight(1f),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.Outlined.ArrowDropDown, contentDescription = null, modifier = Modifier.size(22.dp))
                 }
                 DropdownMenu(expanded = modelMenu, onDismissRequest = { modelMenu = false },
                     modifier = Modifier.heightIn(max = 320.dp).widthIn(max = 320.dp)) {
                     models.models.forEach { model ->
-                        DropdownMenuItem(text = { Column {
-                            Text(model.displayName)
-                            if (model.slug != model.displayName) Text(model.slug, style = MaterialTheme.typography.bodySmall)
-                        } }, onClick = { onModelSelected(model.slug); modelMenu = false })
+                        val isSelected = model.slug == selectedModel
+                        DropdownMenuItem(text = { Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(model.displayName, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (model.slug != model.displayName) Text(model.slug, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        } }, onClick = { onModelSelected(model.slug); modelMenu = false },
+                            trailingIcon = {
+                                if (isSelected) Icon(Icons.Outlined.Check, contentDescription = null,
+                                    modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                                else Spacer(Modifier.size(20.dp))
+                            }, modifier = Modifier.heightIn(min = 56.dp).semantics { this.selected = isSelected })
                     }
                 }
             }
@@ -128,7 +144,7 @@ internal fun ChatGptAccountSection(
                 models.models.none { it.slug == selectedModel }) {
                 ManagementMessage("之前保存的模型已不在当前列表中，请重新选择。", error = true)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = viewModel::refreshModels, enabled = canAct && !models.loading,
                     modifier = Modifier.heightIn(min = 48.dp)) { Text("刷新模型") }
                 TextButton(onClick = { viewModel.signIn(account.id, openBrowser = openBrowser) }, enabled = canAct,
@@ -143,7 +159,7 @@ internal fun ChatGptAccountSection(
     OutlinedButton(onClick = ::openUsage, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("查看与管理套餐用量")
         Spacer(Modifier.width(8.dp))
-        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+        Icon(Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(20.dp))
     }
     Text("具体额度、使用记录与本应用的使用限额，以 ChatGPT 官方设置为准。",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

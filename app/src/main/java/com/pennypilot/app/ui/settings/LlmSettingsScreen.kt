@@ -6,8 +6,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -71,7 +71,7 @@ fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("AI 服务", style = MaterialTheme.typography.titleMedium)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("chatgpt" to "ChatGPT", "deepseek" to "DeepSeek", "qwen" to "通义千问").forEach { (value, label) ->
                         FilterChip(selected = draft.provider == value, onClick = { changed(draft.copy(provider = value)) },
                             enabled = controlsEnabled, label = { Text(label) }, modifier = Modifier.heightIn(min = 48.dp))
@@ -151,7 +151,7 @@ fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
             }
         }, enabled = draft.provider.isNotBlank() && controlsEnabled,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-            if (saving) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
+            if (saving) { CircularProgressIndicator(Modifier.size(20.dp), color = LocalContentColor.current, strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
             Text(if (saving) "正在保存…" else "保存配置")
         }
         Text("登录凭据与 API Key 加密保存在本机，不包含在账本备份中。使用 AI 功能时，输入与相关账本查询数据会发送给所选服务。",
@@ -188,6 +188,7 @@ private fun SecretField(value: String, onChange: (String) -> Unit, enabled: Bool
         visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         trailingIcon = { IconButton(onClick = { visible = !visible }, enabled = enabled, modifier = Modifier.size(48.dp)) {
-            Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (visible) "隐藏密钥" else "显示密钥")
+            Icon(if (visible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                if (visible) "隐藏密钥" else "显示密钥", modifier = Modifier.size(22.dp))
         } }, modifier = Modifier.fillMaxWidth())
 }
