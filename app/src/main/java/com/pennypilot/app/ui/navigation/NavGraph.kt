@@ -113,7 +113,7 @@ fun PennyPilotNavGraph(startEditTxId: Long = -1L, startRoute: String? = null) {
                             val llmSettingsVm = hiltViewModel<LlmSettingsViewModel>()
                             LlmSettingsScreen(
                                 onBack = { navController.popBackStack() },
-                                keyStore = llmSettingsVm.keyStore
+                                viewModel = llmSettingsVm
                             )
                         }
                     }

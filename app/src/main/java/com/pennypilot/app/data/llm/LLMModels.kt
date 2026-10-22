@@ -2,6 +2,8 @@ package com.pennypilot.app.data.llm
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 
 @Serializable
@@ -11,7 +13,10 @@ data class Message(
     /** role = "tool" 时必填：对应 assistant 消息中的 tool_call id */
     @SerialName("tool_call_id") val toolCallId: String? = null,
     /** role = "assistant" 且模型发起工具调用时需回传 */
-    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null
+    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
+    /** Responses 无服务器状态的工具回合需要保留加密 reasoning；不发送给其他协议。 */
+    @Transient val responsesItems: JsonArray? = null,
+    @Transient val responsesAccountId: String? = null
 )
 
 @Serializable
@@ -85,7 +90,9 @@ data class FunctionCallData(
 data class AssistantMessage(
     @SerialName("role") val role: String = "assistant",
     @SerialName("content") val content: String? = null,
-    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null
+    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
+    @Transient val responsesItems: JsonArray? = null,
+    @Transient val responsesAccountId: String? = null
 )
 
 @Serializable

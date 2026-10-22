@@ -57,7 +57,7 @@ class SecureKeyStore(context: Context) {
         get() = read("qwen_key", "")
         set(value) = write("qwen_key", value)
 
-    /** 当前激活供应商："deepseek" / "qwen"；空串表示未选择（无默认值，须用户手动选择） */
+    /** 当前激活供应商：chatgpt / deepseek / qwen；空串表示未选择。 */
     var activeProvider: String
         get() = read("active_provider", "")
         set(value) = write("active_provider", value)
@@ -73,4 +73,12 @@ class SecureKeyStore(context: Context) {
     var deepSeekModel: String
         get() = read("deepseek_model", "deepseek-chat")
         set(value) = write("deepseek_model", value)
+
+    /** 不同 ChatGPT 工作空间的模型权限可能不同，因此按注册账号分别保存。 */
+    fun chatGptModel(accountId: String): String = read("chatgpt_model_$accountId", "")
+
+    fun setChatGptModel(accountId: String, model: String) {
+        require(accountId.isNotBlank() && model.isNotBlank())
+        write("chatgpt_model_$accountId", model)
+    }
 }

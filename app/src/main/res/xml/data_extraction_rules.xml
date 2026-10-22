@@ -2,8 +2,10 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="pennypilot_secrets.xml" />
+        <exclude domain="sharedpref" path="pennypilot_chatgpt_auth.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="pennypilot_secrets.xml" />
+        <exclude domain="sharedpref" path="pennypilot_chatgpt_auth.xml" />
     </device-transfer>
 </data-extraction-rules>

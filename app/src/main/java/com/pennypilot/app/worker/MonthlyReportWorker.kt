@@ -11,10 +11,10 @@ import androidx.work.workDataOf
 import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
-import com.pennypilot.app.data.llm.DynamicLlmClient
 import com.pennypilot.app.data.llm.Message
-import com.pennypilot.app.data.settings.SecureKeyStore
 import com.pennypilot.app.di.AppDatabaseHolder
+import com.pennypilot.app.di.AiClientEntryPoint
+import dagger.hilt.android.EntryPointAccessors
 import com.pennypilot.app.service.NotificationHelper
 import com.pennypilot.app.util.DateRanges
 import kotlinx.coroutines.CancellationException
@@ -94,7 +94,7 @@ class MonthlyReportWorker(context: Context, params: WorkerParameters) : Coroutin
         val catSummary = top3.joinToString("、") { "${it.categoryName} ${yuan(it.total)}元(${it.count}笔)" }
         val prompt = "请用2-3句话总结${month}的月度账单：总支出${yuan(expense)}元，总收入${yuan(income)}元，主要支出分类：$catSummary。语气轻松友好。"
         val summary = try {
-            DynamicLlmClient(SecureKeyStore(applicationContext))
+            EntryPointAccessors.fromApplication(applicationContext, AiClientEntryPoint::class.java).llmClient()
                 .chat(listOf(Message("user", prompt)), jsonMode = false)
         } catch (e: CancellationException) {
             throw e

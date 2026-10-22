@@ -5,6 +5,9 @@ package com.pennypilot.app.data.llm
  * 实现类：DeepSeekClient（主力）、QwenClient（备用）。
  */
 interface LLMClient {
+    /** 多阶段工具查询绑定一次配置；中途切换服务时必须终止，不能转发到新服务。 */
+    suspend fun forOperation(): LLMClient = this
+
     /**
      * 发送对话请求。
      * @param messages 对话消息列表
@@ -20,4 +23,7 @@ interface LLMClient {
     suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools
 }
 
-class LLMException(message: String, cause: Throwable? = null) : Exception(message, cause)
+open class LLMException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/** 已脱敏且适合展示给用户的错误，不能直接展示供应商的原始响应。 */
+class UserFacingLlmException(message: String, cause: Throwable? = null) : LLMException(message, cause)

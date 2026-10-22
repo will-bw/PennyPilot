@@ -4,6 +4,8 @@ import android.content.Context
 import com.pennypilot.app.data.llm.DynamicLlmClient
 import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.settings.SecureKeyStore
+import com.pennypilot.app.data.openai.auth.ChatGptAuthManager
+import dagger.hilt.EntryPoint
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -27,7 +29,14 @@ object NetworkModule {
      */
     @Provides
     @Singleton
-    fun provideLLMClient(keyStore: SecureKeyStore): LLMClient {
-        return DynamicLlmClient(keyStore)
+    fun provideLLMClient(keyStore: SecureKeyStore, auth: ChatGptAuthManager): LLMClient {
+        return DynamicLlmClient(keyStore, auth)
     }
+}
+
+/** WorkManager 的普通 Worker 也复用同一个认证会话，避免并发刷新旋转令牌。 */
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface AiClientEntryPoint {
+    fun llmClient(): LLMClient
 }

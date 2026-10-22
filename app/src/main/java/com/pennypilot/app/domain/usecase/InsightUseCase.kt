@@ -122,7 +122,8 @@ class InsightUseCase @Inject constructor(
         messages.add(Message("user", question))
 
         return try {
-            val response: ChatResponseWithTools = llmClient.chatWithTools(messages, tools)
+            val client = llmClient.forOperation()
+            val response: ChatResponseWithTools = client.chatWithTools(messages, tools)
             val choice = response.choices.firstOrNull()
                 ?: return InsightResult("暂时没有收到回答，请重试。", isError = true)
 
@@ -146,15 +147,19 @@ class InsightUseCase @Inject constructor(
                 Message(
                     role = "assistant",
                     content = choice.message?.content ?: "",
-                    toolCalls = toolCalls
+                    toolCalls = toolCalls,
+                    responsesItems = choice.message?.responsesItems,
+                    responsesAccountId = choice.message?.responsesAccountId
                 )
             )
             followUpMessages.addAll(toolMessages)
 
-            val finalResponse = llmClient.chat(followUpMessages, jsonMode = false)
+            val finalResponse = client.chat(followUpMessages, jsonMode = false)
             InsightResult(answer = finalResponse, chartData = chartData)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: com.pennypilot.app.data.llm.UserFacingLlmException) {
+            InsightResult(answer = e.message ?: "AI 服务暂时不可用，请稍后再试。", isError = true)
         } catch (e: Exception) {
             InsightResult(answer = "查询出错了，请检查网络和 AI 服务设置后重试。", isError = true)
         }

@@ -1,25 +1,58 @@
 package com.pennypilot.app.data.llm
 
 import com.pennypilot.app.data.settings.SecureKeyStore
+import com.pennypilot.app.data.openai.ChatGptClient
+import com.pennypilot.app.data.openai.auth.ChatGptAuthManager
 
 /**
  * 动态 LLM 路由器：每次调用时实时读取 [SecureKeyStore]，
- * 将请求转发给用户当前手动选择的供应商实现（DeepSeek / Qwen）。
+ * 将请求转发给用户选择的服务（ChatGPT 套餐 / DeepSeek / Qwen）。
  *
  * 与「启动时固定单例」不同，切换供应商、模型或 Base URL 后
  * 下一次请求立即生效，无需重启 App。
  * 内部按「provider|key|model|baseUrl」签名缓存实例，避免重复创建 OkHttpClient。
  */
-class DynamicLlmClient(private val keyStore: SecureKeyStore) : LLMClient {
+class DynamicLlmClient(
+    private val keyStore: SecureKeyStore,
+    private val chatGptAuth: ChatGptAuthManager
+) : LLMClient {
 
     private var cacheKey: String? = null
     private var cached: LLMClient? = null
+
+    override suspend fun forOperation(): LLMClient {
+        if (keyStore.activeProvider == "chatgpt") chatGptAuth.awaitReady()
+        val expected = configuration()
+        val delegate = resolve()
+        return GuardedLlmOperation(delegate) { configuration() == expected }
+    }
+
+    // 只在内存比较；不能日志输出包含旧 API Key 的配置指纹。
+    private fun configuration(): List<String> = when (val provider = keyStore.activeProvider) {
+        "chatgpt" -> chatGptAuth.state.value.activeAccount.let { account ->
+            listOf(provider, account?.id.orEmpty(), account?.isSignedIn.toString(), account?.canUsePlan.toString(),
+                account?.id?.let(keyStore::chatGptModel).orEmpty())
+        }
+        "deepseek" -> listOf(provider, keyStore.deepSeekKey, keyStore.deepSeekModel)
+        "qwen" -> listOf(provider, keyStore.qwenKey, keyStore.qwenModel, keyStore.qwenBaseUrl)
+        else -> listOf(provider)
+    }
 
     @Synchronized
     private fun resolve(): LLMClient {
         val provider = keyStore.activeProvider
         if (provider.isBlank()) {
-            throw LLMException("尚未选择 AI 供应商，请到「设置 → AI 设置」手动选择 DeepSeek 或通义千问")
+            throw UserFacingLlmException("请先到「我的 → AI 设置」登录 ChatGPT，或配置其他 AI 服务。")
+        }
+        if (provider == "chatgpt") {
+            // OAuth 的凭据和刷新由同一个单例管理，不放进缓存签名或日志。
+            return ChatGptClient(chatGptAuth) {
+                val account = chatGptAuth.state.value.activeAccount
+                    ?: throw UserFacingLlmException("请到「我的 → AI 设置」登录 ChatGPT。")
+                keyStore.chatGptModel(account.id).ifBlank {
+                    throw UserFacingLlmException("请到「我的 → AI 设置」选择并保存此账号的模型。")
+                }
+            }
         }
         val apiKey = when (provider) {
             "deepseek" -> keyStore.deepSeekKey
