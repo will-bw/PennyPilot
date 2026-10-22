@@ -3,14 +3,21 @@ package com.pennypilot.app.ui.settings
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 
 @Composable
 fun ColorOsGuideScreen(onBack: () -> Unit) {
@@ -23,7 +30,7 @@ fun ColorOsGuideScreen(onBack: () -> Unit) {
         TextButton(onClick = onBack) { Text("← 返回") }
         Text("ColorOS 保活引导", style = MaterialTheme.typography.headlineLarge)
         Text(
-            "OPPO 系统会积极杀后台，需要手动设置以下 3 步才能保证通知捕获正常工作。",
+            "不同 ColorOS 版本的后台管理入口可能不同。先开启通知使用权，再按需要检查电池优化、自启动和后台运行。",
             style = MaterialTheme.typography.bodyLarge
         )
 
@@ -38,19 +45,7 @@ fun ColorOsGuideScreen(onBack: () -> Unit) {
         }
 
         // Step 2: Battery optimization
-        GuideStep(
-            step = 2,
-            title = "关闭电池优化",
-            desc = "弹出系统对话框，选择「不优化」",
-            buttonText = "去设置"
-        ) {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:${context.packageName}")
-            }
-            try { context.startActivity(intent) } catch (_: Exception) {
-                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-            }
-        }
+        BatteryOptimizationGuideStep()
 
         // Step 3: Auto-start (manual)
         GuideStep(
@@ -72,6 +67,36 @@ fun ColorOsGuideScreen(onBack: () -> Unit) {
                 Text("• 锁屏后收不到？→ 微信设置里开启「通知显示消息详情」", style = MaterialTheme.typography.bodySmall)
             }
         }
+    }
+}
+
+/** 两个引导入口共享跳转和前台状态刷新，系统设置成功打开不等于已获得豁免。 */
+@Composable
+fun BatteryOptimizationGuideStep() {
+    val context = LocalContext.current
+    var exempt by remember { mutableStateOf<Boolean?>(null) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        exempt = BatteryOptimizationSettings.isExempt(context)
+    }
+    val status = when (exempt) {
+        true -> "系统状态：已设为不优化。"
+        false -> "系统状态：未设为不优化。"
+        null -> "系统状态：暂无法读取，请在系统设置中确认。"
+    }
+    GuideStep(
+        step = 2,
+        title = "检查电池优化",
+        desc = "$status 打开系统列表后找到 PennyPilot；如后台捕获不稳定，可按需选择「不优化」。",
+        buttonText = "打开电池优化设置"
+    ) {
+        val feedback = when (BatteryOptimizationSettings.open(context)) {
+            BatterySettingsDestination.OPTIMIZATION_LIST -> null
+            BatterySettingsDestination.APP_DETAILS ->
+                "当前系统未提供电池优化列表，已打开应用详情，请查看电池或耗电管理。"
+            BatterySettingsDestination.UNAVAILABLE ->
+                "无法打开系统设置，请手动进入设置中的电池或应用耗电管理，找到 PennyPilot。"
+        }
+        feedback?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
     }
 }
 

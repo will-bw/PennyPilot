@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pennypilot.app.ui.settings.GuideStep
+import com.pennypilot.app.ui.settings.BatteryOptimizationGuideStep
 import com.pennypilot.app.ui.theme.PageSubStyle
 
 /**
@@ -33,7 +34,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
     ) {
         Text("欢迎使用 PennyPilot", style = MaterialTheme.typography.headlineLarge)
         Text(
-            "让 AI 替你记账。微信/支付宝自动捕获需要 3 步系统设置，现在完成只需 1 分钟。",
+            "微信/支付宝通知捕获需要通知使用权；如后台捕获不稳定，可按下面的步骤检查系统设置。",
             style = PageSubStyle,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -47,19 +48,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
             context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         }
 
-        GuideStep(
-            step = 2,
-            title = "关闭电池优化",
-            desc = "弹出系统对话框，选择「不优化」",
-            buttonText = "去设置"
-        ) {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:${context.packageName}")
-            }
-            try { context.startActivity(intent) } catch (_: Exception) {
-                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-            }
-        }
+        BatteryOptimizationGuideStep()
 
         GuideStep(
             step = 3,

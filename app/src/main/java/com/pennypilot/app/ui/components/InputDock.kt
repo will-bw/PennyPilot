@@ -40,10 +40,10 @@ fun InputDock(
     onSend: (String) -> Unit,
     onMicPress: () -> Unit,
     onMicRelease: () -> Unit,
+    modifier: Modifier = Modifier,
     isRecording: Boolean = false,
     isSending: Boolean = false,
-    placeholder: String = "输入或按住说话…",
-    modifier: Modifier = Modifier
+    placeholder: String = "输入或按住说话…"
 ) {
     val borderColor = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
     val shape = RoundedCornerShape(99.dp)
