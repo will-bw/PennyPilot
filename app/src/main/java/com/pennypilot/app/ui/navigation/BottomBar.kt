@@ -4,30 +4,25 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.FormatListBulleted
-import androidx.compose.material.icons.automirrored.outlined.ShowChart
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pennypilot.app.R
 import com.pennypilot.app.ui.theme.priGradient
 
-enum class TabItem(val label: String, val route: String, val icon: ImageVector) {
-    TRANSACTIONS("流水", "transactions", Icons.AutoMirrored.Outlined.FormatListBulleted),
-    CHAT("问问", "chat", Icons.Outlined.ChatBubbleOutline),
-    ADD("记一笔", "add", Icons.Outlined.Add),
-    REPORT("报告", "report", Icons.AutoMirrored.Outlined.ShowChart),
-    SETTINGS("我的", "settings", Icons.Outlined.Person)
+enum class TabItem(val label: String, val route: String, val iconRes: Int) {
+    TRANSACTIONS("流水", "transactions", R.drawable.ic_list),
+    CHAT("问问", "chat", R.drawable.ic_message_sparkle),
+    ADD("记一笔", "add", R.drawable.ic_plus),
+    REPORT("报告", "report", R.drawable.ic_chart_line),
+    SETTINGS("我的", "settings", R.drawable.ic_circle_user)
 }
 
 @Composable
@@ -96,7 +91,7 @@ fun PennyPilotBottomBar(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    Icons.Outlined.Add,
+                    painterResource(R.drawable.ic_plus),
                     contentDescription = "记一笔",
                     tint = Color.White
                 )
@@ -123,7 +118,7 @@ private fun TabButton(
     ) {
         // 21dp 线性图标，选中态主色
         Icon(
-            item.icon,
+            painterResource(item.iconRes),
             contentDescription = item.label,
             tint = color,
             modifier = Modifier.size(21.dp)

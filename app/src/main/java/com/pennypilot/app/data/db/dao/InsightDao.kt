@@ -20,6 +20,13 @@ data class DailyAggregate(
     val total: Long
 )
 
+/** 按月聚合结果（金额单位：分） */
+@Serializable
+data class MonthlyTrend(
+    val ym: String,
+    val total: Long
+)
+
 /**
  * 洞察查询 DAO：为 InsightUseCase 提供聚合 / 明细查询能力。
  */
@@ -52,6 +59,16 @@ interface InsightDao {
         """
     )
     suspend fun aggregateByDay(start: Long, end: Long): List<DailyAggregate>
+
+    @Query(
+        """
+        SELECT strftime('%Y-%m', occurred_at / 1000, 'unixepoch', 'localtime') as ym, COALESCE(SUM(amount), 0) as total
+        FROM transactions
+        WHERE status = 'CONFIRMED' AND type = 'EXPENSE' AND occurred_at >= :start AND occurred_at < :end
+        GROUP BY ym ORDER BY ym ASC
+        """
+    )
+    suspend fun monthlyExpenseTrend(start: Long, end: Long): List<MonthlyTrend>
 
     @Query(
         """

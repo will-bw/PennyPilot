@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -43,6 +44,7 @@ fun AiInputScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     val allCategories by vm.allCategories.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    var showKeypad by remember { mutableStateOf(false) }
 
     // 录音运行时权限：按住麦克风前先检查/申请，避免 SpeechRecognizer 静默失败
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -60,8 +62,27 @@ fun AiInputScreen(
     ) {
         Spacer(Modifier.height(8.dp))
 
-        // Page title
-        Text("记一笔", style = MaterialTheme.typography.headlineLarge)
+        // Page title + 手动兜底入口
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("记一笔", style = MaterialTheme.typography.headlineLarge)
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(99.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(99.dp))
+                    .clickable { showKeypad = true }
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
+            ) {
+                Text(
+                    "手动",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
 
         // Hint card (indigo gradient)
         Card(
@@ -190,6 +211,16 @@ fun AiInputScreen(
             isRecording = state.isRecording,
             // 底部预留 26dp：FAB 凸出 TabBar 16dp + 10dp 间隙，避免 dock 与 FAB 互相遮挡
             modifier = Modifier.padding(bottom = 26.dp)
+        )
+    }
+
+    if (showKeypad) {
+        KeypadSheet(
+            categories = allCategories,
+            onDismiss = { showKeypad = false },
+            onSave = { type, categoryId, cents, note ->
+                vm.saveManual(type, categoryId, cents, note) { showKeypad = false }
+            }
         )
     }
 }

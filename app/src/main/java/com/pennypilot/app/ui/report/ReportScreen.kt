@@ -11,6 +11,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -21,6 +22,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.pennypilot.app.data.db.dao.DailyAggregate
+import com.pennypilot.app.data.db.dao.MonthlyTrend
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.ui.components.CatIcon
@@ -32,6 +35,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.time.LocalDate
 import java.time.Month
 import java.time.format.TextStyle
 import java.util.Locale
@@ -44,6 +48,8 @@ private data class TopCat(val name: String, val total: Long)
 fun ReportScreen(vm: ReportViewModel = hiltViewModel()) {
     val reports by vm.reports.collectAsStateWithLifecycle()
     val categories by vm.categories.collectAsStateWithLifecycle()
+    val trend by vm.trend.collectAsStateWithLifecycle()
+    val heat by vm.heat.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // 按月份倒序：最新一份为当月 Hero，其余进历史列表
@@ -140,6 +146,44 @@ fun ReportScreen(vm: ReportViewModel = hiltViewModel()) {
                 }
                 item { Top3Card(top3, latest.totalExpense, categories) }
             }
+
+            // 近 6 个月支出趋势
+            if (trend.isNotEmpty()) {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        Text("支出趋势", fontSize = 13.sp, fontWeight = FontWeight.W700)
+                        Text(
+                            "近 6 个月",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.W600,
+                            color = MaterialTheme.faintColor
+                        )
+                    }
+                }
+                item { TrendCard(trend) }
+            }
+
+            // 当月支出热力
+            item {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    Text("支出热力", fontSize = 13.sp, fontWeight = FontWeight.W700)
+                    Text(
+                        "${LocalDate.now().monthValue} 月 · 按日",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.W600,
+                        color = MaterialTheme.faintColor
+                    )
+                }
+            }
+            item { HeatmapCard(heat) }
 
             // 历史报告列表
             if (history.isNotEmpty()) {
@@ -484,5 +528,142 @@ private fun parseTopCats(json: String): List<TopCat> {
         }
     } catch (_: Exception) {
         emptyList()
+    }
+}
+
+/** 近 6 个月支出柱状卡：普通柱 primaryContainer，当月靛蓝渐变 */
+@Composable
+private fun TrendCard(trend: List<MonthlyTrend>) {
+    Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            val max = trend.maxOf { it.total }.coerceAtLeast(1)
+            Row(
+                modifier = Modifier.fillMaxWidth().height(110.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                trend.forEachIndexed { i, t ->
+                    val current = i == trend.lastIndex
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            if (t.total > 0) "¥${t.total / 100}" else "",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.W600,
+                            color = MaterialTheme.faintColor
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(((t.total * 72 / max).toInt().coerceAtLeast(2)).dp)
+                                .background(
+                                    if (current) Brush.verticalGradient(MaterialTheme.priGradient)
+                                    else SolidColor(MaterialTheme.colorScheme.primaryContainer),
+                                    RoundedCornerShape(6.dp)
+                                )
+                        )
+                        Text(
+                            "${t.ym.substring(5).toInt()}月",
+                            fontSize = 10.sp,
+                            color = if (current) MaterialTheme.colorScheme.onSurface
+                                    else MaterialTheme.faintColor,
+                            fontWeight = if (current) FontWeight.Bold else FontWeight.W600
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 当月日历热力卡：周一首列，日支出 4 档 alpha(primary)，无支出浅底 */
+@Composable
+private fun HeatmapCard(days: List<DailyAggregate>) {
+    val now = LocalDate.now()
+    val byDay = remember(days) { days.associate { it.day to it.total } }
+    val max = days.maxOfOrNull { it.total } ?: 0L
+    val leading = now.withDayOfMonth(1).dayOfWeek.value - 1
+    val daysInMonth = now.lengthOfMonth()
+    val ym = "%04d-%02d".format(now.year, now.monthValue)
+
+    Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("一", "二", "三", "四", "五", "六", "日").forEach { d ->
+                    Text(
+                        d,
+                        modifier = Modifier.weight(1f),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.W600,
+                        color = MaterialTheme.faintColor
+                    )
+                }
+            }
+            val cells = (0 until (leading + daysInMonth + 6) / 7 * 7).map { idx ->
+                val d = idx - leading + 1
+                if (d in 1..daysInMonth) d else null
+            }
+            cells.chunked(7).forEach { week ->
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    week.forEach { d ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(16.dp)
+                                .background(
+                                    heatColor(d?.let { byDay["$ym-${"%02d".format(it)}"] } ?: 0L, max),
+                                    RoundedCornerShape(5.dp)
+                                )
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End
+            ) {
+                Text("少", fontSize = 10.sp, color = MaterialTheme.faintColor)
+                listOf(0L, 1L, 1L, 1L, 1L).forEachIndexed { i, _ ->
+                    Spacer(Modifier.width(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .background(
+                                when (i) {
+                                    0 -> heatColor(0L, 100L)
+                                    1 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                                    2 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                    3 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
+                                    else -> MaterialTheme.colorScheme.primary
+                                },
+                                RoundedCornerShape(3.dp)
+                            )
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+                Text("多", fontSize = 10.sp, color = MaterialTheme.faintColor)
+            }
+        }
+    }
+}
+
+@Composable
+private fun heatColor(total: Long, max: Long): androidx.compose.ui.graphics.Color {
+    val primary = MaterialTheme.colorScheme.primary
+    return when {
+        total <= 0 || max <= 0 -> MaterialTheme.colorScheme.outlineVariant
+        else -> primary.copy(
+            alpha = when {
+                total * 4 <= max -> 0.25f
+                total * 2 <= max -> 0.5f
+                total * 4 <= max * 3 -> 0.75f
+                else -> 1f
+            }
+        )
     }
 }

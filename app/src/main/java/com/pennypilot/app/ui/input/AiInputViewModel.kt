@@ -147,6 +147,31 @@ class AiInputViewModel @Inject constructor(
         }
     }
 
+    fun saveManual(
+        type: TxType,
+        categoryId: Long,
+        amountCents: Long,
+        note: String,
+        onDone: () -> Unit
+    ) {
+        viewModelScope.launch {
+            val amount = if (type == TxType.EXPENSE) amountCents else -amountCents
+            txDao.insert(
+                TransactionEntity(
+                    amount = amount,
+                    type = type,
+                    categoryId = categoryId,
+                    note = note.ifBlank { null },
+                    merchant = null,
+                    occurredAt = System.currentTimeMillis(),
+                    source = TxSource.MANUAL,
+                    status = TxStatus.CONFIRMED
+                )
+            )
+            onDone()
+        }
+    }
+
     fun startRecording() {
         _state.update { it.copy(isRecording = true) }
         speechManager.startListening { result ->

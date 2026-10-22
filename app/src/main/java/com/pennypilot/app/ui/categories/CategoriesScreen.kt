@@ -7,18 +7,17 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.pennypilot.app.R
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.components.CatIcon
@@ -79,13 +78,13 @@ fun CategoriesScreen(
                             }
                             // Edit / Delete buttons
                             Icon(
-                                imageVector = Icons.Default.Edit,
+                                painter = painterResource(R.drawable.ic_pencil),
                                 contentDescription = "编辑",
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.clickable { editCat = cat }.size(30.dp)
                             )
                             Icon(
-                                imageVector = Icons.Default.Delete,
+                                painter = painterResource(R.drawable.ic_trash),
                                 contentDescription = "删除",
                                 tint = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.clickable { deleteTarget = cat }.size(30.dp)
