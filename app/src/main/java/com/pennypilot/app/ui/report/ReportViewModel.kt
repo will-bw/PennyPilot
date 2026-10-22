@@ -8,17 +8,22 @@ import com.pennypilot.app.data.db.dao.MonthlyReportDao
 import com.pennypilot.app.data.db.dao.MonthlyTrend
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
+import com.pennypilot.app.util.DateRanges
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import java.time.LocalDate
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
+import java.time.YearMonth
 import javax.inject.Inject
 
 @HiltViewModel
+@OptIn(ExperimentalCoroutinesApi::class)
 class ReportViewModel @Inject constructor(
     reportDao: MonthlyReportDao,
     categoryDao: CategoryDao,
@@ -32,28 +37,31 @@ class ReportViewModel @Inject constructor(
     val categories: StateFlow<List<CategoryEntity>> = categoryDao.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    /** 近 6 个月（含当月）每月支出，缺月补 0，升序 */
-    val trend: StateFlow<List<MonthlyTrend>> = flow {
-        val now = LocalDate.now()
-        val startMonth = now.minusMonths(5).withDayOfMonth(1)
-        val startMs = startMonth.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        val endMs = now.plusMonths(1).withDayOfMonth(1)
-            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        val byYm = insightDao.monthlyExpenseTrend(startMs, endMs).associateBy { it.ym }
-        val fmt = DateTimeFormatter.ofPattern("yyyy-MM")
-        emit((0 until 6).map { i ->
-            val ym = startMonth.plusMonths(i.toLong()).format(fmt)
-            byYm[ym] ?: MonthlyTrend(ym, 0)
-        })
+    // 页面保持打开跨月时也重建查询；后台没有订阅者时停止计时。
+    private val currentMonth = flow {
+        while (true) {
+            emit(YearMonth.now())
+            delay(60_000)
+        }
+    }.distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), YearMonth.now())
+
+    /** Room Flow 在新增、编辑、删除与确认交易后重新聚合。 */
+    val trend: StateFlow<List<MonthlyTrend>> = currentMonth.flatMapLatest { month ->
+        val first = month.minusMonths(5)
+        insightDao.observeMonthlyExpenseTrend(DateRanges.month(first).start, DateRanges.month(month).endExclusive)
+            .map { rows ->
+                val byYm = rows.associateBy { it.ym }
+                (0 until 6).map { i ->
+                    val ym = first.plusMonths(i.toLong()).toString()
+                    byYm[ym] ?: MonthlyTrend(ym, 0)
+                }
+            }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /** 当月每日支出（热力格数据） */
-    val heat: StateFlow<List<com.pennypilot.app.data.db.dao.DailyAggregate>> = flow {
-        val now = LocalDate.now()
-        val startMs = now.withDayOfMonth(1)
-            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        val endMs = now.plusMonths(1).withDayOfMonth(1)
-            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() - 1
-        emit(insightDao.aggregateByDay(startMs, endMs))
+    val heat: StateFlow<List<com.pennypilot.app.data.db.dao.DailyAggregate>> = currentMonth.flatMapLatest { month ->
+        val range = DateRanges.month(month)
+        insightDao.observeDailyExpenses(range.start, range.endExclusive)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 }

@@ -30,6 +30,8 @@ import com.pennypilot.app.ui.theme.priGradient
 @Composable
 fun KeypadSheet(
     categories: List<CategoryEntity>,
+    isSaving: Boolean = false,
+    error: String? = null,
     onDismiss: () -> Unit,
     onSave: (type: TxType, categoryId: Long, amountCents: Long, note: String) -> Unit
 ) {
@@ -45,7 +47,7 @@ fun KeypadSheet(
         if (pool.none { it.id == selectedId }) selectedId = pool.firstOrNull()?.id
     }
 
-    val canSave = amount.cents > 0 && selectedId != null
+    val canSave = amount.cents > 0 && selectedId != null && !isSaving
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -133,6 +135,10 @@ fun KeypadSheet(
                 onBackspace = { amount = amount.backspace() }
             )
 
+            if (error != null) {
+                Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -148,7 +154,7 @@ fun KeypadSheet(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    "保存",
+                    if (isSaving) "保存中…" else "保存",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp,

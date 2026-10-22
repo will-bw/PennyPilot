@@ -11,22 +11,33 @@ interface TransactionDao {
     @Insert
     suspend fun insert(tx: TransactionEntity): Long
 
+    /** 唯一 capture_event_key 冲突返回 -1；不覆盖已确认或忽略的原账目。 */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCaptured(tx: TransactionEntity): Long
+
+    @Query("SELECT EXISTS(SELECT 1 FROM transactions WHERE capture_event_key = :eventKey)")
+    suspend fun hasCaptureEvent(eventKey: String): Boolean
+
     @Update
     suspend fun update(tx: TransactionEntity)
 
-    @Query("UPDATE transactions SET status = :status WHERE id = :id")
-    suspend fun updateStatus(id: Long, status: TxStatus)
+    @Query("UPDATE transactions SET status = :status WHERE id = :id AND status = 'PENDING' AND :status IN ('CONFIRMED', 'IGNORED')")
+    suspend fun updateStatus(id: Long, status: TxStatus): Int
 
-    @Query("SELECT * FROM transactions WHERE status != 'IGNORED' AND occurred_at BETWEEN :start AND :end ORDER BY occurred_at DESC")
+    /** 通知动作同时绑定事件身份；恢复后复用同一自增 ID 不会改到别的账目。 */
+    @Query("UPDATE transactions SET status = :status WHERE id = :id AND capture_event_key = :eventKey AND status = 'PENDING' AND :status IN ('CONFIRMED', 'IGNORED')")
+    suspend fun updateCapturedStatus(id: Long, eventKey: String, status: TxStatus): Int
+
+    @Query("SELECT * FROM transactions WHERE status != 'IGNORED' AND occurred_at >= :start AND occurred_at < :end ORDER BY occurred_at DESC")
     fun observeByMonth(start: Long, end: Long): Flow<List<TransactionEntity>>
 
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: Long): TransactionEntity?
 
-    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'EXPENSE' AND status = 'CONFIRMED' AND occurred_at BETWEEN :start AND :end")
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'EXPENSE' AND status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end")
     fun observeMonthExpense(start: Long, end: Long): Flow<Long>
 
-    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'INCOME' AND status = 'CONFIRMED' AND occurred_at BETWEEN :start AND :end")
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'INCOME' AND status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end")
     fun observeMonthIncome(start: Long, end: Long): Flow<Long>
 
     @Query("SELECT COUNT(*) FROM transactions WHERE status = 'PENDING'")

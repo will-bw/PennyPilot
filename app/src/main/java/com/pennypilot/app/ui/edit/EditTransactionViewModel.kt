@@ -12,6 +12,7 @@ import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.util.MoneyUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -26,7 +27,9 @@ data class EditUiState(
     val accountTag: String = "",
     val occurredAt: Long = System.currentTimeMillis(),
     val categories: List<CategoryEntity> = emptyList(),
-    val isEditing: Boolean = false
+    val isEditing: Boolean = false,
+    val isSaving: Boolean = false,
+    val error: String? = null
 )
 
 @HiltViewModel
@@ -84,7 +87,7 @@ class EditTransactionViewModel @Inject constructor(
         }
     }
 
-    fun updateAmount(v: String) { _state.update { it.copy(amountText = v) } }
+    fun updateAmount(v: String) { _state.update { it.copy(amountText = v, error = null) } }
     fun updateNote(v: String) { _state.update { it.copy(note = v) } }
     fun updateMerchant(v: String) { _state.update { it.copy(merchant = v) } }
     fun updateAccountTag(v: String) { _state.update { it.copy(accountTag = v) } }
@@ -95,37 +98,58 @@ class EditTransactionViewModel @Inject constructor(
 
     fun save(onDone: () -> Unit) {
         val s = _state.value
-        val cents = MoneyUtil.parseYuanToCents(s.amountText)
-        if (cents == 0L || s.selectedCategoryId == null) return
+        if (s.isSaving) return
+        val cents = MoneyUtil.parsePositiveYuanToCents(s.amountText)
+        if (cents == null || s.selectedCategoryId == null) {
+            _state.update { it.copy(error = if (cents == null) "请输入大于 0、不超过 9,999,999.99 元且最多两位小数的金额" else "请先选择分类") }
+            return
+        }
+        _state.update { it.copy(isSaving = true, error = null) }
 
         viewModelScope.launch {
-            val amount = if (s.type == TxType.EXPENSE) cents else -cents
-            if (s.isEditing) {
-                val existing = txDao.getById(txId) ?: return@launch
-                txDao.update(existing.copy(
-                    amount = amount, type = s.type,
-                    categoryId = s.selectedCategoryId, note = s.note.ifBlank { null },
-                    merchant = s.merchant.ifBlank { null },
-                    accountTag = s.accountTag.ifBlank { null },
-                    occurredAt = s.occurredAt
-                ))
-            } else {
-                txDao.insert(TransactionEntity(
-                    amount = amount, type = s.type,
-                    categoryId = s.selectedCategoryId, note = s.note.ifBlank { null },
-                    merchant = s.merchant.ifBlank { null },
-                    accountTag = s.accountTag.ifBlank { null },
-                    occurredAt = s.occurredAt, source = TxSource.MANUAL, status = TxStatus.CONFIRMED
-                ))
+            try {
+                val amount = if (s.type == TxType.EXPENSE) cents else -cents
+                if (s.isEditing) {
+                    val existing = txDao.getById(txId) ?: error("账目已不存在，请返回列表")
+                    txDao.update(existing.copy(
+                        amount = amount, type = s.type,
+                        categoryId = s.selectedCategoryId, note = s.note.ifBlank { null },
+                        merchant = s.merchant.ifBlank { null },
+                        accountTag = s.accountTag.ifBlank { null },
+                        occurredAt = s.occurredAt
+                    ))
+                } else {
+                    txDao.insert(TransactionEntity(
+                        amount = amount, type = s.type,
+                        categoryId = s.selectedCategoryId, note = s.note.ifBlank { null },
+                        merchant = s.merchant.ifBlank { null },
+                        accountTag = s.accountTag.ifBlank { null },
+                        occurredAt = s.occurredAt, source = TxSource.MANUAL, status = TxStatus.CONFIRMED
+                    ))
+                }
+                _state.update { it.copy(isSaving = false) }
+                onDone()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(isSaving = false, error = "保存失败，请重试：${e.message ?: "数据库不可用"}") }
             }
-            onDone()
         }
     }
 
     fun delete(onDone: () -> Unit) {
+        if (_state.value.isSaving) return
+        _state.update { it.copy(isSaving = true, error = null) }
         viewModelScope.launch {
-            if (txId > 0) txDao.deleteById(txId)
-            onDone()
+            try {
+                if (txId > 0) txDao.deleteById(txId)
+                _state.update { it.copy(isSaving = false) }
+                onDone()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(isSaving = false, error = "删除失败，请重试：${e.message ?: "数据库不可用"}") }
+            }
         }
     }
 }

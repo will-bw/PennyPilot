@@ -7,6 +7,8 @@ import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ParsedResult
 import com.pennypilot.app.data.llm.ParsedTransaction
 import com.pennypilot.app.domain.model.TxType
+import com.pennypilot.app.util.MoneyUtil
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import java.time.LocalDateTime
@@ -60,6 +62,8 @@ class ParseTextUseCase @Inject constructor(
             }
 
             ParseResult(transactions = resolved)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             ParseResult(transactions = emptyList(), error = e.message ?: "解析失败")
         }
@@ -96,6 +100,7 @@ class ParseTextUseCase @Inject constructor(
     }
 
     private fun resolveTransaction(tx: ParsedTransaction, categories: List<CategoryEntity>): ResolvedTransaction {
+        require(MoneyUtil.isValidAmountCents(tx.amount)) { "金额必须大于 0 且不超过 9,999,999.99 元，请修改后重试" }
         val type = if (tx.type.equals("INCOME", ignoreCase = true)) TxType.INCOME else TxType.EXPENSE
         // 兼容模型输出带引号/空白的分类名；全部未命中时回退到同类型第一个分类
         val catName = tx.category.trim().removeSurrounding("\"")

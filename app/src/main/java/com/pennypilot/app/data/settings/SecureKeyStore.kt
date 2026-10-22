@@ -7,40 +7,70 @@ import androidx.security.crypto.MasterKey
 
 class SecureKeyStore(context: Context) {
 
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
+    private val appContext = context.applicationContext
+    var needsReconfiguration: Boolean = false
+        private set
+    private var prefs: SharedPreferences? = try {
+        createPreferences()
+    } catch (_: Exception) {
+        // 系统恢复可能带回密文却没有原 Keystore 密钥。读取保持可用，等待用户重新保存配置。
+        needsReconfiguration = true
+        null
+    }
 
-    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        "pennypilot_secrets",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    private fun createPreferences(): SharedPreferences {
+        val masterKey = MasterKey.Builder(appContext)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+        return EncryptedSharedPreferences.create(
+            appContext, "pennypilot_secrets", masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    private fun read(key: String, default: String): String = try {
+        prefs?.getString(key, default) ?: default
+    } catch (_: Exception) {
+        needsReconfiguration = true
+        prefs = null
+        default
+    }
+
+    private fun write(key: String, value: String) {
+        val target = prefs ?: run {
+            // 只在用户保存新配置时重建不可解密的密钥存储，不回退到明文。
+            appContext.deleteSharedPreferences("pennypilot_secrets")
+            java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+                .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+            createPreferences().also { prefs = it }
+        }
+        check(target.edit().putString(key, value).commit()) { "AI 配置保存失败，请重试" }
+    }
+
+    fun clearRecoveryNotice() { needsReconfiguration = false }
 
     var deepSeekKey: String
-        get() = prefs.getString("deepseek_key", "") ?: ""
-        set(value) = prefs.edit().putString("deepseek_key", value).apply()
+        get() = read("deepseek_key", "")
+        set(value) = write("deepseek_key", value)
 
     var qwenKey: String
-        get() = prefs.getString("qwen_key", "") ?: ""
-        set(value) = prefs.edit().putString("qwen_key", value).apply()
+        get() = read("qwen_key", "")
+        set(value) = write("qwen_key", value)
 
     /** 当前激活供应商："deepseek" / "qwen"；空串表示未选择（无默认值，须用户手动选择） */
     var activeProvider: String
-        get() = prefs.getString("active_provider", "") ?: ""
-        set(value) = prefs.edit().putString("active_provider", value).apply()
+        get() = read("active_provider", "")
+        set(value) = write("active_provider", value)
 
     var qwenBaseUrl: String
-        get() = prefs.getString("qwen_base_url", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1") ?: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-        set(value) = prefs.edit().putString("qwen_base_url", value).apply()
+        get() = read("qwen_base_url", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+        set(value) = write("qwen_base_url", value)
 
     var qwenModel: String
-        get() = prefs.getString("qwen_model", "qwen-plus") ?: "qwen-plus"
-        set(value) = prefs.edit().putString("qwen_model", value).apply()
+        get() = read("qwen_model", "qwen-plus")
+        set(value) = write("qwen_model", value)
 
     var deepSeekModel: String
-        get() = prefs.getString("deepseek_model", "deepseek-chat") ?: "deepseek-chat"
-        set(value) = prefs.edit().putString("deepseek_model", value).apply()
+        get() = read("deepseek_model", "deepseek-chat")
+        set(value) = write("deepseek_model", value)
 }

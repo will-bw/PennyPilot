@@ -25,6 +25,7 @@ class AppPreferences @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val lastBackupAtKey = longPreferencesKey("last_backup_at")
+    private val notificationCloudParsingKey = booleanPreferencesKey("notification_cloud_parsing_enabled")
     private val onboardingDoneKey = booleanPreferencesKey("onboarding_done")
 
     val lastBackupAt: Flow<Long> = context.dataStore.data
@@ -32,6 +33,13 @@ class AppPreferences @Inject constructor(
 
     val onboardingDone: Flow<Boolean> = context.dataStore.data
         .map { it[onboardingDoneKey] ?: false }
+
+    val notificationCloudParsingEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[notificationCloudParsingKey] ?: false }
+
+    suspend fun setNotificationCloudParsingEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[notificationCloudParsingKey] = enabled }
+    }
 
     suspend fun setLastBackupAt(timestamp: Long) {
         context.dataStore.edit { it[lastBackupAtKey] = timestamp }

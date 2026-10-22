@@ -114,4 +114,71 @@ class TransactionDaoTest {
         assertEquals(2, list.size)
         assertTrue(list.none { it.status == TxStatus.IGNORED })
     }
+
+    @Test
+    fun `stale actions cannot change terminal transaction status`() = runTest {
+        val confirmedId = dao.insert(tx(1800, status = TxStatus.PENDING))
+        assertEquals(1, dao.updateStatus(confirmedId, TxStatus.CONFIRMED))
+        assertEquals(0, dao.updateStatus(confirmedId, TxStatus.IGNORED))
+        assertEquals(TxStatus.CONFIRMED, dao.getById(confirmedId)?.status)
+
+        val ignoredId = dao.insert(tx(2000, status = TxStatus.PENDING))
+        assertEquals(1, dao.updateStatus(ignoredId, TxStatus.IGNORED))
+        assertEquals(0, dao.updateStatus(ignoredId, TxStatus.CONFIRMED))
+        assertEquals(TxStatus.IGNORED, dao.getById(ignoredId)?.status)
+    }
+
+    @Test
+    fun `queued notification action cannot affect a restored row reusing its ID`() = runTest {
+        val old = tx(1800, source = TxSource.NOTIFICATION, status = TxStatus.PENDING)
+            .copy(id = 42, captureEventKey = "old-event")
+        dao.insertCaptured(old)
+        dao.deleteById(42)
+        dao.insertCaptured(old.copy(amount = 9900, captureEventKey = "restored-event"))
+
+        assertEquals(0, dao.updateCapturedStatus(42, "old-event", TxStatus.IGNORED))
+        assertEquals(TxStatus.PENDING, dao.getById(42)?.status)
+        assertEquals(9900L, dao.getById(42)?.amount)
+        assertEquals(1, dao.updateCapturedStatus(42, "restored-event", TxStatus.CONFIRMED))
+        assertEquals(0, dao.updateCapturedStatus(42, "restored-event", TxStatus.IGNORED))
+    }
+
+    @Test
+    fun `captured event conflicts are persisted without replacing ignored transaction`() = runTest {
+        val captured = tx(1800, source = TxSource.NOTIFICATION, status = TxStatus.PENDING)
+            .copy(captureEventKey = "wechat:key:1000", rawPayload = "付款18元")
+        val id = dao.insertCaptured(captured)
+        assertTrue(id > 0)
+        dao.updateStatus(id, TxStatus.IGNORED)
+        assertTrue(db.transactionDao().hasCaptureEvent(captured.captureEventKey!!))
+        assertEquals(-1L, db.transactionDao().insertCaptured(captured))
+        assertEquals(TxStatus.IGNORED, dao.getById(id)?.status)
+        assertEquals(1, dao.countBySourceSince(TxSource.NOTIFICATION, 0))
+    }
+
+    @Test
+    fun `same text from independent events and manual entries is preserved`() = runTest {
+        val captured = tx(1800, source = TxSource.NOTIFICATION, status = TxStatus.PENDING)
+            .copy(captureEventKey = "wechat:key1:1000", rawPayload = "付款18元")
+        assertTrue(dao.insertCaptured(captured) > 0)
+        assertTrue(dao.insertCaptured(captured.copy(captureEventKey = "wechat:key2:1000")) > 0)
+        assertTrue(dao.insert(tx(1800)) > 0)
+        assertTrue(dao.insert(tx(1800)) > 0)
+        assertEquals(2, dao.countBySourceSince(TxSource.NOTIFICATION, 0))
+    }
+
+    @Test
+    fun `month boundaries include start and exclude next month midnight`() = runTest {
+        val start = 1000L
+        val end = 2000L
+        dao.insert(tx(100, occurredAt = start - 1))
+        dao.insert(tx(200, occurredAt = start))
+        dao.insert(tx(-300, type = TxType.INCOME, occurredAt = end - 1))
+        dao.insert(tx(400, occurredAt = end))
+        dao.insert(tx(-500, type = TxType.INCOME, occurredAt = end))
+        assertEquals(2, dao.observeByMonth(start, end).first().size)
+        assertEquals(200L, dao.observeMonthExpense(start, end).first())
+        assertEquals(-300L, dao.observeMonthIncome(start, end).first())
+        assertEquals(2, dao.observeByMonth(end, end + 1000).first().size)
+    }
 }

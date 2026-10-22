@@ -138,16 +138,21 @@ fun EditTransactionScreen(
         Spacer(Modifier.height(16.dp))
 
         // Save button
+        state.error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
         Button(
             onClick = { vm.save(onBack) },
+            enabled = !state.isSaving,
             modifier = Modifier.fillMaxWidth().height(50.dp),
             shape = MaterialTheme.shapes.medium
-        ) { Text("保存") }
+        ) { Text(if (state.isSaving) "保存中…" else "保存") }
 
         // Delete button (edit mode only)
         if (state.isEditing) {
             OutlinedButton(
                 onClick = { vm.delete(onBack) },
+                enabled = !state.isSaving,
                 modifier = Modifier.fillMaxWidth().height(50.dp),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
             ) { Text("删除") }

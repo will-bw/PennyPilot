@@ -19,9 +19,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.workDataOf
 import com.pennypilot.app.data.db.dao.DailyAggregate
 import com.pennypilot.app.data.db.dao.MonthlyTrend
 import com.pennypilot.app.data.db.entity.CategoryEntity
@@ -37,6 +34,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.time.LocalDate
 import java.time.Month
+import java.time.YearMonth
 import java.time.format.TextStyle
 import java.util.Locale
 
@@ -73,7 +71,7 @@ fun ReportScreen(vm: ReportViewModel = hiltViewModel()) {
                 Column {
                     Text("月度报告", style = MaterialTheme.typography.headlineLarge)
                     Text(
-                        "每月 1 日 09:00 自动生成",
+                        "月初自动生成 · 自动补齐遗漏月份",
                         style = PageSubStyle,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp)
@@ -87,12 +85,7 @@ fun ReportScreen(vm: ReportViewModel = hiltViewModel()) {
                 ) {
                     TextButton(
                         onClick = {
-                            WorkManager.getInstance(context).enqueue(
-                                OneTimeWorkRequestBuilder<MonthlyReportWorker>()
-                                    // 手动重生成：跳过 Worker 内的幂等守卫
-                                    .setInputData(workDataOf(MonthlyReportWorker.KEY_FORCE to true))
-                                    .build()
-                            )
+                            MonthlyReportWorker.regenerate(context, YearMonth.now().minusMonths(1))
                         },
                         contentPadding = PaddingValues(0.dp),
                         modifier = Modifier.height(16.dp)
@@ -307,7 +300,7 @@ private fun ReportHero(report: MonthlyReportEntity, prev: MonthlyReportEntity?) 
                             .padding(horizontal = 11.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            "结余 ¥${MoneyUtil.formatHeroAmount(kotlin.math.abs(balance))}",
+                            "结余 ¥${MoneyUtil.formatHeroAmount(balance)}",
                             style = PillTextStyle,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

@@ -6,20 +6,8 @@ import org.junit.Test
 
 class ParseRuleEngineTest {
 
-    private val wechatRules = listOf(
-        ParseRuleEntity(id = 1, appPackage = "com.tencent.mm",
-            regexAmount = """(?:付款|支付)[^\d]*(\d+(?:\.\d{1,2})?)""",
-            regexMerchant = """(?:向|给)(.+?)(?:付款|支付)""",
-            directionHint = "EXPENSE", priority = 1),
-        ParseRuleEntity(id = 2, appPackage = "com.tencent.mm",
-            regexAmount = """微信支付[^\d]*(\d+(?:\.\d{1,2})?)""",
-            regexMerchant = null,
-            directionHint = "EXPENSE", priority = 2),
-        ParseRuleEntity(id = 3, appPackage = "com.tencent.mm",
-            regexAmount = """收款[^\d]*(\d+(?:\.\d{1,2})?)""",
-            regexMerchant = null,
-            directionHint = "INCOME", priority = 3),
-    )
+    private val wechatRules = PresetParseRules.rules.filter { it.appPackage == "com.tencent.mm" }
+    private val alipayRules = PresetParseRules.rules.filter { it.appPackage == "com.eg.android.AlipayGphone" }
 
     @Test
     fun `wechat pay to merchant`() {
@@ -58,12 +46,6 @@ class ParseRuleEngineTest {
 
     @Test
     fun `alipay expense`() {
-        val alipayRules = listOf(
-            ParseRuleEntity(id = 4, appPackage = "com.eg.android.AlipayGphone",
-                regexAmount = """(?:付款|支付|消费)[^\d]*(\d+(?:\.\d{1,2})?)""",
-                regexMerchant = """(?:向|在)(.+?)(?:付款|支付|消费)""",
-                directionHint = "EXPENSE", priority = 1),
-        )
         val text = "支付宝支付成功，在美团外卖消费86.20元"
         val result = ParseRuleEngine.parse(text, alipayRules)
         assertNotNull(result)
@@ -73,12 +55,6 @@ class ParseRuleEngineTest {
 
     @Test
     fun `alipay income`() {
-        val alipayRules = listOf(
-            ParseRuleEntity(id = 5, appPackage = "com.eg.android.AlipayGphone",
-                regexAmount = """(?:收入|到账)[^\d]*(\d+(?:\.\d{1,2})?)""",
-                regexMerchant = null,
-                directionHint = "INCOME", priority = 2),
-        )
         val text = "支付宝到账1000.00元"
         val result = ParseRuleEngine.parse(text, alipayRules)
         assertNotNull(result)
@@ -101,5 +77,52 @@ class ParseRuleEngineTest {
         )
         // 金额 0 不算交易，应返回 null（避免脏数据入库）
         assertNull(ParseRuleEngine.parse("你向某商户付款0.00元", rules))
+    }
+
+    @Test
+    fun `payment title cannot override income direction`() {
+        val result = ParseRuleEngine.parse("微信支付 微信收款到账8000.00元", wechatRules)
+        assertEquals("INCOME", result?.direction)
+        assertEquals(800000L, result?.amountCents)
+    }
+
+    @Test
+    fun `merchant digits cannot become payment amount`() {
+        val result = ParseRuleEngine.parse("微信支付 你向7-Eleven付款18.00元", wechatRules)
+        assertEquals(1800L, result?.amountCents)
+        assertEquals("7-Eleven", result?.merchant)
+    }
+
+    @Test
+    fun `grouped currency is parsed as a complete exact amount`() {
+        assertEquals(180000L,
+            ParseRuleEngine.parse("微信支付 你向沙县小吃付款1,800.00元", wechatRules)?.amountCents)
+        assertEquals(1990L, ParseRuleEngine.parse("付款19.90元", wechatRules)?.amountCents)
+    }
+
+    @Test
+    fun `partial malformed and out of range amounts are rejected`() {
+        listOf("1,80.00", "1.234", "10000000.00", "0.00").forEach { amount ->
+            assertNull(amount, ParseRuleEngine.parse("付款${amount}元", wechatRules))
+        }
+        // 用户旧规则仍可能只捕获前缀，解析器必须二次检查 token 边界。
+        assertNull(ParseRuleEngine.parse("付款1,800.00元", PresetParseRules.legacyRules.take(1)))
+    }
+
+    @Test
+    fun `failed and pending payments are not captured`() {
+        listOf("支付宝 付款失败，本次金额18.00元", "支付宝 待支付18.00元",
+            "微信支付 支付失败18.00元").forEach { text ->
+            assertNull(text, ParseRuleEngine.parse(text, alipayRules))
+        }
+    }
+
+    @Test
+    fun `invalid and disabled rules cannot block remaining rules`() {
+        val invalid = ParseRuleEntity(appPackage = "com.tencent.mm", regexAmount = "(", priority = -2)
+        val disabled = ParseRuleEntity(appPackage = "com.tencent.mm",
+            regexAmount = """付款(\d+)""", directionHint = "INCOME", enabled = false, priority = -1)
+        assertEquals("EXPENSE", ParseRuleEngine.parse("付款18.00元",
+            listOf(invalid, disabled) + wechatRules)?.direction)
     }
 }

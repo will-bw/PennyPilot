@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.core.app.NotificationCompat
 import com.pennypilot.app.MainActivity
 
@@ -15,6 +16,19 @@ object NotificationHelper {
 
     private const val NOTIFY_ID_REPORT = 90001
     private const val NOTIFY_ID_PERMISSION = 90002
+
+    fun cancelCaptureNotification(context: Context, txId: Long, captureEventKey: String? = null) {
+        val nm = context.getSystemService(NotificationManager::class.java)
+        if (captureEventKey != null) {
+            nm.cancel(captureEventKey, txId.toInt())
+        } else {
+            // 兼容旧版本无 tag 的提醒，以及尚未提供事件身份的页面调用。
+            nm.cancel(txId.toInt())
+            nm.activeNotifications.filter {
+                it.id == txId.toInt() && it.notification.channelId == CHANNEL_CAPTURE
+            }.forEach { nm.cancel(it.tag, it.id) }
+        }
+    }
 
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -29,13 +43,15 @@ object NotificationHelper {
         ).apply { description = "权限与保活提醒" })
     }
 
-    fun postCaptureNotification(context: Context, txId: Long, title: String, text: String) {
+    fun postCaptureNotification(context: Context, txId: Long, captureEventKey: String, title: String, text: String) {
         val nm = context.getSystemService(NotificationManager::class.java)
 
         // Confirm action
         val confirmIntent = Intent(context, NotificationActionReceiver::class.java).apply {
             action = NotificationActionReceiver.ACTION_CONFIRM
+            data = captureActionUri(captureEventKey, "confirm")
             putExtra(NotificationActionReceiver.EXTRA_TX_ID, txId)
+            putExtra(NotificationActionReceiver.EXTRA_CAPTURE_EVENT_KEY, captureEventKey)
         }
         val confirmPi = PendingIntent.getBroadcast(context, txId.toInt() * 3, confirmIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -43,14 +59,18 @@ object NotificationHelper {
         // Ignore action
         val ignoreIntent = Intent(context, NotificationActionReceiver::class.java).apply {
             action = NotificationActionReceiver.ACTION_IGNORE
+            data = captureActionUri(captureEventKey, "ignore")
             putExtra(NotificationActionReceiver.EXTRA_TX_ID, txId)
+            putExtra(NotificationActionReceiver.EXTRA_CAPTURE_EVENT_KEY, captureEventKey)
         }
         val ignorePi = PendingIntent.getBroadcast(context, txId.toInt() * 3 + 1, ignoreIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
         // Edit action (opens app)
         val editIntent = Intent(context, MainActivity::class.java).apply {
+            data = captureActionUri(captureEventKey, "edit")
             putExtra("edit_tx_id", txId)
+            putExtra(NotificationActionReceiver.EXTRA_CAPTURE_EVENT_KEY, captureEventKey)
         }
         val editPi = PendingIntent.getActivity(context, txId.toInt() * 3 + 2, editIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -66,8 +86,11 @@ object NotificationHelper {
             .setAutoCancel(true)
             .build()
 
-        nm.notify(txId.toInt(), notification)
+        nm.notify(captureEventKey, txId.toInt(), notification)
     }
+
+    private fun captureActionUri(eventKey: String, action: String): Uri = Uri.Builder()
+        .scheme("pennypilot").authority("capture").appendPath(eventKey).appendPath(action).build()
 
     /** 月度报告生成完成提醒，点击打开 App */
     fun postReportNotification(context: Context, title: String, text: String) {

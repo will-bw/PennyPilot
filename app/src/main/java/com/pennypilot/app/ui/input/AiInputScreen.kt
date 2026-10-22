@@ -50,8 +50,8 @@ fun AiInputScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) vm.startRecording()
-        else vm.setError("未获得录音权限，请在系统设置中开启麦克风权限后重试")
+        // 权限弹窗结束时最初的按压已结束；下一次按住才开始录音。
+        if (!granted) vm.setError("未获得录音权限，请在系统设置中开启麦克风权限后重试")
     }
 
     Column(
@@ -144,6 +144,7 @@ fun AiInputScreen(
         if (state.previewItems.isNotEmpty()) {
             PreviewCard(
                 items = state.previewItems,
+                isSaving = state.isSaving,
                 categories = allCategories,
                 onRemove = vm::removePreviewItem,
                 onChangeCategory = vm::changePreviewCategory,
@@ -160,7 +161,7 @@ fun AiInputScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        "解析失败",
+                        "操作未完成",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.error
                     )
@@ -209,6 +210,7 @@ fun AiInputScreen(
             },
             onMicRelease = { vm.stopRecording() },
             isRecording = state.isRecording,
+            isSending = state.isParsing || state.isSaving,
             // 底部预留 26dp：FAB 凸出 TabBar 16dp + 10dp 间隙，避免 dock 与 FAB 互相遮挡
             modifier = Modifier.padding(bottom = 26.dp)
         )
@@ -217,7 +219,9 @@ fun AiInputScreen(
     if (showKeypad) {
         KeypadSheet(
             categories = allCategories,
-            onDismiss = { showKeypad = false },
+            isSaving = state.isSaving,
+            error = state.error,
+            onDismiss = { if (!state.isSaving) showKeypad = false },
             onSave = { type, categoryId, cents, note ->
                 vm.saveManual(type, categoryId, cents, note) { showKeypad = false }
             }
@@ -228,6 +232,7 @@ fun AiInputScreen(
 @Composable
 private fun PreviewCard(
     items: List<PreviewItem>,
+    isSaving: Boolean,
     categories: List<CategoryEntity>,
     onRemove: (Int) -> Unit,
     onChangeCategory: (Int, CategoryEntity) -> Unit,
@@ -305,7 +310,7 @@ private fun PreviewCard(
                                     MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
                                     RoundedCornerShape(8.dp)
                                 )
-                                .clickable { pickerIndex = index }
+                                .clickable(enabled = !isSaving) { pickerIndex = index }
                                 .padding(horizontal = 9.dp, vertical = 4.dp)
                         )
                     }
@@ -314,7 +319,7 @@ private fun PreviewCard(
                         style = MaterialTheme.typography.titleLarge
                     )
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { onRemove(index) }) {
+                    TextButton(onClick = { onRemove(index) }, enabled = !isSaving) {
                         Text("✕", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
@@ -328,6 +333,7 @@ private fun PreviewCard(
                 // 「再改改」跳转手动记账，不再与「保存全部」重复触发保存
                 OutlinedButton(
                     onClick = onEditAll,
+                    enabled = !isSaving,
                     shape = RoundedCornerShape(15.dp),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                     colors = ButtonDefaults.outlinedButtonColors(
@@ -344,12 +350,12 @@ private fun PreviewCard(
                             Brush.linearGradient(MaterialTheme.priGradient),
                             RoundedCornerShape(15.dp)
                         )
-                        .clickable { onSaveAll() }
+                        .clickable(enabled = !isSaving) { onSaveAll() }
                         .padding(vertical = 13.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        "保存全部 · ${items.size} 笔",
+                        if (isSaving) "保存中…" else "保存全部 · ${items.size} 笔",
                         color = Color.White,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold

@@ -1,5 +1,11 @@
 package com.pennypilot.app.ui.transactions
 
+import android.content.Context
+import dagger.hilt.android.qualifiers.ApplicationContext
+import androidx.room.withTransaction
+import com.pennypilot.app.data.db.AppDatabase
+import com.pennypilot.app.data.db.LedgerRevision
+import com.pennypilot.app.service.NotificationHelper
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pennypilot.app.data.db.dao.CategoryDao
@@ -49,7 +55,9 @@ data class TransactionsUiState(
 @HiltViewModel
 class TransactionsViewModel @Inject constructor(
     private val txDao: TransactionDao,
-    private val catDao: CategoryDao
+    private val catDao: CategoryDao,
+    @ApplicationContext private val context: Context,
+    private val database: AppDatabase
 ) : ViewModel() {
 
     private val _selectedMonth = MutableStateFlow(LocalDate.now())
@@ -134,12 +142,20 @@ class TransactionsViewModel @Inject constructor(
             }
         }
 
-    fun confirmTx(id: Long) = viewModelScope.launch {
-        txDao.updateStatus(id, TxStatus.CONFIRMED)
-    }
+    fun confirmTx(id: Long) = processPending(id, TxStatus.CONFIRMED)
 
-    fun ignoreTx(id: Long) = viewModelScope.launch {
-        txDao.updateStatus(id, TxStatus.IGNORED)
+    fun ignoreTx(id: Long) = processPending(id, TxStatus.IGNORED)
+
+    private fun processPending(id: Long, status: TxStatus) {
+        val revision = LedgerRevision.current
+        viewModelScope.launch {
+            val processed = database.withTransaction {
+                if (LedgerRevision.current != revision) return@withTransaction null
+                val tx = txDao.getById(id) ?: return@withTransaction null
+                if (txDao.updateStatus(id, status) == 0) null else tx
+            }
+            processed?.let { NotificationHelper.cancelCaptureNotification(context, id, it.captureEventKey) }
+        }
     }
 
     /** 已确认行左滑删除（编辑页删除共用同一入口） */

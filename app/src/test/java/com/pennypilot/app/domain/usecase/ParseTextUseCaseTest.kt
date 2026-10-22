@@ -66,6 +66,16 @@ class ParseTextUseCaseTest {
     }
 
     @Test
+    fun `invalid AI amount rejects the entire draft without partial success`() = runTest {
+        listOf("-100", "0", "1000000000", "9223372036854775808", "1.5").forEach { amount ->
+            val response = """{"transactions":[{"amount":100,"type":"EXPENSE","category":"餐饮"},{"amount":$amount,"type":"EXPENSE","category":"餐饮"}]}"""
+            val result = createUseCase(response).execute("午饭和晚饭")
+            assertTrue("amount=$amount", result.transactions.isEmpty())
+            assertNotNull("amount=$amount", result.error)
+        }
+    }
+
+    @Test
     fun `LLM failure returns error`() = runTest {
         val failingClient = object : LLMClient {
             override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String {

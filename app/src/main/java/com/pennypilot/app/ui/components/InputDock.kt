@@ -41,6 +41,7 @@ fun InputDock(
     onMicPress: () -> Unit,
     onMicRelease: () -> Unit,
     isRecording: Boolean = false,
+    isSending: Boolean = false,
     placeholder: String = "输入或按住说话…",
     modifier: Modifier = Modifier
 ) {
@@ -152,7 +153,7 @@ fun InputDock(
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(Brush.linearGradient(MaterialTheme.priGradient))
-                    .clickable { if (text.isNotBlank()) onSend(text) },
+                    .clickable(enabled = !isSending && text.isNotBlank()) { onSend(text) },
                 contentAlignment = Alignment.Center
             ) {
                 Text(

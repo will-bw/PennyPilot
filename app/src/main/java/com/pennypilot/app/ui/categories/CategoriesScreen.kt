@@ -73,7 +73,10 @@ fun CategoriesScreen(
                             IconButton(onClick = { if (categories.indexOfFirst { it.id == cat.id} > 0) vm.moveCategory(cat, -1) }) {
                                 Text("↑", fontSize = 12.sp)
                             }
-                            IconButton(onClick = { if (categories.indexOfLast { it.id == cat.id} != categories.indexOfFirst { it.id == cat.id}) vm.moveCategory(cat, 1) }) {
+                            IconButton(
+                                onClick = { vm.moveCategory(cat, 1) },
+                                enabled = categories.indexOfFirst { it.id == cat.id } < categories.lastIndex
+                            ) {
                                 Text("↓", fontSize = 12.sp)
                             }
                             // Edit / Delete buttons
@@ -112,12 +115,8 @@ fun CategoriesScreen(
         EditCategoryDialog(
             name = cat.name,
             icon = cat.icon,
-            onNameChanged = { newName ->
-                vm.renameCategory(cat, newName, cat.icon)
-                editCat = null
-            },
-            onIconChanged = { newIcon ->
-                vm.renameCategory(cat, cat.name, newIcon)
+            onConfirm = { newName, newIcon ->
+                vm.renameCategory(cat, newName, newIcon)
                 editCat = null
             },
             onDismiss = { editCat = null }
@@ -178,12 +177,11 @@ private fun AddCategoryDialog(
 private fun EditCategoryDialog(
     name: String,
     icon: String,
-    onNameChanged: (String) -> Unit,
-    onIconChanged: (String) -> Unit,
+    onConfirm: (String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val newName by remember { mutableStateOf(name) }
-    val newIcon by remember { mutableStateOf(icon) }
+    var newName by remember(name) { mutableStateOf(name) }
+    var newIcon by remember(icon) { mutableStateOf(icon) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -191,17 +189,20 @@ private fun EditCategoryDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
-                    value = name, onValueChange = onNameChanged,
+                    value = newName, onValueChange = { newName = it },
                     label = { Text("名称") }, singleLine = true
                 )
                 OutlinedTextField(
-                    value = icon, onValueChange = onIconChanged,
+                    value = newIcon, onValueChange = { newIcon = it },
                     label = { Text("Emoji 图标") }, singleLine = true
                 )
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (name.isNotBlank()) onDismiss() }) { Text("完成") }
+            TextButton(
+                enabled = newName.isNotBlank() && newIcon.isNotBlank(),
+                onClick = { onConfirm(newName.trim(), newIcon.trim()) }
+            ) { Text("完成") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )

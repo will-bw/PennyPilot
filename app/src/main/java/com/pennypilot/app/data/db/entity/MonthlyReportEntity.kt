@@ -2,7 +2,7 @@ package com.pennypilot.app.data.db.entity
 
 import androidx.room.*
 
-@Entity(tableName = "monthly_reports")
+@Entity(tableName = "monthly_reports", indices = [Index(value = ["year_month"], unique = true)])
 data class MonthlyReportEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     @ColumnInfo(name = "year_month") val yearMonth: String, // "2026-07"

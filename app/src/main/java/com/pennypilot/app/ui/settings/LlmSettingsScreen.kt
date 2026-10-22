@@ -21,6 +21,8 @@ fun LlmSettingsScreen(
     var qwenModel by remember { mutableStateOf(keyStore.qwenModel) }
     var qwenBaseUrl by remember { mutableStateOf(keyStore.qwenBaseUrl) }
     var saved by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val recoveryNeeded = remember { keyStore.needsReconfiguration }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState()),
@@ -28,6 +30,11 @@ fun LlmSettingsScreen(
     ) {
         TextButton(onClick = onBack) { Text("← 返回") }
         Text("AI 设置", style = MaterialTheme.typography.headlineLarge)
+
+        if (recoveryNeeded && !saved) {
+            Text("原 AI 密钥无法解密，请重新填写后保存。账本数据不受影响。", color = MaterialTheme.colorScheme.error)
+        }
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
         // Provider selector（无默认值，需手动选择）
         Text("主力供应商", style = MaterialTheme.typography.titleMedium)
@@ -105,15 +112,19 @@ fun LlmSettingsScreen(
 
         Button(
             onClick = {
-                keyStore.deepSeekKey = deepSeekKey.trim()
-                keyStore.qwenKey = qwenKey.trim()
-                keyStore.activeProvider = provider
-                keyStore.deepSeekModel = deepSeekModel.trim().ifBlank { "deepseek-chat" }
-                keyStore.qwenModel = qwenModel.trim().ifBlank { "qwen-plus" }
-                keyStore.qwenBaseUrl = qwenBaseUrl.trim().ifBlank {
-                    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-                }
-                saved = true
+                error = null
+                runCatching {
+                    keyStore.deepSeekKey = deepSeekKey.trim()
+                    keyStore.qwenKey = qwenKey.trim()
+                    keyStore.activeProvider = provider
+                    keyStore.deepSeekModel = deepSeekModel.trim().ifBlank { "deepseek-chat" }
+                    keyStore.qwenModel = qwenModel.trim().ifBlank { "qwen-plus" }
+                    keyStore.qwenBaseUrl = qwenBaseUrl.trim().ifBlank {
+                        "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+                    }
+                    keyStore.clearRecoveryNotice()
+                }.onSuccess { saved = true }
+                    .onFailure { saved = false; error = "保存失败，请重试：${it.message}" }
             },
             enabled = provider.isNotBlank(),
             modifier = Modifier.fillMaxWidth().height(50.dp)

@@ -19,26 +19,25 @@ class PennyPilotApp : Application() {
         super.onCreate()
         NotificationHelper.createChannels(this)
 
-        // Schedule monthly report worker：设计约定每月 1 号 09:00 触发，
-        // 用初始延迟对齐到下个 1 号 09:00，周期保持 30 天（Worker 内有幂等守卫防漂移）
+        // 每天核对已结束月份并补齐遗漏，避免固定 30 天周期跳过自然月。
         val initialDelay = millisUntilNextReportTime()
-        val request = PeriodicWorkRequestBuilder<MonthlyReportWorker>(30, TimeUnit.DAYS)
+        val request = PeriodicWorkRequestBuilder<MonthlyReportWorker>(1, TimeUnit.DAYS)
             .setInitialDelay(initialDelay, TimeUnit.MILLISECONDS)
             .build()
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            "monthly_report", ExistingPeriodicWorkPolicy.KEEP, request
+            "monthly_report", ExistingPeriodicWorkPolicy.UPDATE, request
         )
     }
 
-    /** 计算到下个每月 1 号 09:00 的毫秒差；若今天正是 1 号且未到 9 点则今天触发 */
+    /** 首次检查安排在下个当地 09:00；WorkManager 可根据系统后台策略延后。 */
     private fun millisUntilNextReportTime(): Long {
         val zone = ZoneId.systemDefault()
         val now = ZonedDateTime.now(zone)
-        var next = now.toLocalDate().withDayOfMonth(1)
+        var next = now.toLocalDate()
             .atTime(LocalTime.of(9, 0)).atZone(zone)
         if (!next.isAfter(now)) {
-            next = now.toLocalDate().plusMonths(1)
-                .withDayOfMonth(1).atTime(LocalTime.of(9, 0)).atZone(zone)
+            next = now.toLocalDate().plusDays(1)
+                .atTime(LocalTime.of(9, 0)).atZone(zone)
         }
         return Duration.between(now, next).toMillis()
     }

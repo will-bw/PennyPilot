@@ -10,7 +10,8 @@ import com.pennypilot.app.domain.model.TxType
     indices = [
         Index("occurred_at"),
         Index("category_id", "occurred_at"),
-        Index("status")
+        Index("status"),
+        Index(value = ["capture_event_key"], unique = true)
     ]
 )
 data class TransactionEntity(
@@ -25,5 +26,6 @@ data class TransactionEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
     @ColumnInfo(name = "source") val source: TxSource = TxSource.MANUAL,
     @ColumnInfo(name = "status") val status: TxStatus = TxStatus.CONFIRMED,
-    @ColumnInfo(name = "raw_payload") val rawPayload: String? = null
+    @ColumnInfo(name = "raw_payload") val rawPayload: String? = null,
+    @ColumnInfo(name = "capture_event_key") val captureEventKey: String? = null
 )

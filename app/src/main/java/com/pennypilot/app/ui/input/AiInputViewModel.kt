@@ -12,7 +12,9 @@ import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.domain.usecase.ParseTextUseCase
+import com.pennypilot.app.util.MoneyUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +28,7 @@ data class AiInputUiState(
     val inputText: String = "",
     val isParsing: Boolean = false,
     val isRecording: Boolean = false,
+    val isSaving: Boolean = false,
     val previewItems: List<PreviewItem> = emptyList(),
     val error: String? = null,
     val savedCount: Int = 0
@@ -59,8 +62,10 @@ class AiInputViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val speechManager = SpeechRecognizerManager(application)
+    private var inputRevision = 0L
 
     fun updateInput(text: String) {
+        inputRevision++
         _state.update { it.copy(inputText = text, error = null) }
     }
 
@@ -71,35 +76,55 @@ class AiInputViewModel @Inject constructor(
 
     fun sendForParsing() {
         val text = _state.value.inputText.trim()
-        if (text.isBlank()) return
+        if (text.isBlank() || _state.value.isParsing || _state.value.isSaving) return
+        val submittedRevision = inputRevision
 
-        _state.update { it.copy(isParsing = true, error = null, previewItems = emptyList(), savedCount = 0) }
+        _state.update { it.copy(inputText = "", isParsing = true, error = null, previewItems = emptyList(), savedCount = 0) }
 
         viewModelScope.launch {
-            val result = parseTextUseCase.execute(text)
-            if (result.error != null) {
-                _state.update { it.copy(isParsing = false, error = result.error) }
-            } else {
-                val items = result.transactions.map { tx ->
-                    val category = categoryDao.getById(tx.categoryId)
-                    PreviewItem(
-                        amount = tx.amount,
-                        type = tx.type,
-                        categoryId = tx.categoryId,
-                        categoryName = tx.categoryName,
-                        categoryColorIndex = category?.colorIndex ?: 0,
-                        categoryIcon = category?.icon ?: "📦",
-                        note = tx.note,
-                        merchant = tx.merchant,
-                        occurredAt = tx.occurredAt
+            try {
+                val result = parseTextUseCase.execute(text)
+                if (result.error != null) {
+                    _state.update {
+                        it.copy(
+                            isParsing = false,
+                            error = result.error,
+                            inputText = if (inputRevision == submittedRevision) text else it.inputText
+                        )
+                    }
+                } else {
+                    val items = result.transactions.map { tx ->
+                        val category = categoryDao.getById(tx.categoryId)
+                        PreviewItem(
+                            amount = tx.amount,
+                            type = tx.type,
+                            categoryId = tx.categoryId,
+                            categoryName = tx.categoryName,
+                            categoryColorIndex = category?.colorIndex ?: 0,
+                            categoryIcon = category?.icon ?: "📦",
+                            note = tx.note,
+                            merchant = tx.merchant,
+                            occurredAt = tx.occurredAt
+                        )
+                    }
+                    _state.update { it.copy(isParsing = false, previewItems = items) }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isParsing = false,
+                        error = "解析失败，请重试：${e.message ?: "数据不可用"}",
+                        inputText = if (inputRevision == submittedRevision) text else it.inputText
                     )
                 }
-                _state.update { it.copy(isParsing = false, previewItems = items, inputText = "") }
             }
         }
     }
 
     fun removePreviewItem(index: Int) {
+        if (_state.value.isSaving) return
         _state.update { s ->
             s.copy(previewItems = s.previewItems.filterIndexed { i, _ -> i != index })
         }
@@ -107,6 +132,7 @@ class AiInputViewModel @Inject constructor(
 
     /** 预览卡分类 chip 点击后改选分类（设计 §7.3：可点 chip → 分类网格选择器） */
     fun changePreviewCategory(index: Int, category: CategoryEntity) {
+        if (_state.value.isSaving) return
         _state.update { s ->
             s.copy(previewItems = s.previewItems.mapIndexed { i, item ->
                 if (i == index) item.copy(
@@ -121,29 +147,40 @@ class AiInputViewModel @Inject constructor(
 
     fun saveAll(onDone: () -> Unit) {
         val items = _state.value.previewItems
-        if (items.isEmpty()) return
+        if (items.isEmpty() || _state.value.isSaving) return
+        if (items.any { !MoneyUtil.isValidAmountCents(it.amount) }) {
+            setError("金额必须大于 0 且不超过 9,999,999.99 元")
+            return
+        }
 
-        // 先清空预览再入库，防止快速双击「保存全部」导致重复插入
-        _state.update { it.copy(previewItems = emptyList()) }
+        // 同步锁定保存入口；每笔成功后才移除对应草稿，失败时仍可重试余下条目。
+        _state.update { it.copy(isSaving = true, error = null) }
 
         viewModelScope.launch {
-            items.forEach { item ->
-                val amount = if (item.type == TxType.EXPENSE) item.amount else -item.amount
-                txDao.insert(
-                    TransactionEntity(
-                        amount = amount,
-                        type = item.type,
-                        categoryId = item.categoryId,
-                        note = item.note,
-                        merchant = item.merchant,
-                        occurredAt = item.occurredAt,
-                        source = TxSource.AI_TEXT,
-                        status = TxStatus.CONFIRMED
+            try {
+                items.forEach { item ->
+                    val amount = if (item.type == TxType.EXPENSE) item.amount else -item.amount
+                    txDao.insert(
+                        TransactionEntity(
+                            amount = amount,
+                            type = item.type,
+                            categoryId = item.categoryId,
+                            note = item.note,
+                            merchant = item.merchant,
+                            occurredAt = item.occurredAt,
+                            source = TxSource.AI_TEXT,
+                            status = TxStatus.CONFIRMED
+                        )
                     )
-                )
+                    _state.update { it.copy(previewItems = it.previewItems.drop(1), savedCount = it.savedCount + 1) }
+                }
+                _state.update { it.copy(isSaving = false) }
+                onDone()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(isSaving = false, error = "保存失败，请重试：${e.message ?: "数据库不可用"}") }
             }
-            _state.update { it.copy(savedCount = items.size) }
-            onDone()
         }
     }
 
@@ -154,29 +191,46 @@ class AiInputViewModel @Inject constructor(
         note: String,
         onDone: () -> Unit
     ) {
+        if (_state.value.isSaving) return
+        if (!MoneyUtil.isValidAmountCents(amountCents)) {
+            setError("金额必须大于 0 且不超过 9,999,999.99 元")
+            return
+        }
+        _state.update { it.copy(isSaving = true, error = null) }
         viewModelScope.launch {
-            val amount = if (type == TxType.EXPENSE) amountCents else -amountCents
-            txDao.insert(
-                TransactionEntity(
-                    amount = amount,
-                    type = type,
-                    categoryId = categoryId,
-                    note = note.ifBlank { null },
-                    merchant = null,
-                    occurredAt = System.currentTimeMillis(),
-                    source = TxSource.MANUAL,
-                    status = TxStatus.CONFIRMED
+            try {
+                val amount = if (type == TxType.EXPENSE) amountCents else -amountCents
+                txDao.insert(
+                    TransactionEntity(
+                        amount = amount,
+                        type = type,
+                        categoryId = categoryId,
+                        note = note.ifBlank { null },
+                        merchant = null,
+                        occurredAt = System.currentTimeMillis(),
+                        source = TxSource.MANUAL,
+                        status = TxStatus.CONFIRMED
+                    )
                 )
-            )
-            onDone()
+                _state.update { it.copy(isSaving = false) }
+                onDone()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(isSaving = false, error = "保存失败，请重试：${e.message ?: "数据库不可用"}") }
+            }
         }
     }
 
     fun startRecording() {
         _state.update { it.copy(isRecording = true) }
-        speechManager.startListening { result ->
-            _state.update { it.copy(inputText = result, isRecording = false) }
-        }
+        speechManager.startListening(
+            onResult = { result ->
+                updateInput(result)
+                _state.update { it.copy(isRecording = false) }
+            },
+            onError = ::setError
+        )
     }
 
     fun stopRecording() {
@@ -185,6 +239,9 @@ class AiInputViewModel @Inject constructor(
     }
 
     fun reset() {
+        if (_state.value.isParsing || _state.value.isSaving) return
+        speechManager.cancel()
+        inputRevision++
         _state.update { AiInputUiState() }
     }
 

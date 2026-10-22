@@ -8,10 +8,14 @@ import com.pennypilot.app.data.llm.FunctionDef
 import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ToolDefinition
+import com.pennypilot.app.util.DateRange
+import com.pennypilot.app.util.DateRanges
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -20,7 +24,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import java.time.LocalDate
-import java.time.ZoneId
 import javax.inject.Inject
 
 /** 图表数据，供 UI 层渲染洞察图表 */
@@ -56,11 +59,12 @@ class InsightUseCase @Inject constructor(
                     put("type", "object")
                     putJsonObject("properties") {
                         putJsonObject("start") { put("type", "string"); put("description", "开始日期 yyyy-MM-dd") }
-                        putJsonObject("end") { put("type", "string"); put("description", "结束日期 yyyy-MM-dd") }
+                        putJsonObject("end") { put("type", "string"); put("description", "结束日期 yyyy-MM-dd，包含该日全天") }
                         putJsonObject("category") { put("type", "string"); put("description", "分类名，可选") }
                         putJsonObject("keyword") { put("type", "string"); put("description", "关键词（商户/备注），可选") }
                         putJsonObject("limit") { put("type", "integer"); put("description", "返回条数，默认20") }
                     }
+                    put("required", buildJsonArray { add("start"); add("end") })
                 }
             )
         ),
@@ -72,10 +76,11 @@ class InsightUseCase @Inject constructor(
                     put("type", "object")
                     putJsonObject("properties") {
                         putJsonObject("start") { put("type", "string"); put("description", "开始日期 yyyy-MM-dd") }
-                        putJsonObject("end") { put("type", "string"); put("description", "结束日期 yyyy-MM-dd") }
+                        putJsonObject("end") { put("type", "string"); put("description", "结束日期 yyyy-MM-dd，包含该日全天") }
                         putJsonObject("group_by") { put("type", "string"); put("description", "category 或 day") }
                         putJsonObject("keyword") { put("type", "string"); put("description", "关键词过滤，可选") }
                     }
+                    put("required", buildJsonArray { add("start"); add("end") })
                 }
             )
         ),
@@ -87,10 +92,13 @@ class InsightUseCase @Inject constructor(
                     put("type", "object")
                     putJsonObject("properties") {
                         putJsonObject("period_a_start") { put("type", "string") }
-                        putJsonObject("period_a_end") { put("type", "string") }
+                        putJsonObject("period_a_end") { put("type", "string"); put("description", "包含结束日全天，yyyy-MM-dd") }
                         putJsonObject("period_b_start") { put("type", "string") }
-                        putJsonObject("period_b_end") { put("type", "string") }
+                        putJsonObject("period_b_end") { put("type", "string"); put("description", "包含结束日全天，yyyy-MM-dd") }
                     }
+                    put("required", buildJsonArray {
+                        add("period_a_start"); add("period_a_end"); add("period_b_start"); add("period_b_end")
+                    })
                 }
             )
         )
@@ -128,10 +136,8 @@ class InsightUseCase @Inject constructor(
             var chartData: ChartData? = null
             val toolMessages = toolCalls.map { tc ->
                 val result = executeToolCall(tc.function.name, tc.function.arguments)
-                if (tc.function.name == "aggregate_by" || tc.function.name == "compare_periods") {
-                    chartData = buildChartData(tc.function.name, tc.function.arguments)
-                }
-                Message(role = "tool", content = result, toolCallId = tc.id)
+                result.chart?.let { chartData = it }
+                Message(role = "tool", content = result.content, toolCallId = tc.id)
             }
 
             val followUpMessages = messages.toMutableList()
@@ -146,23 +152,26 @@ class InsightUseCase @Inject constructor(
 
             val finalResponse = llmClient.chat(followUpMessages, jsonMode = false)
             InsightResult(answer = finalResponse, chartData = chartData)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             InsightResult(answer = "查询出错了：${e.message}，换个问法试试？")
         }
     }
 
-    private suspend fun executeToolCall(name: String, arguments: String): String {
+    private data class ToolResult(val content: String, val chart: ChartData? = null)
+
+    private suspend fun executeToolCall(name: String, arguments: String): ToolResult {
         val args = json.parseToJsonElement(arguments).jsonObject
         return when (name) {
             "query_transactions" -> {
-                val start = parseDate(args["start"]?.jsonPrimitive?.content)
-                val end = parseDate(args["end"]?.jsonPrimitive?.content)
+                val range = dateRange(args)
                 val category = args["category"]?.jsonPrimitive?.contentOrNull
                 val keyword = args["keyword"]?.jsonPrimitive?.contentOrNull
-                val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 20
-                val txs = insightDao.queryTransactions(start, end, category, keyword, limit)
+                val limit = (args["limit"]?.jsonPrimitive?.intOrNull ?: 20).coerceIn(1, 200)
+                val txs = insightDao.queryTransactions(range.start, range.endExclusive, category, keyword, limit)
                 // 手动构建 JSON，避免直接序列化 Room 实体
-                buildJsonArray {
+                ToolResult(buildJsonArray {
                     txs.forEach { t ->
                         addJsonObject {
                             put("amount", t.amount)
@@ -173,69 +182,47 @@ class InsightUseCase @Inject constructor(
                             put("occurred_at", t.occurredAt)
                         }
                     }
-                }.toString()
+                }.toString())
             }
             "aggregate_by" -> {
-                val start = parseDate(args["start"]?.jsonPrimitive?.content)
-                val end = parseDate(args["end"]?.jsonPrimitive?.content)
+                val range = dateRange(args)
                 val groupBy = args["group_by"]?.jsonPrimitive?.content ?: "category"
                 val keyword = args["keyword"]?.jsonPrimitive?.contentOrNull
                 if (groupBy == "day") {
-                    val results = insightDao.aggregateByDay(start, end)
-                    json.encodeToString(ListSerializer(DailyAggregate.serializer()), results)
+                    val results = insightDao.aggregateByDay(range.start, range.endExclusive, keyword)
+                    val plotted = results.takeLast(7)
+                    ToolResult(
+                        json.encodeToString(ListSerializer(DailyAggregate.serializer()), results),
+                        plotted.takeIf { it.isNotEmpty() }?.let {
+                            ChartData(it.map { day -> day.day.takeLast(5) }, it.map { day -> day.total }, it.lastIndex)
+                        }
+                    )
                 } else {
-                    val results = insightDao.aggregateByCategory(start, end, null, keyword)
-                    json.encodeToString(ListSerializer(CategoryAggregate.serializer()), results)
+                    require(groupBy == "category") { "group_by 只能是 category 或 day" }
+                    val results = insightDao.aggregateByCategory(range.start, range.endExclusive, null, keyword)
+                    val plotted = results.take(5)
+                    ToolResult(
+                        json.encodeToString(ListSerializer(CategoryAggregate.serializer()), results),
+                        plotted.takeIf { it.isNotEmpty() }?.let {
+                            ChartData(it.map { category -> category.categoryName }, it.map { category -> category.total }, 0)
+                        }
+                    )
                 }
             }
             "compare_periods" -> {
-                val aStart = parseDate(args["period_a_start"]?.jsonPrimitive?.content)
-                val aEnd = parseDate(args["period_a_end"]?.jsonPrimitive?.content)
-                val bStart = parseDate(args["period_b_start"]?.jsonPrimitive?.content)
-                val bEnd = parseDate(args["period_b_end"]?.jsonPrimitive?.content)
-                val totalA = insightDao.totalExpense(aStart, aEnd)
-                val totalB = insightDao.totalExpense(bStart, bEnd)
-                """{"period_a_total":$totalA,"period_b_total":$totalB}"""
+                val a = dateRange(args, "period_a_")
+                val b = dateRange(args, "period_b_")
+                val totalA = insightDao.totalExpense(a.start, a.endExclusive)
+                val totalB = insightDao.totalExpense(b.start, b.endExclusive)
+                ToolResult("""{"period_a_total":$totalA,"period_b_total":$totalB}""")
             }
-            else -> """{"error":"unknown tool: $name"}"""
+            else -> ToolResult(buildJsonObject { put("error", "unknown tool: $name") }.toString())
         }
     }
 
-    private suspend fun buildChartData(toolName: String, arguments: String): ChartData? {
-        val args = json.parseToJsonElement(arguments).jsonObject
-        val start = parseDate(args["start"]?.jsonPrimitive?.content)
-        val end = parseDate(args["end"]?.jsonPrimitive?.content)
-        return when (toolName) {
-            "aggregate_by" -> {
-                val groupBy = args["group_by"]?.jsonPrimitive?.content ?: "category"
-                if (groupBy == "day") {
-                    // 按天分组时取最近 7 天数据，高亮最后一天
-                    val results = insightDao.aggregateByDay(start, end).takeLast(7)
-                    if (results.isEmpty()) null
-                    else ChartData(
-                        labels = results.map { it.day.takeLast(5) },
-                        values = results.map { it.total },
-                        highlightIndex = results.lastIndex
-                    )
-                } else {
-                    val results = insightDao.aggregateByCategory(start, end, null, null)
-                    if (results.isEmpty()) null
-                    else ChartData(
-                        labels = results.take(5).map { it.categoryName },
-                        values = results.take(5).map { it.total },
-                        highlightIndex = 0
-                    )
-                }
-            }
-            else -> null
-        }
-    }
-
-    private fun parseDate(dateStr: String?): Long {
-        return try {
-            LocalDate.parse(dateStr).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        } catch (_: Exception) {
-            System.currentTimeMillis()
-        }
-    }
+    private fun dateRange(args: kotlinx.serialization.json.JsonObject, prefix: String = ""): DateRange =
+        DateRanges.inclusiveDates(
+            args["${prefix}start"]?.jsonPrimitive?.contentOrNull,
+            args["${prefix}end"]?.jsonPrimitive?.contentOrNull
+        )
 }
