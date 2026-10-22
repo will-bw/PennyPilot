@@ -23,15 +23,18 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import java.util.UUID
 
 data class AiInputUiState(
     val inputText: String = "",
     val isParsing: Boolean = false,
     val isRecording: Boolean = false,
+    val isRecognizing: Boolean = false,
     val isSaving: Boolean = false,
     val previewItems: List<PreviewItem> = emptyList(),
     val error: String? = null,
-    val savedCount: Int = 0
+    val savedCount: Int = 0,
+    val message: String? = null
 )
 
 data class PreviewItem(
@@ -43,7 +46,8 @@ data class PreviewItem(
     val categoryIcon: String,
     val note: String?,
     val merchant: String?,
-    val occurredAt: Long
+    val occurredAt: Long,
+    val draftId: String = UUID.randomUUID().toString()
 )
 
 @HiltViewModel
@@ -71,15 +75,19 @@ class AiInputViewModel @Inject constructor(
 
     /** 供 UI 层上报错误（如录音权限被拒） */
     fun setError(message: String) {
-        _state.update { it.copy(error = message, isRecording = false) }
+        _state.update { it.copy(error = message, isRecording = false, isRecognizing = false) }
     }
+
+    fun clearError() { _state.update { it.copy(error = null) } }
+    fun notifyMicrophoneGranted() { _state.update { it.copy(message = "麦克风已授权，请再次按住语音按钮开始说话。") } }
+    fun clearMessage() { _state.update { it.copy(message = null) } }
 
     fun sendForParsing() {
         val text = _state.value.inputText.trim()
-        if (text.isBlank() || _state.value.isParsing || _state.value.isSaving) return
+        if (text.isBlank() || _state.value.isParsing || _state.value.isSaving || _state.value.isRecording || _state.value.isRecognizing) return
         val submittedRevision = inputRevision
 
-        _state.update { it.copy(inputText = "", isParsing = true, error = null, previewItems = emptyList(), savedCount = 0) }
+        _state.update { it.copy(inputText = "", isParsing = true, error = null, savedCount = 0) }
 
         viewModelScope.launch {
             try {
@@ -107,7 +115,7 @@ class AiInputViewModel @Inject constructor(
                             occurredAt = tx.occurredAt
                         )
                     }
-                    _state.update { it.copy(isParsing = false, previewItems = items) }
+                    _state.update { it.copy(isParsing = false, previewItems = it.previewItems + items) }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -130,6 +138,13 @@ class AiInputViewModel @Inject constructor(
         }
     }
 
+    fun updatePreviewItem(updated: PreviewItem): Boolean {
+        if (_state.value.isSaving || !MoneyUtil.isValidAmountCents(updated.amount)) return false
+        if (_state.value.previewItems.none { it.draftId == updated.draftId }) return false
+        _state.update { s -> s.copy(previewItems = s.previewItems.map { if (it.draftId == updated.draftId) updated else it }, error = null) }
+        return true
+    }
+
     /** 预览卡分类 chip 点击后改选分类（设计 §7.3：可点 chip → 分类网格选择器） */
     fun changePreviewCategory(index: Int, category: CategoryEntity) {
         if (_state.value.isSaving) return
@@ -147,7 +162,7 @@ class AiInputViewModel @Inject constructor(
 
     fun saveAll(onDone: () -> Unit) {
         val items = _state.value.previewItems
-        if (items.isEmpty() || _state.value.isSaving) return
+        if (items.isEmpty() || _state.value.isSaving || _state.value.isParsing) return
         if (items.any { !MoneyUtil.isValidAmountCents(it.amount) }) {
             setError("金额必须大于 0 且不超过 9,999,999.99 元")
             return
@@ -172,9 +187,9 @@ class AiInputViewModel @Inject constructor(
                             status = TxStatus.CONFIRMED
                         )
                     )
-                    _state.update { it.copy(previewItems = it.previewItems.drop(1), savedCount = it.savedCount + 1) }
+                    _state.update { s -> s.copy(previewItems = s.previewItems.filterNot { it.draftId == item.draftId }, savedCount = s.savedCount + 1) }
                 }
-                _state.update { it.copy(isSaving = false) }
+                _state.update { it.copy(isSaving = false, message = "已保存 ${items.size} 笔账目") }
                 onDone()
             } catch (e: CancellationException) {
                 throw e
@@ -189,6 +204,7 @@ class AiInputViewModel @Inject constructor(
         categoryId: Long,
         amountCents: Long,
         note: String,
+        occurredAt: Long = System.currentTimeMillis(),
         onDone: () -> Unit
     ) {
         if (_state.value.isSaving) return
@@ -207,12 +223,12 @@ class AiInputViewModel @Inject constructor(
                         categoryId = categoryId,
                         note = note.ifBlank { null },
                         merchant = null,
-                        occurredAt = System.currentTimeMillis(),
+                        occurredAt = occurredAt,
                         source = TxSource.MANUAL,
                         status = TxStatus.CONFIRMED
                     )
                 )
-                _state.update { it.copy(isSaving = false) }
+                _state.update { it.copy(isSaving = false, message = "已保存 1 笔账目") }
                 onDone()
             } catch (e: CancellationException) {
                 throw e
@@ -223,19 +239,27 @@ class AiInputViewModel @Inject constructor(
     }
 
     fun startRecording() {
-        _state.update { it.copy(isRecording = true) }
+        if (_state.value.isRecording || _state.value.isRecognizing || _state.value.isSaving) return
+        _state.update { it.copy(isRecording = true, error = null) }
         speechManager.startListening(
             onResult = { result ->
-                updateInput(result)
-                _state.update { it.copy(isRecording = false) }
+                // 语音补在当前草稿后，异步结果不能覆盖已有文字。
+                updateInput(listOf(_state.value.inputText.trim(), result.trim()).filter { it.isNotEmpty() }.joinToString("，"))
+                _state.update { it.copy(isRecording = false, isRecognizing = false) }
             },
             onError = ::setError
         )
     }
 
     fun stopRecording() {
+        if (!_state.value.isRecording) return
         speechManager.stopListening()
-        _state.update { it.copy(isRecording = false) }
+        _state.update { it.copy(isRecording = false, isRecognizing = true) }
+    }
+
+    fun cancelRecording() {
+        speechManager.cancel()
+        _state.update { it.copy(isRecording = false, isRecognizing = false) }
     }
 
     fun reset() {

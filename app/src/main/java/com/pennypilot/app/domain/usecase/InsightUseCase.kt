@@ -37,7 +37,8 @@ data class ChartData(
 /** 洞察问答结果 */
 data class InsightResult(
     val answer: String,
-    val chartData: ChartData? = null
+    val chartData: ChartData? = null,
+    val isError: Boolean = false
 )
 
 /**
@@ -123,7 +124,7 @@ class InsightUseCase @Inject constructor(
         return try {
             val response: ChatResponseWithTools = llmClient.chatWithTools(messages, tools)
             val choice = response.choices.firstOrNull()
-                ?: return InsightResult("抱歉，我没有理解你的问题。")
+                ?: return InsightResult("暂时没有收到回答，请重试。", isError = true)
 
             val toolCalls = choice.message?.toolCalls
             if (toolCalls.isNullOrEmpty()) {
@@ -155,7 +156,7 @@ class InsightUseCase @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            InsightResult(answer = "查询出错了：${e.message}，换个问法试试？")
+            InsightResult(answer = "查询出错了，请检查网络和 AI 服务设置后重试。", isError = true)
         }
     }
 

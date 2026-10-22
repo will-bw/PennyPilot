@@ -4,37 +4,37 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.pennypilot.app.data.db.entity.CategoryEntity
+import com.pennypilot.app.R
+import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.components.CatIcon
 import com.pennypilot.app.ui.components.InputDock
-import com.pennypilot.app.ui.theme.faintColor
-import com.pennypilot.app.ui.theme.priGradient
+import com.pennypilot.app.ui.components.LedgerState
+import com.pennypilot.app.ui.theme.incomeColor
 import com.pennypilot.app.util.MoneyUtil
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun AiInputScreen(
@@ -42,387 +42,188 @@ fun AiInputScreen(
     vm: AiInputViewModel = hiltViewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val allCategories by vm.allCategories.collectAsStateWithLifecycle()
+    val categories by vm.allCategories.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var showKeypad by remember { mutableStateOf(false) }
-
-    // 录音运行时权限：按住麦克风前先检查/申请，避免 SpeechRecognizer 静默失败
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        // 权限弹窗结束时最初的按压已结束；下一次按住才开始录音。
-        if (!granted) vm.setError("未获得录音权限，请在系统设置中开启麦克风权限后重试")
+    val focus = LocalFocusManager.current
+    val snackbar = remember { SnackbarHostState() }
+    var showKeypad by rememberSaveable { mutableStateOf(false) }
+    var editingId by rememberSaveable { mutableStateOf<String?>(null) }
+    var removingId by rememberSaveable { mutableStateOf<String?>(null) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) vm.setError("未获得录音权限。你可以继续输入文字，或在系统设置中开启麦克风权限。")
+        else vm.notifyMicrophoneGranted()
+    }
+    DisposableEffect(vm) { onDispose { vm.cancelRecording() } }
+    LaunchedEffect(state.message) {
+        state.message?.let {
+            snackbar.showSnackbar(it)
+            vm.clearMessage()
+        }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Spacer(Modifier.height(8.dp))
-
-        // Page title + 手动兜底入口
+    Column(Modifier.fillMaxSize()) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("记一笔", style = MaterialTheme.typography.headlineLarge)
-            Spacer(Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(99.dp))
-                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(99.dp))
-                    .clickable { showKeypad = true }
-                    .padding(horizontal = 14.dp, vertical = 7.dp)
-            ) {
-                Text(
-                    "手动",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            Text("记一笔", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f))
+            TextButton(
+                onClick = { focus.clearFocus(); vm.clearError(); showKeypad = true },
+                enabled = !state.isSaving && !state.isRecording && !state.isRecognizing,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) { Text("手动记账") }
+        }
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            if (state.previewItems.isEmpty() && !state.isParsing) {
+                item(key = "example") {
+                    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text("说一句，记下多笔账", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                            Text("“昨天午饭 25 元，打车去公司 32 元。”", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                            Text("支持日期、金额和分类识别。先确认预览，再保存到账本。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                            TextButton(onClick = onNavigateToManual, modifier = Modifier.heightIn(min = 48.dp)) { Text("打开完整记账表单") }
+                        }
+                    }
+                }
+            }
+            if (state.isParsing) {
+                item(key = "parsing") { LedgerState("正在整理账目", "已有预览会保留，你也可以继续输入下一笔。", loading = true) }
+            }
+            state.error?.let { error ->
+                item(key = "error") {
+                    LedgerState(
+                        "操作未完成", error,
+                        actionLabel = if (state.previewItems.isNotEmpty()) "继续核对账目" else "改用手动记账",
+                        onAction = { vm.clearError(); if (state.previewItems.isEmpty()) { focus.clearFocus(); showKeypad = true } }
+                    )
+                }
+            }
+            if (state.previewItems.isNotEmpty()) {
+                item(key = "preview_heading") {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("待确认 · ${state.previewItems.size} 笔", style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                        Text("可逐笔修改金额、分类和时间。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                items(state.previewItems, key = { it.draftId }) { item ->
+                    PreviewCard(
+                        item = item,
+                        enabled = !state.isSaving,
+                        onEdit = { focus.clearFocus(); editingId = item.draftId },
+                        onRemove = { removingId = item.draftId }
+                    )
+                }
+            }
+            if (state.savedCount > 0 && state.previewItems.isNotEmpty()) {
+                item(key = "partial_saved") {
+                    Text("已保存 ${state.savedCount} 笔，其余账目仍在预览中。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        Surface(color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SnackbarHost(snackbar)
+                if (state.previewItems.isNotEmpty()) {
+                    Button(
+                        onClick = { focus.clearFocus(); vm.saveAll {} },
+                        enabled = !state.isSaving && !state.isParsing,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        if (state.isSaving) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(if (state.isSaving) "正在保存…" else "保存 ${state.previewItems.size} 笔账目")
+                    }
+                }
+                InputDock(
+                    text = state.inputText,
+                    onTextChange = vm::updateInput,
+                    onSend = { focus.clearFocus(); vm.sendForParsing() },
+                    onMicPress = {
+                        focus.clearFocus()
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) vm.startRecording()
+                        else permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    onMicRelease = vm::stopRecording,
+                    isRecording = state.isRecording,
+                    isRecognizing = state.isRecognizing,
+                    isSending = state.isParsing || state.isSaving,
+                    enabled = !state.isSaving,
+                    placeholder = if (state.previewItems.isEmpty()) "输入一笔或多笔账目…" else "继续输入，追加待确认账目…"
                 )
             }
         }
-
-        // Hint card (indigo gradient)
-        Card(
-            shape = RoundedCornerShape(22.dp),
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color.Transparent)
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        Brush.linearGradient(MaterialTheme.priGradient)
-                    )
-                    .padding(18.dp)
-            ) {
-                Column {
-                    Text(
-                        "TRY SAYING",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.6.sp,
-                        color = Color.White.copy(alpha = 0.75f)
-                    )
-                    Text(
-                        "\u201C昨天午饭 25 块，\n打车去公司 32。\u201D",
-                        fontFamily = FontFamily.Serif,
-                        fontSize = 16.5.sp,
-                        color = Color.White,
-                        lineHeight = 26.sp,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                    Text(
-                        "一句话可拆多笔 · 支持「昨天/上周二」等相对时间",
-                        fontSize = 11.5.sp,
-                        color = Color.White.copy(alpha = 0.72f),
-                        modifier = Modifier.padding(top = 9.dp)
-                    )
-                }
-            }
-        }
-
-        // AI Parse loading
-        if (state.isParsing) {
-            Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
-                Box(Modifier.padding(24.dp), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(modifier = Modifier.size(28.dp))
-                        Text(
-                            "AI 解析中…",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        // AI Parse Preview Card
-        if (state.previewItems.isNotEmpty()) {
-            PreviewCard(
-                items = state.previewItems,
-                isSaving = state.isSaving,
-                categories = allCategories,
-                onRemove = vm::removePreviewItem,
-                onChangeCategory = vm::changePreviewCategory,
-                onEditAll = onNavigateToManual,
-                onSaveAll = { vm.saveAll { /* stay on page, show feedback */ } }
-            )
-        }
-
-        // Error state with fallback
-        if (state.error != null) {
-            Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        "操作未完成",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                    Text(state.error ?: "", style = MaterialTheme.typography.bodySmall)
-                    FilledTonalButton(onClick = onNavigateToManual) {
-                        Text("改用手动记账")
-                    }
-                }
-            }
-        }
-
-        // Saved feedback
-        if (state.savedCount > 0) {
-            Text(
-                "✓ 已保存 ${state.savedCount} 笔",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.titleMedium
-            )
-        }
-
-        // 底部提示（原型 add-tip）
-        Text(
-            "按住 🎤 说话，松手转文字，可修改后再发送\nLLM 解析失败时自动降级为手动表单",
-            fontSize = 11.5.sp,
-            lineHeight = 20.sp,
-            color = MaterialTheme.faintColor,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Spacer(Modifier.weight(1f))
-
-        // InputDock at bottom
-        InputDock(
-            text = state.inputText,
-            onTextChange = vm::updateInput,
-            onSend = { vm.sendForParsing() },
-            onMicPress = {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-                    == PackageManager.PERMISSION_GRANTED
-                ) {
-                    vm.startRecording()
-                } else {
-                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            },
-            onMicRelease = { vm.stopRecording() },
-            isRecording = state.isRecording,
-            isSending = state.isParsing || state.isSaving,
-            // 底部预留 26dp：FAB 凸出 TabBar 16dp + 10dp 间隙，避免 dock 与 FAB 互相遮挡
-            modifier = Modifier.padding(bottom = 26.dp)
-        )
     }
-
     if (showKeypad) {
         KeypadSheet(
-            categories = allCategories,
-            isSaving = state.isSaving,
-            error = state.error,
-            onDismiss = { if (!state.isSaving) showKeypad = false },
-            onSave = { type, categoryId, cents, note ->
-                vm.saveManual(type, categoryId, cents, note) { showKeypad = false }
+            categories = categories, isSaving = state.isSaving, error = state.error,
+            onDismiss = { if (!state.isSaving) { showKeypad = false; vm.clearError() } },
+            onSave = { type, categoryId, cents, note, occurredAt ->
+                vm.saveManual(type, categoryId, cents, note, occurredAt) { showKeypad = false }
             }
+        )
+    }
+    state.previewItems.find { it.draftId == editingId }?.let { item ->
+        PreviewEditorSheet(item, categories, onDismiss = { editingId = null }, onApply = vm::updatePreviewItem)
+    }
+    state.previewItems.find { it.draftId == removingId }?.let { item ->
+        AlertDialog(
+            onDismissRequest = { removingId = null },
+            title = { Text("移除这笔待确认账目？") },
+            text = { Text("${item.merchant ?: item.note ?: item.categoryName} · ¥${MoneyUtil.formatHeroAmount(item.amount)}，尚未保存到账本。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val index = state.previewItems.indexOfFirst { it.draftId == item.draftId }
+                    if (index >= 0) vm.removePreviewItem(index)
+                    removingId = null
+                }) { Text("移除") }
+            },
+            dismissButton = { TextButton(onClick = { removingId = null }) { Text("保留") } }
         )
     }
 }
 
 @Composable
-private fun PreviewCard(
-    items: List<PreviewItem>,
-    isSaving: Boolean,
-    categories: List<CategoryEntity>,
-    onRemove: (Int) -> Unit,
-    onChangeCategory: (Int, CategoryEntity) -> Unit,
-    onEditAll: () -> Unit,
-    onSaveAll: () -> Unit
-) {
-    // 当前弹出分类选择器的条目下标（null = 未弹出）
-    var pickerIndex by remember { mutableStateOf<Int?>(null) }
-
+private fun PreviewCard(item: PreviewItem, enabled: Boolean, onEdit: () -> Unit, onRemove: () -> Unit) {
     Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
-        Column {
-            // Header
-            Row(
-                modifier = Modifier.padding(15.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("✦", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
-                Spacer(Modifier.width(7.dp))
-                Text("AI 解析预览", fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "${items.size} 笔",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(99.dp))
-                        .padding(horizontal = 9.dp, vertical = 3.dp)
-                )
-            }
-
-            // Items
-            items.forEachIndexed { index, item ->
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CatIcon(
-                        colorIndex = item.categoryColorIndex,
-                        emoji = item.categoryIcon,
-                        size = 38
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            item.merchant ?: item.note ?: item.categoryName,
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        // 推断时间备注（设计 §7.3）
-                        Text(
-                            remember(item.occurredAt) {
-                                java.text.SimpleDateFormat("M月d日 HH:mm", java.util.Locale.getDefault())
-                                    .format(java.util.Date(item.occurredAt))
-                            },
-                            fontSize = 11.sp,
-                            color = MaterialTheme.faintColor
-                        )
-                        if (item.note != null && item.merchant != null) {
-                            Text(
-                                item.note,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        // Category chip：可点 → 弹分类网格选择器
-                        Text(
-                            item.categoryName,
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .padding(top = 5.dp)
-                                .background(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .clickable(enabled = !isSaving) { pickerIndex = index }
-                                .padding(horizontal = 9.dp, vertical = 4.dp)
-                        )
-                    }
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                CatIcon(item.categoryColorIndex, item.categoryIcon, size = 40)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(item.merchant ?: item.note ?: item.categoryName, style = MaterialTheme.typography.titleMedium)
+                    Text(item.categoryName, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        MoneyUtil.formatHeroAmount(item.amount),
-                        style = MaterialTheme.typography.titleLarge
+                        remember(item.occurredAt) { SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.getDefault()).format(Date(item.occurredAt)) },
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { onRemove(index) }, enabled = !isSaving) {
-                        Text("✕", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    if (item.merchant != null && item.note != null) Text(item.note, style = MaterialTheme.typography.bodyMedium)
                 }
             }
-
-            // Footer buttons：15dp 圆角，主按钮靛蓝渐变（原型 btn）
-            Row(
-                modifier = Modifier.padding(14.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                // 「再改改」跳转手动记账，不再与「保存全部」重复触发保存
-                OutlinedButton(
-                    onClick = onEditAll,
-                    enabled = !isSaving,
-                    shape = RoundedCornerShape(15.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = Color.Transparent,
-                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                ) {
-                    Text("再改改", fontWeight = FontWeight.Bold)
-                }
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .background(
-                            Brush.linearGradient(MaterialTheme.priGradient),
-                            RoundedCornerShape(15.dp)
-                        )
-                        .clickable(enabled = !isSaving) { onSaveAll() }
-                        .padding(vertical = 13.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        if (isSaving) "保存中…" else "保存全部 · ${items.size} 笔",
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-    }
-
-    // 分类网格选择器（设计 §7.3：分类为可点 chip → 弹出分类网格）
-    pickerIndex?.let { idx ->
-        // items 可能在显示期间被删减，下标越界时静默不弹
-        items.getOrNull(idx)?.let { item ->
-            CategoryPickerDialog(
-                categories = categories.filter { it.type == item.type && it.enabled },
-                selectedId = item.categoryId,
-                onSelect = { cat ->
-                    onChangeCategory(idx, cat)
-                    pickerIndex = null
-                },
-                onDismiss = { pickerIndex = null }
+            Text(
+                "${if (item.type == TxType.INCOME) "收入" else "支出"}  ¥${MoneyUtil.formatHeroAmount(item.amount)}",
+                style = MaterialTheme.typography.titleLarge,
+                color = if (item.type == TxType.INCOME) MaterialTheme.incomeColor else MaterialTheme.colorScheme.onSurface
             )
-        }
-    }
-}
-
-@Composable
-private fun CategoryPickerDialog(
-    categories: List<CategoryEntity>,
-    selectedId: Long,
-    onSelect: (CategoryEntity) -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("选择分类") },
-        text = {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                modifier = Modifier.height(280.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(categories) { cat ->
-                    val selected = cat.id == selectedId
-                    Column(
-                        modifier = Modifier
-                            .clickable { onSelect(cat) }
-                            .alpha(if (selected) 1f else 0.6f),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        CatIcon(colorIndex = cat.colorIndex, emoji = cat.icon, size = 42)
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            cat.name,
-                            fontSize = 11.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (selected) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-                    }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onRemove, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("移除")
+                }
+                Spacer(Modifier.width(8.dp))
+                FilledTonalButton(onClick = onEdit, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Icon(painterResource(R.drawable.ic_pencil), contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("修改")
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
         }
-    )
+    }
 }

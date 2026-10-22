@@ -1,294 +1,175 @@
 package com.pennypilot.app.ui.rules
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
-import com.pennypilot.app.ui.theme.PageSubStyle
-import com.pennypilot.app.ui.theme.faintColor
+import com.pennypilot.app.data.parser.ParseRuleEngine
+import com.pennypilot.app.ui.components.LedgerState
+import com.pennypilot.app.ui.settings.ManagementHeader
+import com.pennypilot.app.ui.settings.ManagementMessage
+import com.pennypilot.app.util.MoneyUtil
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-private val PACKAGE_LABELS = mapOf(
-    "com.tencent.mm" to "微信",
-    "com.eg.android.AlipayGphone" to "支付宝"
-)
+private val PACKAGE_LABELS = mapOf("com.tencent.mm" to "微信", "com.eg.android.AlipayGphone" to "支付宝")
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ParseRulesScreen(onBack: () -> Unit) {
-    val viewModel: ParseRulesViewModel = hiltViewModel()
-    val rules by viewModel.rules.collectAsState()
-
-    var editingRule by remember { mutableStateOf<ParseRuleEntity?>(null) }
-    var showResetConfirm by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp)
-            .padding(top = 16.dp, bottom = 40.dp)
-    ) {
-        TextButton(onClick = onBack) { Text("← 返回") }
-        Text("通知解析规则", style = MaterialTheme.typography.headlineLarge)
-        Text(
-            "正则热更新 · 按优先级逐条匹配，微信/支付宝改文案时在此调整",
-            style = PageSubStyle,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 4.dp)
-        )
-
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = { editingRule = ParseRuleEntity(appPackage = "com.tencent.mm", regexAmount = "") }) {
-                Text("＋ 新增规则")
+    val vm: ParseRulesViewModel = hiltViewModel()
+    val rules by vm.rules.collectAsStateWithLifecycle()
+    val busy by vm.busy.collectAsStateWithLifecycle()
+    val loaded by vm.loaded.collectAsStateWithLifecycle()
+    val error by vm.error.collectAsStateWithLifecycle()
+    val message by vm.message.collectAsStateWithLifecycle()
+    var selectedPackage by rememberSaveable { mutableStateOf("com.tencent.mm") }
+    var editId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var adding by rememberSaveable { mutableStateOf(false) }
+    var resetting by rememberSaveable { mutableStateOf(false) }
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
+    val editRule = rules.find { it.id == editId }
+    val visibleRules = rules.filter { it.appPackage == selectedPackage }
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item {
+                ManagementHeader("通知解析规则", "本地识别支付通知。数值越小越先匹配；修改后可先测试，再保存。", onBack)
+                Spacer(Modifier.height(20.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PACKAGE_LABELS.forEach { (pkg, label) -> FilterChip(selected = selectedPackage == pkg,
+                        onClick = { selectedPackage = pkg }, label = { Text(label) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) }
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { vm.clearError(); adding = true }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("新增${PACKAGE_LABELS[selectedPackage]}规则")
+                }
             }
-            TextButton(onClick = { showResetConfirm = true }) {
-                Text("恢复预置规则", color = MaterialTheme.colorScheme.error)
-            }
-        }
-
-        // 按 app 分组展示
-        val grouped = rules.groupBy { it.appPackage }
-        listOf("com.tencent.mm", "com.eg.android.AlipayGphone").forEach { pkg ->
-            val pkgRules = grouped[pkg] ?: return@forEach
-            Spacer(Modifier.height(20.dp))
-            Text(
-                PACKAGE_LABELS[pkg] ?: pkg,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.W700,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.padding(start = 4.dp)
-            )
-            Spacer(Modifier.height(10.dp))
-            Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth()) {
-                    pkgRules.sortedBy { it.priority }.forEachIndexed { index, rule ->
-                        RuleRow(
-                            rule = rule,
-                            onClick = { editingRule = rule },
-                            onToggle = { viewModel.toggleEnabled(rule) }
-                        )
-                        if (index < pkgRules.size - 1) {
-                            HorizontalDivider(
-                                color = MaterialTheme.colorScheme.outline,
-                                thickness = 1.dp,
-                                modifier = Modifier.padding(horizontal = 16.dp)
-                            )
+            if (error != null && !adding && editRule == null && !resetting) item { ManagementMessage(error!!, error = true) }
+            if (!loaded) item { LedgerState("正在读取规则", "本地解析规则会显示在这里。", loading = true) }
+            else if (visibleRules.isEmpty()) item { LedgerState("还没有${PACKAGE_LABELS[selectedPackage]}规则", "添加规则或恢复预置规则，即可在本地识别通知；云端补充解析由独立开关控制。") }
+            else {
+                item { Text("${visibleRules.count { it.enabled }} 条已启用 · 点击规则可编辑", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                items(visibleRules, key = { it.id }) { rule ->
+                    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
+                        Row(Modifier.fillMaxWidth().clickable(enabled = !busy) { vm.clearError(); editId = rule.id }.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("${if (rule.directionHint == "INCOME") "收入" else "支出"} · 优先级 ${rule.priority}", style = MaterialTheme.typography.titleMedium)
+                                Text(rule.regexAmount, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3)
+                                Text(if (rule.enabled) "已启用" else "已停用", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = rule.enabled, onCheckedChange = { vm.toggleEnabled(rule) }, enabled = !busy,
+                                modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "${PACKAGE_LABELS[rule.appPackage]}优先级${rule.priority}规则" })
                         }
                     }
                 }
             }
-        }
-
-        if (rules.isEmpty()) {
-            Spacer(Modifier.height(32.dp))
-            Text(
-                "暂无规则，通知将无法解析。可点击「恢复预置规则」。",
-                fontSize = 13.sp,
-                color = MaterialTheme.faintColor
-            )
-        }
-    }
-
-    // 编辑 / 新增弹窗
-    editingRule?.let { rule ->
-        RuleEditDialog(
-            rule = rule,
-            isNew = rule.id == 0L,
-            onSave = { viewModel.save(it); editingRule = null },
-            onDelete = { viewModel.delete(it); editingRule = null },
-            onDismiss = { editingRule = null }
-        )
-    }
-
-    // 恢复预置二次确认
-    if (showResetConfirm) {
-        AlertDialog(
-            onDismissRequest = { showResetConfirm = false },
-            title = { Text("恢复预置规则？") },
-            text = { Text("将清空当前全部规则并写回预置的微信/支付宝正则，自定义修改会丢失。") },
-            confirmButton = {
-                TextButton(onClick = { viewModel.resetPresets(); showResetConfirm = false }) {
-                    Text("恢复")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showResetConfirm = false }) { Text("取消") }
+            item {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = { vm.clearError(); resetting = true }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("恢复全部预置规则") }
+                Spacer(Modifier.height(8.dp))
+                Text("恢复会替换微信与支付宝的所有规则，包括自定义修改。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        )
+        }
     }
+    if (adding || editRule != null) {
+        RuleEditDialog(editRule ?: ParseRuleEntity(appPackage = selectedPackage, regexAmount = ""), busy, error,
+            onChange = vm::clearError,
+            onDismiss = { if (!busy) { adding = false; editId = null; vm.clearError() } },
+            onSave = { rule -> vm.save(rule) { adding = false; editId = null } },
+            onDelete = { rule -> vm.delete(rule) { adding = false; editId = null } })
+    }
+    if (resetting) AlertDialog(onDismissRequest = { if (!busy) resetting = false },
+        title = { Text("恢复全部预置规则？") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("微信与支付宝的现有规则将被替换，自定义规则及修改会丢失。已有账目不受影响。")
+            error?.let { ManagementMessage(it, error = true) } } },
+        confirmButton = { TextButton(onClick = { vm.resetPresets { resetting = false } }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (busy) "正在恢复…" else "确认恢复") } },
+        dismissButton = { TextButton(onClick = { resetting = false; vm.clearError() }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") } })
 }
 
 @Composable
-private fun RuleRow(
-    rule: ParseRuleEntity,
-    onClick: () -> Unit,
-    onToggle: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // 优先级徽标
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(10.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("${rule.priority}", fontSize = 13.sp, fontWeight = FontWeight.W700)
-        }
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AssistChipBadge(
-                    if (rule.directionHint == "INCOME") "收入" else "支出",
-                    if (rule.directionHint == "INCOME") INCOME_FG else INK_FG
-                )
-                Text(
-                    rule.regexAmount,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1
-                )
-            }
-            Spacer(Modifier.height(3.dp))
-            Text(
-                rule.regexMerchant?.let { "商户：$it" } ?: "商户：不提取",
-                fontSize = 10.5.sp,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.faintColor,
-                maxLines = 1
-            )
-        }
-        Switch(checked = rule.enabled, onCheckedChange = { onToggle() })
-    }
-}
-
-/** 小号彩色文字徽标 */
-@Composable
-private fun AssistChipBadge(text: String, fg: Color) {
-    Box(
-        modifier = Modifier
-            .background(fg.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 6.dp, vertical = 2.dp)
-    ) {
-        Text(text, fontSize = 10.sp, fontWeight = FontWeight.W600, color = fg)
-    }
-}
-
-// 收支配色约定（设计文档 §7.1）：收入暖红 / 支出墨色
-private val INCOME_FG = Color(0xFFFF8172)
-private val INK_FG = Color(0xFF181C2E)
-
-@Composable
-private fun RuleEditDialog(
-    rule: ParseRuleEntity,
-    isNew: Boolean,
-    onSave: (ParseRuleEntity) -> Unit,
-    onDelete: (ParseRuleEntity) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var appPackage by remember { mutableStateOf(rule.appPackage) }
-    var regexAmount by remember { mutableStateOf(rule.regexAmount) }
-    var regexMerchant by remember { mutableStateOf(rule.regexMerchant ?: "") }
-    var direction by remember { mutableStateOf(rule.directionHint) }
-    var priority by remember { mutableStateOf(rule.priority.toString()) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (isNew) "新增规则" else "编辑规则") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // 目标 App
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PACKAGE_LABELS.forEach { (pkg, label) ->
-                        FilterChip(
-                            selected = appPackage == pkg,
-                            onClick = { appPackage = pkg },
-                            label = { Text(label) }
-                        )
-                    }
-                }
-                OutlinedTextField(
-                    value = regexAmount,
-                    onValueChange = { regexAmount = it; error = null },
-                    label = { Text("金额正则（第 1 组为金额）") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = regexMerchant,
-                    onValueChange = { regexMerchant = it },
-                    label = { Text("商户正则（可空）") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("EXPENSE" to "支出", "INCOME" to "收入").forEach { (value, label) ->
-                        FilterChip(
-                            selected = direction == value,
-                            onClick = { direction = value },
-                            label = { Text(label) }
-                        )
-                    }
-                    OutlinedTextField(
-                        value = priority,
-                        onValueChange = { priority = it.filter(Char::isDigit) },
-                        label = { Text("优先级") },
-                        modifier = Modifier.width(96.dp)
-                    )
-                }
-                error?.let {
-                    Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                // 保存前校验正则可编译，避免坏规则进库导致捕获服务整包失效
-                val amount = regexAmount.trim()
-                val valid = try {
-                    Regex(amount); regexMerchant.takeIf { it.isNotBlank() }?.let { Regex(it) }; true
-                } catch (_: Exception) { false }
+private fun RuleEditDialog(rule: ParseRuleEntity, busy: Boolean, saveError: String?, onChange: () -> Unit,
+    onDismiss: () -> Unit, onSave: (ParseRuleEntity) -> Unit, onDelete: (ParseRuleEntity) -> Unit) {
+    var pkg by rememberSaveable(rule.id) { mutableStateOf(rule.appPackage) }
+    var amount by rememberSaveable(rule.id) { mutableStateOf(rule.regexAmount) }
+    var merchant by rememberSaveable(rule.id) { mutableStateOf(rule.regexMerchant.orEmpty()) }
+    var direction by rememberSaveable(rule.id) { mutableStateOf(rule.directionHint) }
+    var priority by rememberSaveable(rule.id) { mutableStateOf(rule.priority.toString()) }
+    var sample by rememberSaveable(rule.id) { mutableStateOf("") }
+    var preview by remember { mutableStateOf<String?>(null) }
+    var validation by remember { mutableStateOf<String?>(null) }
+    var testing by remember { mutableStateOf(false) }
+    var deleting by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    fun changed() { validation = null; preview = null; onChange() }
+    fun draft(): ParseRuleEntity? {
+        validation = when {
+            amount.isBlank() -> "请填写金额正则。"
+            priority.toIntOrNull() == null -> "优先级需为 0 到 2147483647 的整数。"
+            else -> try {
                 when {
-                    amount.isEmpty() -> error = "金额正则不能为空"
-                    !valid -> error = "正则语法错误，请检查"
-                    else -> onSave(rule.copy(
-                        appPackage = appPackage,
-                        regexAmount = amount,
-                        regexMerchant = regexMerchant.takeIf { it.isNotBlank() },
-                        directionHint = direction,
-                        priority = priority.toIntOrNull() ?: 0
-                    ))
+                    Regex(amount.trim()).toPattern().matcher("").groupCount() == 0 -> "请用括号建立第 1 个捕获组，用于提取金额。"
+                    merchant.isNotBlank() && Regex(merchant.trim()).toPattern().matcher("").groupCount() == 0 -> "商户正则需包含第 1 个捕获组。"
+                    else -> null
                 }
-            }) { Text("保存") }
-        },
-        dismissButton = {
-            Row {
-                if (!isNew) {
-                    TextButton(onClick = { onDelete(rule) }) {
-                        Text("删除", color = MaterialTheme.colorScheme.error)
-                    }
-                }
-                TextButton(onClick = onDismiss) { Text("取消") }
-            }
+            } catch (_: IllegalArgumentException) { "正则语法有误，请检查括号和转义字符。" }
         }
-    )
+        return if (validation != null) null else rule.copy(appPackage = pkg, regexAmount = amount.trim(), regexMerchant = merchant.trim().ifBlank { null }, directionHint = direction, priority = priority.toInt())
+    }
+    AlertDialog(onDismissRequest = { if (!busy && !testing) onDismiss() },
+        title = { Text(if (deleting) "删除这条规则？" else if (rule.id == 0L) "新增规则" else "编辑规则") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (deleting) Text("删除后，这条规则不再参与通知识别。已有账目保留。") else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { PACKAGE_LABELS.forEach { (value, label) ->
+                    FilterChip(selected = pkg == value, onClick = { pkg = value; changed() }, enabled = !busy && !testing, label = { Text(label) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
+                } }
+                OutlinedTextField(amount, onValueChange = { amount = it; changed() }, label = { Text("金额正则") }, supportingText = { Text("第 1 个捕获组为金额，单位为元。") }, enabled = !busy && !testing, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedTextField(merchant, onValueChange = { merchant = it; changed() }, label = { Text("商户正则（可选）") }, supportingText = { Text("第 1 个捕获组为商户；留空则不提取。") }, enabled = !busy && !testing, modifier = Modifier.fillMaxWidth())
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf("EXPENSE" to "支出", "INCOME" to "收入").forEach { (value, label) ->
+                    FilterChip(selected = direction == value, onClick = { direction = value; changed() }, enabled = !busy && !testing, label = { Text(label) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
+                } }
+                OutlinedTextField(priority, onValueChange = { priority = it.filter(Char::isDigit); changed() }, label = { Text("优先级") }, supportingText = { Text("数值越小越先匹配。") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, enabled = !busy && !testing, modifier = Modifier.fillMaxWidth())
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Text("保存前试一试", style = MaterialTheme.typography.titleSmall)
+                OutlinedTextField(sample, onValueChange = { sample = it; preview = null }, label = { Text("示例通知文本") }, enabled = !busy && !testing, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                OutlinedButton(onClick = {
+                    draft()?.let { candidate ->
+                        testing = true
+                        scope.launch {
+                            try {
+                                val parsed = withContext(Dispatchers.Default) { ParseRuleEngine.parse(sample, listOf(candidate.copy(enabled = true))) }
+                                preview = parsed?.let { "${if (it.direction == "INCOME") "收入" else "支出"} ${MoneyUtil.centsToYuanString(it.amountCents)} 元 · ${it.merchant ?: "未提取商户"}" }
+                                    ?: "未匹配到有效金额，请检查示例文本和正则。"
+                            } catch (e: CancellationException) { throw e
+                            } catch (_: Exception) { preview = "测试未完成，请检查规则后重试。"
+                            } finally { testing = false }
+                        }
+                    }
+                }, enabled = sample.isNotBlank() && !busy && !testing, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (testing) "正在测试…" else "测试这条规则") }
+                preview?.let { ManagementMessage(it) }
+                if (rule.id != 0L) TextButton(onClick = { deleting = true; onChange() }, enabled = !busy && !testing, modifier = Modifier.heightIn(min = 48.dp)) { Text("删除规则", color = MaterialTheme.colorScheme.error) }
+            }
+            (validation ?: saveError)?.let { ManagementMessage(it, error = true) }
+        } },
+        confirmButton = { TextButton(onClick = { if (deleting) onDelete(rule) else draft()?.let(onSave) }, enabled = !busy && !testing, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (busy) "处理中…" else if (deleting) "确认删除" else "保存规则") } },
+        dismissButton = { TextButton(onClick = { if (deleting) { deleting = false; onChange() } else onDismiss() }, enabled = !busy && !testing, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (deleting) "返回编辑" else "取消") } })
 }

@@ -1,5 +1,6 @@
 package com.pennypilot.app.ui.settings
 
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import com.pennypilot.app.service.NotificationCaptorService
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,38 +29,11 @@ fun ColorOsGuideScreen(onBack: () -> Unit) {
         modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        TextButton(onClick = onBack) { Text("← 返回") }
-        Text("ColorOS 保活引导", style = MaterialTheme.typography.headlineLarge)
-        Text(
-            "不同 ColorOS 版本的后台管理入口可能不同。先开启通知使用权，再按需要检查电池优化、自启动和后台运行。",
-            style = MaterialTheme.typography.bodyLarge
-        )
+        ManagementHeader("后台运行引导", "系统入口随手机品牌而异。通知授权用于自动捕获，其余设置可按需调整。", onBack)
 
-        // Step 1: Notification access
-        GuideStep(
-            step = 1,
-            title = "开启通知使用权",
-            desc = "设置 → 应用 → 特殊权限 → 通知使用权 → 开启 PennyPilot",
-            buttonText = "去设置"
-        ) {
-            context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-        }
-
-        // Step 2: Battery optimization
+        NotificationAccessGuideStep()
         BatteryOptimizationGuideStep()
-
-        // Step 3: Auto-start (manual)
-        GuideStep(
-            step = 3,
-            title = "允许自启动 + 后台运行",
-            desc = "设置 → 应用 → 应用管理 → PennyPilot → 耗电管理 → 允许自启动 + 允许后台运行",
-            buttonText = "打开应用详情"
-        ) {
-            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = Uri.parse("package:${context.packageName}")
-            }
-            context.startActivity(intent)
-        }
+        AppBackgroundGuideStep()
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -105,10 +80,43 @@ fun BatteryOptimizationGuideStep() {
 fun GuideStep(step: Int, title: String, desc: String, buttonText: String, onAction: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Step $step", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            FilledTonalButton(onClick = onAction) { Text(buttonText) }
+            Text("$step. $title", style = MaterialTheme.typography.titleMedium)
+            Text(desc, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FilledTonalButton(onClick = onAction, modifier = Modifier.heightIn(min = 48.dp)) { Text(buttonText) }
         }
+    }
+}
+
+@Composable
+fun NotificationAccessGuideStep() {
+    val context = LocalContext.current
+    var granted by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        val component = ComponentName(context, NotificationCaptorService::class.java).flattenToString()
+        granted = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")?.split(':')?.contains(component) == true
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        GuideStep(1, "通知使用权", if (granted) "已授权。可随时在系统设置中关闭。" else "尚未授权。自动捕获需要读取通知；不授权也能手动记账。",
+            if (granted) "查看授权" else "开启通知使用权") {
+            error = try {
+                context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)); null
+            } catch (_: Exception) { "无法直接打开，请在系统设置中搜索「通知使用权」。" }
+        }
+        error?.let { ManagementMessage(it, error = true) }
+    }
+}
+
+@Composable
+fun AppBackgroundGuideStep() {
+    val context = LocalContext.current
+    var error by remember { mutableStateOf<String?>(null) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        GuideStep(3, "自启动与后台运行", "如锁屏后捕获不稳定，可在应用详情的电池或耗电管理中允许后台运行。不同手机入口不同，请手动确认。", "打开应用详情") {
+            error = try {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))); null
+            } catch (_: Exception) { "无法直接打开，请在系统设置的应用管理中找到 PennyPilot。" }
+        }
+        error?.let { ManagementMessage(it, error = true) }
     }
 }

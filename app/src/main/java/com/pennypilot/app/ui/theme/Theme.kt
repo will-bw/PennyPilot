@@ -35,7 +35,7 @@ private val LightColorScheme = lightColorScheme(
     surfaceTint = LightPrimary,
     inverseSurface = LightInverseSurface,
     inverseOnSurface = LightInverseOnSurface,
-    outline = LightHairline,
+    outline = LightOutline,
     outlineVariant = LightHairline,
     error = LightIncome,
     onError = LightSurface,
@@ -74,7 +74,7 @@ private val DarkColorScheme = darkColorScheme(
     surfaceTint = DarkPrimary,
     inverseSurface = DarkInverseSurface,
     inverseOnSurface = DarkInverseOnSurface,
-    outline = DarkHairline,
+    outline = DarkOutline,
     outlineVariant = DarkHairline,
     error = DarkIncome,
     onError = DarkBackground,
@@ -128,3 +128,7 @@ val MaterialTheme.pendingAmberColor: Color
 /** 待确认琥珀浅底（对应原型 --amber-soft），暗色为半透明琥珀 */
 val MaterialTheme.pendingAmberSoftColor: Color
     @Composable get() = if (colorScheme.primary == DarkPrimary) DarkAmberSoft else LightAmberSoft
+
+/** 收入金额使用当前应用主题，独立于系统深色设置。 */
+val MaterialTheme.incomeColor: Color
+    @Composable get() = if (colorScheme.primary == DarkPrimary) DarkIncome else LightIncome

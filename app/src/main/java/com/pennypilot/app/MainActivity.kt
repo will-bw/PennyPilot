@@ -12,6 +12,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.dp
+import com.pennypilot.app.ui.components.LedgerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -32,6 +38,7 @@ import com.pennypilot.app.ui.onboarding.OnboardingScreen
 import com.pennypilot.app.ui.theme.PennyPilotTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -96,12 +103,17 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 when (onboardingDone) {
-                    null -> Box(Modifier.fillMaxSize())
+                    null -> Surface {
+                        Box(Modifier.fillMaxSize().safeDrawingPadding().padding(20.dp),
+                            contentAlignment = Alignment.Center) {
+                            LedgerState("正在打开账本", "读取本地设置…", loading = true)
+                        }
+                    }
                     false -> OnboardingScreen(onFinish = {
                         lifecycleScope.launch { appPreferences.setOnboardingDone() }
                     })
                     true -> {
-                        EnsureNotificationPermission(notifPermissionLauncher::launch)
+                        EnsureNotificationPermission(appPreferences, notifPermissionLauncher::launch)
                         // 恢复账本后丢弃旧导航及草稿，避免它们引用恢复前的交易/分类 ID。
                         key(revision) {
                             PennyPilotNavGraph(
@@ -118,7 +130,7 @@ class MainActivity : ComponentActivity() {
 
 /** Android 13+ 首次进入主界面时申请 POST_NOTIFICATIONS（确认/报告通知必需） */
 @Composable
-private fun EnsureNotificationPermission(launch: (String) -> Unit) {
+private fun EnsureNotificationPermission(preferences: AppPreferences, launch: (String) -> Unit) {
     val context = LocalContext.current
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -127,7 +139,13 @@ private fun EnsureNotificationPermission(launch: (String) -> Unit) {
                 context, Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
             if (!nm.areNotificationsEnabled() && !granted) {
-                launch(Manifest.permission.POST_NOTIFICATIONS)
+                try {
+                    if (!preferences.notificationPermissionRequested.first()) {
+                        preferences.markNotificationPermissionRequested()
+                        launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                } catch (e: CancellationException) { throw e
+                } catch (_: Exception) { /* 无法保存询问状态时避免反复弹窗；用户仍可在系统设置中授权。 */ }
             }
         }
     }

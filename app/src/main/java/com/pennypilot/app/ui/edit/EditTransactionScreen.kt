@@ -1,33 +1,28 @@
 package com.pennypilot.app.ui.edit
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.pennypilot.app.domain.model.TxType
-import com.pennypilot.app.ui.components.CatIcon
-import java.text.SimpleDateFormat
-import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
-import java.time.ZoneOffset
-import java.util.Date
-import java.util.Locale
+import com.pennypilot.app.ui.components.LedgerState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,209 +31,141 @@ fun EditTransactionScreen(
     vm: EditTransactionViewModel = hiltViewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
-
-    // 时间选择：先选日期，再选时刻（Material3 DatePicker + TimePicker）
-    var showDatePicker by remember { mutableStateOf(false) }
-    var showTimePicker by remember { mutableStateOf(false) }
-    var pickedDate by remember { mutableStateOf<LocalDate?>(null) }
-
-    val occurredText = remember(state.occurredAt) {
-        SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.getDefault())
-            .format(Date(state.occurredAt))
+    var showDiscard by rememberSaveable { mutableStateOf(false) }
+    var showDelete by rememberSaveable { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val leave: () -> Unit = {
+        focusManager.clearFocus()
+        if (state.hasChanges) showDiscard = true else onBack()
+    }
+    BackHandler(enabled = state.hasChanges || state.isSaving) {
+        when {
+            imeVisible -> focusManager.clearFocus()
+            state.isSaving -> Unit
+            else -> leave()
+        }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Text(
-            if (state.isEditing) "编辑账目" else "记一笔",
-            style = MaterialTheme.typography.headlineLarge
-        )
-
-        // 支出 / 收入类型切换（设计 §7.3 编辑页字段）
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TypePill("支出", selected = state.type == TxType.EXPENSE) { vm.setType(TxType.EXPENSE) }
-            TypePill("收入", selected = state.type == TxType.INCOME) { vm.setType(TxType.INCOME) }
-        }
-
-        // Amount input
-        OutlinedTextField(
-            value = state.amountText,
-            onValueChange = vm::updateAmount,
-            label = { Text("金额（元）") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        // Category grid
-        Text("分类", style = MaterialTheme.typography.titleMedium)
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(4),
-            modifier = Modifier.height(220.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(state.categories) { cat ->
-                val selected = cat.id == state.selectedCategoryId
-                Column(
-                    modifier = Modifier
-                        .clickable { vm.selectCategory(cat.id) }
-                        .alpha(if (selected) 1f else 0.6f),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    CatIcon(colorIndex = cat.colorIndex, emoji = cat.icon, size = 42)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        cat.name,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (selected) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                title = { Text(if (state.isEditing) "编辑账目" else "手动记账") },
+                navigationIcon = {
+                    IconButton(onClick = leave, enabled = !state.isSaving) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    if (state.isEditing && !state.isLoading && !state.loadFailed) {
+                        IconButton(onClick = { focusManager.clearFocus(); showDelete = true }, enabled = !state.isSaving) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = "删除这笔账目", tint = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                },
+                windowInsets = WindowInsets(0, 0, 0, 0)
+            )
+        },
+        bottomBar = {
+            if (!state.isLoading && !state.loadFailed) {
+                Surface(color = MaterialTheme.colorScheme.surface) {
+                    Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        state.error?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                        }
+                        Button(
+                            onClick = { focusManager.clearFocus(); vm.save(onBack) },
+                            enabled = !state.isSaving && state.categories.isNotEmpty(),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                            shape = MaterialTheme.shapes.large
+                        ) {
+                            if (state.isSaving) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Text(if (state.isSaving) "正在保存…" else "保存账目")
+                        }
+                    }
                 }
             }
         }
-
-        // Note
-        OutlinedTextField(
-            value = state.note, onValueChange = vm::updateNote,
-            label = { Text("备注") }, modifier = Modifier.fillMaxWidth(), singleLine = true
-        )
-
-        // Merchant
-        OutlinedTextField(
-            value = state.merchant, onValueChange = vm::updateMerchant,
-            label = { Text("商户") }, modifier = Modifier.fillMaxWidth(), singleLine = true
-        )
-
-        // Account tag（可选文本标签，设计 §3.1 account_tag）
-        OutlinedTextField(
-            value = state.accountTag, onValueChange = vm::updateAccountTag,
-            label = { Text("账户标签（可选）") }, modifier = Modifier.fillMaxWidth(), singleLine = true
-        )
-
-        // 时间选择行
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .clickable { showDatePicker = true }
-                .padding(vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            Text("时间", style = MaterialTheme.typography.titleMedium)
-            Text(
-                occurredText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        // Save button
-        state.error?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        }
-        Button(
-            onClick = { vm.save(onBack) },
-            enabled = !state.isSaving,
-            modifier = Modifier.fillMaxWidth().height(50.dp),
-            shape = MaterialTheme.shapes.medium
-        ) { Text(if (state.isSaving) "保存中…" else "保存") }
-
-        // Delete button (edit mode only)
-        if (state.isEditing) {
-            OutlinedButton(
-                onClick = { vm.delete(onBack) },
-                enabled = !state.isSaving,
-                modifier = Modifier.fillMaxWidth().height(50.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-            ) { Text("删除") }
-        }
-    }
-
-    // 日期选择：DatePickerState 以 UTC 午夜为基准，需先折算
-    if (showDatePicker) {
-        val currentLocalDate = Instant.ofEpochMilli(state.occurredAt)
-            .atZone(ZoneId.systemDefault()).toLocalDate()
-        val datePickerState = rememberDatePickerState(
-            initialSelectedDateMillis = currentLocalDate
-                .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
-        )
-        DatePickerDialog(
-            onDismissRequest = { showDatePicker = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    datePickerState.selectedDateMillis?.let { millis ->
-                        pickedDate = Instant.ofEpochMilli(millis)
-                            .atZone(ZoneOffset.UTC).toLocalDate()
-                        showTimePicker = true
+            when {
+                state.isLoading -> item { LedgerState("正在加载账目", "请稍候…", loading = true) }
+                state.loadFailed -> item { LedgerState("暂时无法编辑", state.error.orEmpty(), actionLabel = "返回流水", onAction = onBack) }
+                else -> {
+                    item { TransactionTypeSelector(state.type, enabled = !state.isSaving, onSelect = vm::setType) }
+                    item {
+                        OutlinedTextField(
+                            value = state.amountText,
+                            onValueChange = vm::updateAmount,
+                            enabled = !state.isSaving,
+                            label = { Text("金额（元）") },
+                            prefix = { Text("¥") },
+                            singleLine = true,
+                            isError = state.amountError != null,
+                            supportingText = { state.amountError?.let { Text(it) } },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                            textStyle = MaterialTheme.typography.headlineMedium,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
-                    showDatePicker = false
-                }) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDatePicker = false }) { Text("取消") }
+                    item {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("分类", style = MaterialTheme.typography.titleMedium)
+                            TransactionCategorySelection(state.categories, state.selectedCategoryId, enabled = !state.isSaving, onSelect = vm::selectCategory)
+                        }
+                    }
+                    item { TransactionDateTimeFields(state.occurredAt, enabled = !state.isSaving, onChange = vm::setOccurredAt) }
+                    item {
+                        OutlinedTextField(
+                            value = state.note, onValueChange = vm::updateNote,
+                            enabled = !state.isSaving, label = { Text("备注（可选）") },
+                            maxLines = 4, modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    item {
+                        OutlinedTextField(
+                            value = state.merchant, onValueChange = vm::updateMerchant,
+                            enabled = !state.isSaving, label = { Text("商户（可选）") }, singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next), modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    item {
+                        OutlinedTextField(
+                            value = state.accountTag, onValueChange = vm::updateAccountTag,
+                            enabled = !state.isSaving, label = { Text("账户标签（可选）") },
+                            placeholder = { Text("例如：现金、银行卡") }, singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }), modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
             }
-        ) {
-            DatePicker(state = datePickerState)
         }
     }
-
-    // 时刻选择：与已选日期合成后写回
-    if (showTimePicker) {
-        val zoned = Instant.ofEpochMilli(state.occurredAt).atZone(ZoneId.systemDefault())
-        val timePickerState = rememberTimePickerState(
-            initialHour = zoned.hour,
-            initialMinute = zoned.minute
-        )
-        AlertDialog(
-            onDismissRequest = { showTimePicker = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    val date = pickedDate ?: zoned.toLocalDate()
-                    val ms = date.atTime(timePickerState.hour, timePickerState.minute)
-                        .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                    vm.setOccurredAt(ms)
-                    pickedDate = null
-                    showTimePicker = false
-                }) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    pickedDate = null
-                    showTimePicker = false
-                }) { Text("取消") }
-            },
-            text = { TimePicker(state = timePickerState) }
-        )
+    if (showDiscard) {
+        DiscardChangesDialog(onKeepEditing = { showDiscard = false }, onDiscard = { showDiscard = false; onBack() })
     }
-}
-
-/** 支出/收入切换胶囊（与流水页 chip 风格一致） */
-@Composable
-private fun TypePill(label: String, selected: Boolean, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .background(
-                if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
-                RoundedCornerShape(99.dp)
-            )
-            .border(
-                1.dp,
-                if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                RoundedCornerShape(99.dp)
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 7.dp)
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) MaterialTheme.colorScheme.onPrimary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+    if (showDelete) {
+        AlertDialog(
+            onDismissRequest = { if (!state.isSaving) showDelete = false },
+            title = { Text("删除这笔账目？") },
+            text = { Text("删除后无法撤销。账目金额为 ¥${state.amountText}，请确认后继续。") },
+            confirmButton = {
+                TextButton(onClick = { showDelete = false; vm.delete(onBack) }, enabled = !state.isSaving) {
+                    Text("确认删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { showDelete = false }) { Text("保留账目") } }
         )
     }
 }

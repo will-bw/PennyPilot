@@ -1,37 +1,33 @@
 package com.pennypilot.app.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.pennypilot.app.ui.theme.priGradient
 
 @Composable
 fun InputDock(
@@ -43,158 +39,110 @@ fun InputDock(
     modifier: Modifier = Modifier,
     isRecording: Boolean = false,
     isSending: Boolean = false,
-    placeholder: String = "输入或按住说话…"
+    placeholder: String = "输入或按住说话…",
+    showMicrophone: Boolean = true,
+    enabled: Boolean = true,
+    isRecognizing: Boolean = false
 ) {
-    val borderColor = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
-    val shape = RoundedCornerShape(99.dp)
+    val currentMicPress by rememberUpdatedState(onMicPress)
+    val currentMicRelease by rememberUpdatedState(onMicRelease)
+    val canSend = enabled && !isSending && !isRecording && !isRecognizing && text.isNotBlank()
+    val microphoneEnabled = enabled && !isRecognizing
 
     Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .border(1.5.dp, borderColor, shape),
-        shape = shape,
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface,
-        shadowElevation = 8.dp
+        border = BorderStroke(1.dp, if (isRecording) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.padding(6.dp),
+            verticalAlignment = Alignment.Bottom
         ) {
-            // Mic button — press and hold
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (isRecording) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.primaryContainer
-                    )
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onPress = {
-                                onMicPress()
-                                tryAwaitRelease()
-                                onMicRelease()
+            if (showMicrophone) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(if (isRecording) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = if (isRecording) "结束录音" else "语音输入"
+                            role = Role.Button
+                            stateDescription = if (isRecording) "正在录音" else if (isRecognizing) "正在识别" else "按住说话"
+                            if (!microphoneEnabled) disabled()
+                            onClick(label = if (isRecording) "结束录音" else "开始录音") {
+                                if (microphoneEnabled) {
+                                    if (isRecording) currentMicRelease() else currentMicPress()
+                                }
+                                microphoneEnabled
                             }
-                        )
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "🎤",
-                    fontSize = 17.sp,
-                    modifier = Modifier
-                        .scale(if (isRecording) 1.1f else 1f)
-                )
+                        }
+                        .pointerInput(microphoneEnabled) {
+                            if (microphoneEnabled) {
+                                detectTapGestures(onPress = {
+                                    currentMicPress()
+                                    tryAwaitRelease()
+                                    currentMicRelease()
+                                })
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
+                        contentDescription = null,
+                        tint = if (isRecording) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
             }
 
-            Spacer(Modifier.width(8.dp))
-
-            // Wave animation when recording
-            AnimatedVisibility(
-                visible = isRecording,
-                enter = fadeIn(),
-                exit = fadeOut(),
-                modifier = Modifier.weight(1f)
-            ) {
-                WaveAnimation()
-            }
-
-            // Text input (hidden when recording)
-            AnimatedVisibility(
-                visible = !isRecording,
-                enter = fadeIn(),
-                exit = fadeOut(),
-                modifier = Modifier.weight(1f)
-            ) {
-                val interactionSource = remember { MutableInteractionSource() }
-                BasicTextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    singleLine = true,
-                    interactionSource = interactionSource,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp),
-                    decorationBox = { innerTextField ->
-                        @OptIn(ExperimentalMaterial3Api::class)
-                        TextFieldDefaults.DecorationBox(
-                            value = text,
-                            innerTextField = innerTextField,
-                            enabled = true,
-                            singleLine = true,
-                            visualTransformation = VisualTransformation.None,
-                            interactionSource = interactionSource,
-                            placeholder = {
-                                // 占位符也需单行省略，否则长文案换行溢出 44dp 输入区
-                                Text(
-                                    placeholder,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            },
-                            // 默认 16dp 垂直内边距会在 44dp 高度内挤切文字，归零后文字垂直居中
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                            container = {} // 透明无指示线，外观由外层胶囊 Surface 提供
-                        )
-                    }
-                )
-            }
-
-            Spacer(Modifier.width(4.dp))
-
-            // Send button — 靛蓝渐变圆形（原型 dock-send）
             Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(Brush.linearGradient(MaterialTheme.priGradient))
-                    .clickable(enabled = !isSending && text.isNotBlank()) { onSend(text) },
-                contentAlignment = Alignment.Center
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp).padding(horizontal = 6.dp, vertical = 12.dp),
+                contentAlignment = Alignment.CenterStart
             ) {
-                Text(
-                    "↑",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                if (isRecording || isRecognizing) {
+                    Text(
+                        if (isRecording) "正在录音，松开结束" else "正在识别语音…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else {
+                    BasicTextField(
+                        value = text,
+                        onValueChange = onTextChange,
+                        enabled = enabled,
+                        minLines = 1,
+                        maxLines = 4,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { if (canSend) onSend(text) }),
+                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "输入内容" },
+                        decorationBox = { innerTextField ->
+                            if (text.isEmpty()) {
+                                Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            innerTextField()
+                        }
+                    )
+                }
             }
-        }
-    }
-}
 
-@Composable
-private fun WaveAnimation() {
-    val transition = rememberInfiniteTransition(label = "wave")
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .height(24.dp)
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp)
-    ) {
-        repeat(5) { i ->
-            val scale by transition.animateFloat(
-                initialValue = 0.4f,
-                targetValue = 1.2f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(600, delayMillis = i * 120),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "bar$i"
-            )
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .height(20.dp)
-                    .scale(scaleY = scale, scaleX = 1f)
-                    .background(MaterialTheme.colorScheme.error, RoundedCornerShape(2.dp))
-            )
+            FilledIconButton(
+                onClick = { onSend(text) },
+                enabled = canSend,
+                modifier = Modifier.size(48.dp)
+            ) {
+                if (isSending) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp).semantics { contentDescription = "正在处理" },
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
+                }
+            }
         }
     }
 }

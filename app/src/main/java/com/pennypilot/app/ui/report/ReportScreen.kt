@@ -1,662 +1,337 @@
 package com.pennypilot.app.ui.report
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.work.WorkInfo
 import com.pennypilot.app.data.db.dao.DailyAggregate
 import com.pennypilot.app.data.db.dao.MonthlyTrend
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.ui.components.CatIcon
+import com.pennypilot.app.ui.components.LedgerState
 import com.pennypilot.app.ui.theme.*
 import com.pennypilot.app.util.MoneyUtil
-import com.pennypilot.app.worker.MonthlyReportWorker
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.time.LocalDate
-import java.time.Month
 import java.time.YearMonth
-import java.time.format.TextStyle
-import java.util.Locale
 
-private val CN_MONTHS = listOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二")
+internal data class TopCat(val name: String, val total: Long)
 
-private data class TopCat(val name: String, val total: Long)
+internal fun parseTopCats(json: String): List<TopCat> = runCatching {
+    Json.parseToJsonElement(json).jsonArray.mapNotNull { element ->
+        val obj = element.jsonObject
+        val name = obj["name"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val total = obj["total"]?.jsonPrimitive?.longOrNull?.takeIf { it > 0 } ?: return@mapNotNull null
+        TopCat(name, total)
+    }.sortedByDescending { it.total }.take(3)
+}.getOrDefault(emptyList())
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReportScreen(vm: ReportViewModel = hiltViewModel()) {
-    val reports by vm.reports.collectAsStateWithLifecycle()
-    val categories by vm.categories.collectAsStateWithLifecycle()
-    val trend by vm.trend.collectAsStateWithLifecycle()
-    val heat by vm.heat.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-
-    // 按月份倒序：最新一份为当月 Hero，其余进历史列表
-    val sorted = remember(reports) { reports.sortedByDescending { it.yearMonth } }
-    val latest = sorted.firstOrNull()
-    val history = sorted.drop(1)
-    val top3 = remember(latest) { latest?.let { parseTopCats(it.byCategoryJson) } ?: emptyList() }
-
+    val state by vm.uiState.collectAsStateWithLifecycle()
+    val generation by vm.generation.collectAsStateWithLifecycle()
+    var expandedMonth by rememberSaveable { mutableStateOf<String?>(null) }
+    val latest = state.reports.firstOrNull()
+    val lastMonth = state.currentMonth.minusMonths(1)
+    val hasLastMonth = state.reports.any { it.yearMonth == lastMonth.toString() }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 108.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        item {
-            // page-head：标题 + 副标题 + 「↻ 重新生成」
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column {
-                    Text("月度报告", style = MaterialTheme.typography.headlineLarge)
-                    Text(
-                        "月初自动生成 · 自动补齐遗漏月份",
-                        style = PageSubStyle,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(99.dp))
-                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(99.dp))
-                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                ) {
-                    TextButton(
-                        onClick = {
-                            MonthlyReportWorker.regenerate(context, YearMonth.now().minusMonths(1))
-                        },
-                        contentPadding = PaddingValues(0.dp),
-                        modifier = Modifier.height(16.dp)
-                    ) {
-                        Text(
-                            "↻ 重新生成",
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.W600,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+        item(key = "heading") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("月度报告", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+                Text("月初自动生成 · 自动补齐遗漏月份", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedButton(onClick = { vm.regenerate(lastMonth) }, enabled = !generation.busy,
+                    modifier = Modifier.heightIn(min = 48.dp)) {
+                    Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("${if (hasLastMonth) "重新生成" else "生成"} ${lastMonth.year} 年 ${lastMonth.monthValue} 月报告")
                 }
             }
         }
-
-        if (latest == null) {
-            item {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(60.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("还没有报告，下月 1 日会自动生成", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        } else {
-            // 当月 Hero 卡
-            item { ReportHero(latest, sorted.getOrNull(1)) }
-
-            // AI 点评引言卡
-            item { LlmQuote(latest.llmSummary) }
-
-            // 支出 Top3 分类
-            if (top3.isNotEmpty()) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        Text("支出 Top 3 分类", fontSize = 13.sp, fontWeight = FontWeight.W700)
-                        val pctSum = top3.sumOf { it.total } * 100 / (latest.totalExpense.coerceAtLeast(1))
-                        Text(
-                            "占比 $pctSum%",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.W600,
-                            color = MaterialTheme.faintColor
-                        )
+        if (generation.month != null) item(key = "generation") { GenerationStatus(generation, vm::regenerate) }
+        when {
+            state.isLoading -> item(key = "loading") { LedgerState("正在读取报告", "正在整理你的月度收支。", loading = true) }
+            state.error != null -> item(key = "error") { LedgerState("报告加载失败", state.error.orEmpty(), actionLabel = "重试", onAction = vm::retry) }
+            else -> {
+                if (latest == null) {
+                    item(key = "empty") { LedgerState("还没有月度报告", "报告总结已经结束的月份；本月的实时收支可以在下方查看。") }
+                } else {
+                    item(key = "latest_summary") { ReportHero(latest, adjacentPreviousReport(latest, state.reports)) }
+                    item(key = "latest_quote") { LlmQuote(latest.llmSummary) }
+                    val top3 = parseTopCats(latest.byCategoryJson)
+                    if (top3.isNotEmpty()) item(key = "latest_categories") {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            SectionHeading("支出 Top 3 分类", "${reportMonthLabel(latest.yearMonth)} · 已确认")
+                            Top3Card(top3, latest.totalExpense, state.categories)
+                        }
                     }
                 }
-                item { Top3Card(top3, latest.totalExpense, categories) }
-            }
-
-            // 近 6 个月支出趋势
-            if (trend.isNotEmpty()) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        Text("支出趋势", fontSize = 13.sp, fontWeight = FontWeight.W700)
-                        Text(
-                            "近 6 个月",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.W600,
-                            color = MaterialTheme.faintColor
-                        )
+                // 实时图表独立于 AI 报告存在，首次使用也能看到已有账目。
+                item(key = "trend") {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SectionHeading("支出趋势", "近 6 个月 · 含本月")
+                        TrendCard(state.trend)
                     }
                 }
-                item { TrendCard(trend) }
-            }
-
-            // 当月支出热力
-            item {
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Bottom
-                ) {
-                    Text("支出热力", fontSize = 13.sp, fontWeight = FontWeight.W700)
-                    Text(
-                        "${LocalDate.now().monthValue} 月 · 按日",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.W600,
-                        color = MaterialTheme.faintColor
-                    )
-                }
-            }
-            item { HeatmapCard(heat) }
-
-            // 历史报告列表
-            if (history.isNotEmpty()) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        Text("历史报告", fontSize = 13.sp, fontWeight = FontWeight.W700)
-                        Text(
-                            "全部",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.W600,
-                            color = MaterialTheme.faintColor
-                        )
+                item(key = "heat") {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SectionHeading("支出热力", "${state.currentMonth.year} 年 ${state.currentMonth.monthValue} 月")
+                        HeatmapCard(state.heat, state.currentMonth)
                     }
                 }
-                items(history) { report -> HistoryRow(report) }
+                if (state.reports.size > 1) {
+                    item(key = "history_heading") { SectionHeading("历史报告", "点击月份查看详情") }
+                    state.reports.drop(1).forEach { report ->
+                        item(key = "history_${report.yearMonth}") {
+                            HistoryRow(report, expandedMonth == report.yearMonth) {
+                                expandedMonth = if (expandedMonth == report.yearMonth) null else report.yearMonth
+                            }
+                        }
+                        if (expandedMonth == report.yearMonth) {
+                            item(key = "history_detail_${report.yearMonth}") {
+                                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                                    ReportHero(report, adjacentPreviousReport(report, state.reports))
+                                    LlmQuote(report.llmSummary)
+                                    val top = remember(report.byCategoryJson) { parseTopCats(report.byCategoryJson) }
+                                    if (top.isNotEmpty()) Top3Card(top, report.totalExpense, state.categories)
+                                    val month = runCatching { YearMonth.parse(report.yearMonth) }.getOrNull()
+                                    if (month != null && month < state.currentMonth) {
+                                        TextButton(onClick = { vm.regenerate(month) }, enabled = !generation.busy, modifier = Modifier.heightIn(min = 48.dp)) {
+                                            Text("重新生成${reportMonthLabel(report.yearMonth)}报告")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-/** 当月 Hero：左缘 4dp 靛蓝渐变条 + 衬线「X 月账本」+ 37sp 总支出 + pill 行 */
+@Composable
+private fun GenerationStatus(generation: ReportGeneration, onRetry: (YearMonth) -> Unit) {
+    val month = generation.month ?: return
+    val label = "${month.year} 年 ${month.monthValue} 月报告"
+    val failure = generation.error != null || generation.state == WorkInfo.State.FAILED || generation.state == WorkInfo.State.CANCELLED
+    val message = when {
+        generation.error != null -> generation.error
+        generation.isSubmitting -> "正在加入生成队列…"
+        generation.state == WorkInfo.State.RUNNING -> "正在整理收支和生成点评，可以离开此页，完成后会自动更新。"
+        generation.state == WorkInfo.State.ENQUEUED || generation.state == WorkInfo.State.BLOCKED -> "已加入队列，等待后台任务执行。"
+        generation.state == WorkInfo.State.SUCCEEDED -> "报告已更新，可在本页查看。"
+        generation.state == WorkInfo.State.CANCELLED -> "生成已取消，可以重新尝试。"
+        else -> "生成未完成，请稍后重试。"
+    }
+    LedgerState(
+        title = if (generation.busy) "正在生成 $label" else if (failure) "$label 未完成" else "$label 已生成",
+        message = message.orEmpty(), loading = generation.busy,
+        actionLabel = if (failure) "重试生成" else null,
+        onAction = if (failure) ({ onRetry(month) }) else null,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SectionHeading(title: String, subtitle: String) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+        Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ReportHero(report: MonthlyReportEntity, prev: MonthlyReportEntity?) {
-    val (year, month) = parseYearMonth(report.yearMonth)
-
-    Card(
-        shape = RoundedCornerShape(24.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Box {
-            Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 18.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "${monthEn(month)} $year",
-                        style = EyebrowStyle,
-                        color = MaterialTheme.faintColor
-                    )
-                    // 支出环比 badge：降绿升红
-                    if (prev != null && prev.totalExpense > 0) {
-                        val pct = (report.totalExpense - prev.totalExpense) * 100.0 / prev.totalExpense
-                        val down = pct <= 0
-                        val color = if (down) MaterialTheme.successColor else MaterialTheme.colorScheme.error
-                        Box(
-                            modifier = Modifier
-                                .background(
-                                    if (down) MaterialTheme.successSoftColor else MaterialTheme.incomeSoftColor,
-                                    RoundedCornerShape(99.dp)
-                                )
-                                .padding(horizontal = 11.dp, vertical = 5.dp)
-                        ) {
-                            Text(
-                                "支出环比 ${if (down) "↓" else "↑"} ${"%.1f".format(kotlin.math.abs(pct))}%",
-                                style = PillTextStyle,
-                                color = color
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "${CN_MONTHS[month - 1]}月账本",
-                    fontFamily = FontFamily.Serif,
-                    fontSize = 21.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        "¥",
-                        fontSize = 19.sp,
-                        fontWeight = FontWeight.W600,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 3.dp)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        MoneyUtil.formatHeroAmount(report.totalExpense),
-                        fontFamily = FontFamily.Serif,
-                        fontSize = 37.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // 收入 pill：红点 + 暖红浅底
-                    Row(
-                        modifier = Modifier
-                            .background(MaterialTheme.incomeSoftColor, RoundedCornerShape(99.dp))
-                            .padding(horizontal = 11.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .background(MaterialTheme.colorScheme.error, androidx.compose.foundation.shape.CircleShape)
-                        )
-                        Text(
-                            "收入 ¥${MoneyUtil.formatHeroAmount(report.totalIncome)}",
-                            style = PillTextStyle,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                    // 结余 pill：卡片底 + 发丝描边
-                    val balance = report.totalIncome - report.totalExpense
-                    Box(
-                        modifier = Modifier
-                            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(99.dp))
-                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(99.dp))
-                            .padding(horizontal = 11.dp, vertical = 5.dp)
-                    ) {
-                        Text(
-                            "结余 ¥${MoneyUtil.formatHeroAmount(balance)}",
-                            style = PillTextStyle,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+    Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("${reportMonthLabel(report.yearMonth)}账本", style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Serif),
+                modifier = Modifier.semantics { heading() })
+            Text("已确认支出", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("¥${MoneyUtil.formatHeroAmount(report.totalExpense)}", style = MaterialTheme.typography.headlineLarge.copy(fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold),
+                maxLines = 1, modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ReportPill("收入 ¥${MoneyUtil.formatHeroAmount(report.totalIncome)}", income = true)
+                ReportPill("结余 ¥${MoneyUtil.formatHeroAmount(report.totalIncome - report.totalExpense)}")
+                if (prev != null && prev.totalExpense > 0) {
+                    val pct = (report.totalExpense.toDouble() - prev.totalExpense) * 100.0 / prev.totalExpense
+                    val change = when { pct < 0 -> "减少"; pct > 0 -> "增加"; else -> "持平" }
+                    val text = if (pct == 0.0) "较上月持平" else "较上月$change ${"%.1f".format(kotlin.math.abs(pct))}%"
+                    Text(text, style = MaterialTheme.typography.labelMedium,
+                        color = if (pct <= 0) MaterialTheme.successColor else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.background(if (pct <= 0) MaterialTheme.successSoftColor else MaterialTheme.colorScheme.errorContainer, CircleShape)
+                            .padding(horizontal = 12.dp, vertical = 8.dp))
                 }
             }
-
-            // 左缘 4dp 靛蓝渐变条
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .width(4.dp)
-                    .height(72.dp)
-                    .background(Brush.verticalGradient(MaterialTheme.priGradient))
-            )
         }
     }
 }
 
-/** AI 点评引言卡：靛蓝浅底 + 衬线大引号 + ✦ AI 点评标签 */
+@Composable
+private fun ReportPill(text: String, income: Boolean = false) {
+    Text(text, style = MaterialTheme.typography.labelMedium,
+        color = if (income) MaterialTheme.incomeColor else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.background(if (income) MaterialTheme.incomeSoftColor else MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+            .padding(horizontal = 12.dp, vertical = 8.dp))
+}
+
 @Composable
 private fun LlmQuote(summary: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(20.dp))
-            .padding(16.dp)
-    ) {
-        // 右上角 ✦ AI 点评标签
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(99.dp))
-                .padding(horizontal = 8.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text("✦", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
-            Text(
-                "AI 点评",
-                fontSize = 10.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = 1.sp,
-                color = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        }
-
-        Column(Modifier.padding(top = 6.dp)) {
-            Text(
-                "\u201C",
-                fontFamily = FontFamily.Serif,
-                fontSize = 40.sp,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                modifier = Modifier.height(26.dp)
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                summary,
-                fontFamily = FontFamily.Serif,
-                fontSize = 14.5.sp,
-                lineHeight = 27.sp,
-                letterSpacing = 0.3.sp,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        }
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(20.dp)).padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("AI 点评", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        Text(summary.ifBlank { "暂无点评，可重新生成此月份报告。" },
+            style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Serif), color = MaterialTheme.colorScheme.onPrimaryContainer)
     }
 }
 
-/** 支出 Top3：图标 + 金额 + 占比渐变进度条 */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Top3Card(top3: List<TopCat>, totalExpense: Long, categories: List<CategoryEntity>) {
-    val catByName = categories.associateBy { it.name }
-
-    Card(
-        shape = RoundedCornerShape(22.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 14.dp)) {
-            top3.forEachIndexed { idx, cat ->
-                val entity = catByName[cat.name]
-                val pct = if (totalExpense > 0) cat.total * 100 / totalExpense else 0L
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 12.dp, bottom = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    CatIcon(
-                        colorIndex = entity?.colorIndex ?: idx,
-                        emoji = entity?.icon ?: "📦",
-                        size = 36
-                    )
-                    Column(Modifier.weight(1f)) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                cat.name,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.W600,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                "¥${MoneyUtil.formatHeroAmount(cat.total)}",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+    val byName = categories.associateBy { it.name }
+    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            top3.forEachIndexed { index, cat ->
+                val entity = byName[cat.name]
+                val fraction = if (totalExpense > 0) (cat.total.toDouble() / totalExpense).coerceIn(0.0, 1.0).toFloat() else 0f
+                val percent = "${(fraction * 100).toInt()}%"
+                Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.semantics(mergeDescendants = true) {}) {
+                    CatIcon(entity?.colorIndex ?: index, entity?.icon ?: "📦", 36)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(cat.name, style = MaterialTheme.typography.titleSmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("¥${MoneyUtil.formatHeroAmount(cat.total)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                            Text("占比 $percent", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        Spacer(Modifier.height(7.dp))
-                        // 渐变进度条
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(6.dp)
-                                .background(
-                                    MaterialTheme.colorScheme.primaryContainer,
-                                    RoundedCornerShape(99.dp)
-                                )
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth(pct.toFloat() / 100f)
-                                    .height(6.dp)
-                                    .background(
-                                        Brush.horizontalGradient(MaterialTheme.priGradient),
-                                        RoundedCornerShape(99.dp)
-                                    )
-                            )
-                        }
+                        LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth().height(6.dp).clearAndSetSemantics {},
+                            color = MaterialTheme.colorScheme.primary, trackColor = MaterialTheme.colorScheme.primaryContainer)
                     }
-                    Text(
-                        "$pct%",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.faintColor,
-                        modifier = Modifier.width(34.dp),
-                        textAlign = androidx.compose.ui.text.style.TextAlign.End
-                    )
                 }
             }
         }
     }
 }
 
-/** 历史报告行：月份汉字方块图标 + 收支摘要 + 右箭头 */
 @Composable
-private fun HistoryRow(report: MonthlyReportEntity) {
-    val (year, month) = parseYearMonth(report.yearMonth)
-
-    Card(
-        shape = RoundedCornerShape(22.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(13.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(13.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    CN_MONTHS[month - 1],
-                    fontFamily = FontFamily.Serif,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+private fun HistoryRow(report: MonthlyReportEntity, expanded: Boolean, onClick: () -> Unit) {
+    Card(onClick = onClick, shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth().semantics { stateDescription = if (expanded) "已展开" else "已收起" }) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(reportMonthLabel(report.yearMonth), style = MaterialTheme.typography.titleMedium)
+                Text("支出 ¥${MoneyUtil.formatHeroAmount(report.totalExpense)}", style = MaterialTheme.typography.bodyMedium)
+                Text("收入 ¥${MoneyUtil.formatHeroAmount(report.totalIncome)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.incomeColor)
             }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "$year 年 $month 月",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.W600,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    "支出 ¥${MoneyUtil.formatHeroAmount(report.totalExpense)} · 收入 ¥${MoneyUtil.formatHeroAmount(report.totalIncome)}",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.faintColor
-                )
-            }
-            Text(
-                "¥${MoneyUtil.formatHeroAmount(report.totalExpense)}",
-                fontSize = 14.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text("›", color = MaterialTheme.faintColor)
+            Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
         }
     }
 }
 
-private fun parseYearMonth(ym: String): Pair<Int, Int> {
-    val parts = ym.split("-")
-    val year = parts.getOrNull(0)?.toIntOrNull() ?: 2026
-    val month = (parts.getOrNull(1)?.toIntOrNull() ?: 1).coerceIn(1, 12)
-    return year to month
-}
+internal fun reportMonthLabel(ym: String): String = runCatching { YearMonth.parse(ym) }
+    .fold({ "${it.year} 年 ${it.monthValue} 月" }, { ym })
 
-private fun monthEn(month: Int): String =
-    Month.of(month).getDisplayName(TextStyle.FULL, Locale.ENGLISH).uppercase(Locale.ENGLISH)
-
-private fun parseTopCats(json: String): List<TopCat> {
-    return try {
-        Json.parseToJsonElement(json).jsonArray.mapNotNull { el ->
-            val obj = el.jsonObject
-            val name = obj["name"]?.jsonPrimitive?.content ?: return@mapNotNull null
-            val total = obj["total"]?.jsonPrimitive?.longOrNull ?: 0L
-            TopCat(name, total)
-        }
-    } catch (_: Exception) {
-        emptyList()
-    }
-}
-
-/** 近 6 个月支出柱状卡：普通柱 primaryContainer，当月靛蓝渐变 */
 @Composable
 private fun TrendCard(trend: List<MonthlyTrend>) {
-    Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp)) {
+    if (trend.isEmpty() || trend.all { it.total == 0L }) {
+        LedgerState("还没有支出趋势", "确认支出后，这里会按月显示变化。")
+        return
+    }
+    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             val max = trend.maxOf { it.total }.coerceAtLeast(1)
-            Row(
-                modifier = Modifier.fillMaxWidth().height(110.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.Bottom
-            ) {
-                trend.forEachIndexed { i, t ->
-                    val current = i == trend.lastIndex
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            if (t.total > 0) "¥${t.total / 100}" else "",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.W600,
-                            color = MaterialTheme.faintColor
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(((t.total * 72 / max).toInt().coerceAtLeast(2)).dp)
-                                .background(
-                                    if (current) Brush.verticalGradient(MaterialTheme.priGradient)
-                                    else SolidColor(MaterialTheme.colorScheme.primaryContainer),
-                                    RoundedCornerShape(6.dp)
-                                )
-                        )
-                        Text(
-                            "${t.ym.substring(5).toInt()}月",
-                            fontSize = 10.sp,
-                            color = if (current) MaterialTheme.colorScheme.onSurface
-                                    else MaterialTheme.faintColor,
-                            fontWeight = if (current) FontWeight.Bold else FontWeight.W600
-                        )
-                    }
+            // 横向条保留准确金额，不让六列数字在窄屏或大字体下互相覆盖。
+            trend.forEachIndexed { index, row ->
+                val label = reportMonthLabel(row.ym)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.semantics(mergeDescendants = true) {}) {
+                    Text("$label${if (index == trend.lastIndex) " · 本月" else ""}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("¥${MoneyUtil.formatHeroAmount(row.total)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.W600)
+                    LinearProgressIndicator(progress = { (row.total.toDouble() / max).coerceIn(0.0, 1.0).toFloat() },
+                        modifier = Modifier.fillMaxWidth().height(10.dp).clearAndSetSemantics {},
+                        color = if (index == trend.lastIndex) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                        trackColor = MaterialTheme.colorScheme.primaryContainer)
                 }
             }
         }
     }
 }
 
-/** 当月日历热力卡：周一首列，日支出 4 档 alpha(primary)，无支出浅底 */
 @Composable
-private fun HeatmapCard(days: List<DailyAggregate>) {
-    val now = LocalDate.now()
+private fun HeatmapCard(days: List<DailyAggregate>, month: YearMonth) {
     val byDay = remember(days) { days.associate { it.day to it.total } }
-    val max = days.maxOfOrNull { it.total } ?: 0L
-    val leading = now.withDayOfMonth(1).dayOfWeek.value - 1
-    val daysInMonth = now.lengthOfMonth()
-    val ym = "%04d-%02d".format(now.year, now.monthValue)
-
-    Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val max = days.maxOfOrNull { it.total }?.coerceAtLeast(1) ?: 1L
+    val leading = month.atDay(1).dayOfWeek.value - 1
+    val today = LocalDate.now()
+    val cells = (0 until ((leading + month.lengthOfMonth() + 6) / 7) * 7).map { index ->
+        (index - leading + 1).takeIf { it in 1..month.lengthOfMonth() }
+    }
+    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf("一", "二", "三", "四", "五", "六", "日").forEach { d ->
-                    Text(
-                        d,
-                        modifier = Modifier.weight(1f),
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.W600,
-                        color = MaterialTheme.faintColor
-                    )
+                listOf("一", "二", "三", "四", "五", "六", "日").forEach { day ->
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        Text(day, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-            }
-            val cells = (0 until (leading + daysInMonth + 6) / 7 * 7).map { idx ->
-                val d = idx - leading + 1
-                if (d in 1..daysInMonth) d else null
             }
             cells.chunked(7).forEach { week ->
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    week.forEach { d ->
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(16.dp)
-                                .background(
-                                    heatColor(d?.let { byDay["$ym-${"%02d".format(it)}"] } ?: 0L, max),
-                                    RoundedCornerShape(5.dp)
-                                )
-                        )
+                    week.forEach { day ->
+                        val date = day?.let(month::atDay)
+                        val total = date?.let { byDay[it.toString()] } ?: 0L
+                        val future = date != null && date > today
+                        val fraction = (total.toDouble() / max).coerceIn(0.0, 1.0).toFloat()
+                        val background = when {
+                            day == null -> androidx.compose.ui.graphics.Color.Transparent
+                            future -> MaterialTheme.colorScheme.surface
+                            total == 0L -> MaterialTheme.colorScheme.surfaceVariant
+                            else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.15f + fraction * 0.85f)
+                        }
+                        Box(Modifier.weight(1f).heightIn(min = 36.dp).background(background, RoundedCornerShape(7.dp))
+                            .padding(vertical = 8.dp).clearAndSetSemantics {
+                                if (date != null) contentDescription = "${month.monthValue}月${date.dayOfMonth}日，${if (future) "尚未到来" else "支出${MoneyUtil.formatHeroAmount(total)}元"}"
+                            }, contentAlignment = Alignment.Center) {
+                            if (day != null) Text(day.toString(), style = MaterialTheme.typography.labelMedium,
+                                color = if (fraction > 0.55f) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
+                        }
                     }
                 }
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.End
-            ) {
-                Text("少", fontSize = 10.sp, color = MaterialTheme.faintColor)
-                listOf(0L, 1L, 1L, 1L, 1L).forEachIndexed { i, _ ->
-                    Spacer(Modifier.width(4.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .background(
-                                when (i) {
-                                    0 -> heatColor(0L, 100L)
-                                    1 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
-                                    2 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                                    3 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
-                                    else -> MaterialTheme.colorScheme.primary
-                                },
-                                RoundedCornerShape(3.dp)
-                            )
-                    )
-                }
-                Spacer(Modifier.width(4.dp))
-                Text("多", fontSize = 10.sp, color = MaterialTheme.faintColor)
-            }
+            Text(if (days.all { it.total == 0L }) "本月暂无已确认支出" else "颜色越深，支出越多 · 共 ${days.count { it.total > 0 }} 个支出日",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    }
-}
-
-@Composable
-private fun heatColor(total: Long, max: Long): androidx.compose.ui.graphics.Color {
-    val primary = MaterialTheme.colorScheme.primary
-    return when {
-        total <= 0 || max <= 0 -> MaterialTheme.colorScheme.outlineVariant
-        else -> primary.copy(
-            alpha = when {
-                total * 4 <= max -> 0.25f
-                total * 2 <= max -> 0.5f
-                total * 4 <= max * 3 -> 0.75f
-                else -> 1f
-            }
-        )
     }
 }

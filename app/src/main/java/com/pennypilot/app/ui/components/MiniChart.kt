@@ -6,11 +6,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pennypilot.app.domain.usecase.ChartData
 import com.pennypilot.app.ui.theme.priGradient
 import com.pennypilot.app.util.MoneyUtil
@@ -18,57 +19,33 @@ import com.pennypilot.app.util.MoneyUtil
 @Composable
 fun MiniChart(data: ChartData, modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(15.dp))
-            .padding(13.dp)
+        modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(15.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("支出分布", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(data.unit, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth().height(74.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Bottom
-        ) {
-            val maxVal = data.values.maxOrNull()?.coerceAtLeast(1) ?: 1
+        Text("支出分布 · 单位：${data.unit}", style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (data.values.isEmpty()) {
+            Text("暂无可展示的支出数据", style = MaterialTheme.typography.bodyMedium)
+        } else {
+            val max = data.values.maxOrNull()?.coerceAtLeast(1) ?: 1L
             data.values.forEachIndexed { index, value ->
-                val isHighlight = index == data.highlightIndex
-                Column(
-                    modifier = Modifier.weight(1f).height(74.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Bottom
-                ) {
-                    Text(
-                        MoneyUtil.formatHeroAmount(value),
-                        fontSize = 10.sp,
-                        color = if (isHighlight) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Box(
-                        modifier = Modifier
-                            .width(34.dp)
-                            .height(((value.toFloat() / maxVal) * 50).dp.coerceAtLeast(4.dp))
-                            .then(
-                                // 原型：高亮柱为靛蓝纵向渐变，普通柱为浅靛蓝底
-                                if (isHighlight) Modifier.background(
-                                    Brush.verticalGradient(MaterialTheme.priGradient),
-                                    RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)
-                                ) else Modifier.background(
-                                    MaterialTheme.colorScheme.primaryContainer,
-                                    RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)
-                                )
-                            )
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        data.labels.getOrElse(index) { "" },
-                        fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                val label = data.labels.getOrElse(index) { "第 ${index + 1} 项" }
+                val highlighted = index == data.highlightIndex
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.clearAndSetSemantics {
+                    contentDescription = "$label，${MoneyUtil.formatHeroAmount(value)}${data.unit}"
+                }) {
+                    Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = if (highlighted) FontWeight.Bold else FontWeight.Normal)
+                    Text(MoneyUtil.formatHeroAmount(value), style = MaterialTheme.typography.bodySmall,
+                        color = if (highlighted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Box(Modifier.fillMaxWidth().height(8.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(4.dp))) {
+                        val fraction = (value.toDouble() / max).coerceIn(0.0, 1.0).toFloat()
+                        if (fraction > 0f) {
+                            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(
+                                if (highlighted) Brush.horizontalGradient(MaterialTheme.priGradient)
+                                else Brush.horizontalGradient(listOf(MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.secondary)),
+                                RoundedCornerShape(4.dp)))
+                        }
+                    }
                 }
             }
         }

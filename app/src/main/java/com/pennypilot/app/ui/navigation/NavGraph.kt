@@ -5,7 +5,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavType
@@ -27,6 +29,7 @@ import com.pennypilot.app.ui.settings.SettingsScreen
 import com.pennypilot.app.ui.settings.SettingsViewModel
 import com.pennypilot.app.ui.transactions.TransactionsScreen
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PennyPilotNavGraph(startEditTxId: Long = -1L, startRoute: String? = null) {
     val navController = rememberNavController()
@@ -47,59 +50,74 @@ fun PennyPilotNavGraph(startEditTxId: Long = -1L, startRoute: String? = null) {
         }
     }
 
-    Scaffold(
-        // imePadding：软键盘弹出时整体上移，保证输入框不被输入法遮挡
-        modifier = Modifier.imePadding(),
-        bottomBar = {
-            PennyPilotBottomBar(currentRoute = currentRoute) { tab ->
-                navController.navigate(tab.route) {
-                    popUpTo(TabItem.TRANSACTIONS.route) { saveState = true }
-                    launchSingleTop = true
-                    restoreState = true
-                }
-            }
+    val isTopLevel = TabItem.entries.any { it.route == currentRoute }
+    val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val selectTab: (TabItem) -> Unit = { tab ->
+        navController.navigate(tab.route) {
+            popUpTo(TabItem.TRANSACTIONS.route) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
         }
-    ) { padding ->
-        NavHost(
-            navController = navController,
-            startDestination = TabItem.TRANSACTIONS.route,
-            modifier = Modifier.padding(padding)
-        ) {
-            composable(TabItem.TRANSACTIONS.route) {
-                TransactionsScreen(onEditTx = { id -> navController.navigate("edit/$id") })
-            }
-            composable(TabItem.CHAT.route) { ChatScreen() }
-            composable(TabItem.ADD.route) {
-                AiInputScreen(onNavigateToManual = { navController.navigate("manual_add") })
-            }
-            composable("manual_add") {
-                EditTransactionScreen(onBack = { navController.popBackStack() })
-            }
-            composable(
-                "edit/{id}",
-                arguments = listOf(navArgument("id") { type = NavType.LongType })
-            ) { EditTransactionScreen(onBack = { navController.popBackStack() }) }
-            composable(TabItem.REPORT.route) { ReportScreen() }
-            composable(TabItem.SETTINGS.route) {
-                val settingsViewModel = hiltViewModel<SettingsViewModel>()
-                SettingsScreen(
-                    onNavigateToCategories = { navController.navigate("categories") },
-                    onNavigateToLlmSettings = { navController.navigate("llm_settings") },
-                    onNavigateToColorOsGuide = { navController.navigate("coloros_guide") },
-                    onNavigateToParseRules = { navController.navigate("parse_rules") },
-                    viewModel = settingsViewModel
-                )
-            }
-            composable("coloros_guide") { ColorOsGuideScreen(onBack = { navController.popBackStack() }) }
-            composable("categories") { CategoriesScreen(onBack = { navController.popBackStack() }) }
-            composable("parse_rules") { ParseRulesScreen(onBack = { navController.popBackStack() }) }
-            composable("llm_settings") {
-                // 复用 Hilt 单例 SecureKeyStore，避免重复创建加密存储实例
-                val llmSettingsVm = hiltViewModel<LlmSettingsViewModel>()
-                LlmSettingsScreen(
-                    onBack = { navController.popBackStack() },
-                    keyStore = llmSettingsVm.keyStore
-                )
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val useRail = maxWidth >= 600.dp
+        Row(Modifier.fillMaxSize()) {
+            if (useRail && isTopLevel) PennyPilotNavigationRail(currentRoute, selectTab)
+            Scaffold(
+                modifier = Modifier.weight(1f).imePadding(),
+                containerColor = MaterialTheme.colorScheme.background,
+                bottomBar = {
+                    if (!useRail && isTopLevel && !keyboardVisible) {
+                        PennyPilotBottomBar(currentRoute, selectTab)
+                    }
+                }
+            ) { padding ->
+                Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding),
+                    contentAlignment = Alignment.TopCenter) {
+                    NavHost(
+                        navController = navController,
+                        startDestination = TabItem.TRANSACTIONS.route,
+                        modifier = Modifier.widthIn(max = 840.dp).fillMaxSize()
+                    ) {
+                        composable(TabItem.TRANSACTIONS.route) {
+                            TransactionsScreen(onEditTx = { id -> navController.navigate("edit/$id") })
+                        }
+                        composable(TabItem.CHAT.route) { ChatScreen() }
+                        composable(TabItem.ADD.route) {
+                            AiInputScreen(onNavigateToManual = { navController.navigate("manual_add") })
+                        }
+                        composable("manual_add") {
+                            EditTransactionScreen(onBack = { navController.popBackStack() })
+                        }
+                        composable(
+                            "edit/{id}",
+                            arguments = listOf(navArgument("id") { type = NavType.LongType })
+                        ) { EditTransactionScreen(onBack = { navController.popBackStack() }) }
+                        composable(TabItem.REPORT.route) { ReportScreen() }
+                        composable(TabItem.SETTINGS.route) {
+                            val settingsViewModel = hiltViewModel<SettingsViewModel>()
+                            SettingsScreen(
+                                onNavigateToCategories = { navController.navigate("categories") },
+                                onNavigateToLlmSettings = { navController.navigate("llm_settings") },
+                                onNavigateToColorOsGuide = { navController.navigate("coloros_guide") },
+                                onNavigateToParseRules = { navController.navigate("parse_rules") },
+                                viewModel = settingsViewModel
+                            )
+                        }
+                        composable("coloros_guide") { ColorOsGuideScreen(onBack = { navController.popBackStack() }) }
+                        composable("categories") { CategoriesScreen(onBack = { navController.popBackStack() }) }
+                        composable("parse_rules") { ParseRulesScreen(onBack = { navController.popBackStack() }) }
+                        composable("llm_settings") {
+                            // 复用 Hilt 单例 SecureKeyStore，避免重复创建加密存储实例
+                            val llmSettingsVm = hiltViewModel<LlmSettingsViewModel>()
+                            LlmSettingsScreen(
+                                onBack = { navController.popBackStack() },
+                                keyStore = llmSettingsVm.keyStore
+                            )
+                        }
+                    }
+                }
             }
         }
     }

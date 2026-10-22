@@ -156,8 +156,51 @@ class InputPersistenceTest {
         assertEquals(1, done)
     }
 
+    @Test fun `successive parses append previews and edits target stable draft identity`() = runTest(dispatcher) {
+        val vm = input(client { response })
+        vm.updateInput("午饭25")
+        vm.sendForParsing()
+        runCurrent()
+        val first = vm.state.value.previewItems.single()
+        vm.updateInput("晚饭25")
+        vm.sendForParsing()
+        runCurrent()
+        assertEquals(2, vm.state.value.previewItems.size)
+        assertNotEquals(first.draftId, vm.state.value.previewItems.last().draftId)
+        assertTrue(vm.updatePreviewItem(first.copy(amount = 4200, merchant = "修改后的商家")))
+        assertEquals(listOf(4200L, 2500L), vm.state.value.previewItems.map { it.amount })
+        vm.saveAll {}
+        runCurrent()
+        assertEquals(listOf(4200L, 2500L), transactions.saved.map { it.amount })
+        assertEquals("修改后的商家", transactions.saved.first().merchant)
+    }
+
+    @Test fun `manual selected date is persisted instead of save time`() = runTest(dispatcher) {
+        val vm = input(client { response })
+        vm.saveManual(TxType.EXPENSE, 1, 1000, "补记", occurredAt = 1234567890000) {}
+        runCurrent()
+        assertEquals(1234567890000, transactions.saved.single().occurredAt)
+    }
+
+    @Test fun `editing an archived category retains its identity`() = runTest(dispatcher) {
+        categories.cats = categories.cats + CategoryEntity(id = 2, name = "旧分类", icon = "旧", colorIndex = 1,
+            type = TxType.EXPENSE, sortOrder = 1, enabled = false)
+        transactions.saved += TransactionEntity(id = 5, amount = 2500, type = TxType.EXPENSE,
+            categoryId = 2, occurredAt = 1234567890000)
+        val vm = keep(EditTransactionViewModel(transactions, categories, SavedStateHandle(mapOf("id" to 5L))))
+        runCurrent()
+        assertEquals(2L, vm.state.value.selectedCategoryId)
+        assertFalse(vm.state.value.hasChanges)
+        vm.updateNote("只改备注")
+        assertTrue(vm.state.value.hasChanges)
+        vm.save {}
+        runCurrent()
+        assertEquals(2L, transactions.updated?.categoryId)
+        assertEquals("只改备注", transactions.updated?.note)
+    }
+
     private class TestCategories : CategoryDao {
-        private val cats = listOf(CategoryEntity(id = 1, name = "餐饮", icon = "餐", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+        var cats = listOf(CategoryEntity(id = 1, name = "餐饮", icon = "餐", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
         override fun observeAll() = flowOf(cats)
         override fun observeEnabled() = flowOf(cats)
         override fun observeByType(type: TxType) = flowOf(cats.filter { it.type == type })
@@ -172,6 +215,7 @@ class InputPersistenceTest {
     private class TestTransactions : TransactionDao {
         var beforeInsert: suspend () -> Unit = {}
         var attempts = 0
+        var updated: TransactionEntity? = null
         val saved = mutableListOf<TransactionEntity>()
         override suspend fun insert(tx: TransactionEntity): Long {
             attempts++
@@ -181,7 +225,7 @@ class InputPersistenceTest {
         }
         override suspend fun insertCaptured(tx: TransactionEntity) = insert(tx)
         override suspend fun hasCaptureEvent(eventKey: String) = false
-        override suspend fun update(tx: TransactionEntity) {}
+        override suspend fun update(tx: TransactionEntity) { updated = tx }
         override suspend fun updateStatus(id: Long, status: TxStatus) = 0
         override suspend fun updateCapturedStatus(id: Long, eventKey: String, status: TxStatus) = 0
         override suspend fun getById(id: Long) = saved.firstOrNull { it.id == id }
