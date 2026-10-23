@@ -28,6 +28,22 @@ class AppPreferences @Inject constructor(
     private val notificationCloudParsingKey = booleanPreferencesKey("notification_cloud_parsing_enabled")
     private val notificationPermissionRequestedKey = booleanPreferencesKey("notification_permission_requested")
     private val onboardingDoneKey = booleanPreferencesKey("onboarding_done")
+    private val notificationCaptureKey = booleanPreferencesKey("notification_capture_enabled")
+    private val screenCaptureKey = booleanPreferencesKey("screen_capture_enabled")
+
+    val notificationCaptureEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[notificationCaptureKey] ?: true }
+    // 页面读取需单独同意；系统授权本身不能替代应用内开关。
+    val screenCaptureEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[screenCaptureKey] ?: false }
+
+    suspend fun setNotificationCaptureEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[notificationCaptureKey] = enabled }
+    }
+
+    suspend fun setScreenCaptureEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[screenCaptureKey] = enabled }
+    }
 
     val notificationPermissionRequested: Flow<Boolean> = context.dataStore.data
         .map { it[notificationPermissionRequestedKey] ?: false }

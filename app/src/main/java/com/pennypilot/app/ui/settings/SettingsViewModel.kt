@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pennypilot.app.data.settings.AppPreferences
 import com.pennypilot.app.domain.usecase.BackupUseCase
+import com.pennypilot.app.service.CaptureProcessor
 import com.pennypilot.app.service.CaptureServiceMonitor
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -20,18 +21,61 @@ import javax.inject.Inject
 class SettingsViewModel @Inject constructor(
     val serviceMonitor: CaptureServiceMonitor,
     val appPreferences: AppPreferences,
+    private val captureProcessor: CaptureProcessor,
     private val backupUseCase: BackupUseCase
 ) : ViewModel() {
     val lastBackupAt = appPreferences.lastBackupAt
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
     val cloudParsingEnabled = appPreferences.notificationCloudParsingEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    val notificationCaptureEnabled = appPreferences.notificationCaptureEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+    val screenCaptureEnabled = appPreferences.screenCaptureEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    private val _savingCapturePreference = MutableStateFlow(false)
+    val savingCapturePreference = _savingCapturePreference.asStateFlow()
     private val _isBusy = MutableStateFlow(false)
     val isBusy = _isBusy.asStateFlow()
     private val _savingCloudPreference = MutableStateFlow(false)
     val savingCloudPreference = _savingCloudPreference.asStateFlow()
     private val _message = MutableStateFlow<String?>(null)
     val message = _message.asStateFlow()
+
+    fun refreshCaptureStatistics() {
+        viewModelScope.launch {
+            try {
+                captureProcessor.refreshTodayCount()
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) { serviceMonitor.onError("捕获统计暂时不可用，请稍后重试") }
+        }
+    }
+
+    fun setNotificationCaptureEnabled(enabled: Boolean) {
+        saveCapturePreference {
+            appPreferences.setNotificationCaptureEnabled(enabled)
+            _message.value = if (enabled) "通知捕获开关已打开" else "通知捕获已暂停"
+        }
+    }
+
+    fun setScreenCaptureEnabled(enabled: Boolean, onSaved: () -> Unit = {}) {
+        saveCapturePreference {
+            appPreferences.setScreenCaptureEnabled(enabled)
+            _message.value = if (enabled) "支付页面捕获开关已打开，请核对系统授权状态" else "支付页面捕获已暂停"
+            onSaved()
+        }
+    }
+
+    private fun saveCapturePreference(save: suspend () -> Unit) {
+        if (_savingCapturePreference.value) return
+        _savingCapturePreference.value = true
+        viewModelScope.launch {
+            try {
+                save()
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) { _message.value = "捕获设置未保存，请重试"
+            } finally { _savingCapturePreference.value = false }
+        }
+    }
 
     fun setCloudParsingEnabled(enabled: Boolean) {
         if (_savingCloudPreference.value) return

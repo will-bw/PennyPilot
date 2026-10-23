@@ -7,6 +7,8 @@ import com.pennypilot.app.data.llm.ToolDefinition
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -124,12 +126,21 @@ internal object ResponsesCodec {
         }
     }
 
+    /** Sniff only when Content-Type is absent, without consuming any stream bytes. */
+    fun looksLikeEventStream(source: BufferedSource): Boolean {
+        val peek = source.peek()
+        peek.request(256)
+        val prefix = peek.readUtf8(minOf(256L, peek.buffer.size)).removePrefix("\uFEFF").trimStart()
+        return prefix.startsWith("data:") || prefix.startsWith("event:") || prefix.startsWith(":")
+    }
+
     /** Multi-line SSE data is joined with LF. A sentinel or EOF never proves completion. */
     fun readStream(source: BufferedSource, allowedTools: Set<String>, requestId: String? = null): ResponseOutput {
         val data = StringBuilder()
         var eventName: String? = null
         var byteCount = 0L
         var firstLine = true
+        val streamItems = StreamItems(requestId)
         val utf8 = Charsets.UTF_8.newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
@@ -153,7 +164,7 @@ internal object ResponsesCodec {
             if (cleanLine.isEmpty()) {
                 if (data.isNotEmpty()) {
                     val payload = data.toString().removeSuffix("\n")
-                    terminalEvent(payload, eventName, allowedTools, requestId)?.let { return it }
+                    consumeEvent(payload, eventName, allowedTools, requestId, streamItems)?.let { return it }
                 }
                 data.setLength(0)
                 eventName = null
@@ -173,8 +184,8 @@ internal object ResponsesCodec {
         throw OpenAiErrors.protocol("未收到完成事件", requestId)
     }
 
-    private fun terminalEvent(
-        payload: String, eventName: String?, allowedTools: Set<String>, requestId: String?
+    private fun consumeEvent(
+        payload: String, eventName: String?, allowedTools: Set<String>, requestId: String?, streamItems: StreamItems
     ): ResponseOutput? {
         if (payload == "[DONE]" || payload == "[END]") return null
         val event = objectFrom(payload, requestId)
@@ -183,11 +194,17 @@ internal object ResponsesCodec {
             throw OpenAiErrors.protocol("事件类型不一致", requestId)
         }
         return when (type) {
+            "response.output_item.added", "response.output_item.done" -> {
+                streamItems.accept(type, event)
+                null
+            }
             "response.completed" -> {
                 val response = event["response"] as? JsonObject ?: throw OpenAiErrors.protocol("完成事件缺少响应", requestId)
                 if (response.string("status") != "completed") throw OpenAiErrors.protocol("响应尚未完整完成", requestId)
                 val items = response["output"] as? JsonArray ?: throw OpenAiErrors.protocol("完成事件缺少输出", requestId)
-                output(items, allowedTools, requestId)
+                // Direct-route terminal events can omit the already-streamed output items.
+                // Use only final item.done payloads, and only after response.completed.
+                output(if (items.isEmpty()) streamItems.completed() else items, allowedTools, requestId)
             }
             "response.failed" -> {
                 val response = event["response"] as? JsonObject
@@ -195,7 +212,39 @@ internal object ResponsesCodec {
             }
             "response.incomplete" -> throw OpenAiErrors.protocol("模型输出不完整", requestId)
             "error" -> throw OpenAiErrors.stream(event["error"] as? JsonObject ?: event, requestId)
-            else -> null // Deltas are provisional; completed.output is the only source of returned content.
+            else -> null // Deltas remain provisional and are never returned as completed content.
+        }
+    }
+
+    private class StreamItems(private val requestId: String?) {
+        private val added = mutableMapOf<Int, JsonObject>()
+        private val done = sortedMapOf<Int, JsonObject>()
+
+        fun accept(type: String, event: JsonObject) {
+            val index = (event["output_index"] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in 0..4095 } ?: throw OpenAiErrors.protocol("输出项序号无效", requestId)
+            val item = event["item"] as? JsonObject ?: throw OpenAiErrors.protocol("事件缺少输出项", requestId)
+            if (item.string("id").isNullOrBlank() || item.string("type").isNullOrBlank()) {
+                throw OpenAiErrors.protocol("输出项缺少标识", requestId)
+            }
+            if (type == "response.output_item.added") {
+                if (index in added || index in done) throw OpenAiErrors.protocol("输出项序号重复", requestId)
+                added[index] = item
+            } else {
+                val initial = added[index]
+                if (initial != null && (initial.string("id") != item.string("id") || initial.string("type") != item.string("type"))) {
+                    throw OpenAiErrors.protocol("输出项标识不一致", requestId)
+                }
+                if (done.put(index, item) != null) throw OpenAiErrors.protocol("完成输出项重复", requestId)
+            }
+        }
+
+        fun completed(): JsonArray {
+            if (!done.keys.containsAll(added.keys) || done.keys.toList() != (0 until done.size).toList() ||
+                done.values.map { it.string("id") }.distinct().size != done.size) {
+                throw OpenAiErrors.protocol("流式输出项不完整", requestId)
+            }
+            return JsonArray(done.values.toList())
         }
     }
 

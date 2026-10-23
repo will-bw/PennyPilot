@@ -17,6 +17,23 @@ internal object OpenAiErrors {
     )
     fun network() = UserFacingLlmException("连接 ChatGPT 中断或超时，请检查网络后重试。本次请求不会自动重发。")
 
+    fun unexpectedResponse(status: Int, contentType: String?, body: String, requestId: String?): UserFacingLlmException {
+        val root = runCatching { Json.parseToJsonElement(body) as? JsonObject }.getOrNull()
+        if (root?.get("error") is JsonObject) return http(status, body, requestId)
+        val shape = when {
+            body.contains("cf-chl-", ignoreCase = true) || body.contains("challenge-platform", ignoreCase = true) -> "html_challenge"
+            body.trimStart().startsWith("<") -> "html"
+            root?.containsKey("detail") == true -> "detail"
+            root != null -> "json"
+            body.startsWith("data:") || body.startsWith("event:") -> "sse_wrong_content_type"
+            body.isEmpty() -> "empty_or_oversized"
+            else -> "other"
+        }
+        val safeType = contentType?.takeIf { it.matches(Regex("[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+")) } ?: "missing"
+        return UserFacingLlmException("ChatGPT 未返回预期的事件流，请检查服务连接。" +
+            diagnostic(status = status, requestId = requestId, shape = shape) + " · content_type=$safeType")
+    }
+
     fun http(status: Int, body: String, requestId: String?): UserFacingLlmException {
         val root = runCatching { Json.parseToJsonElement(body) as? JsonObject }.getOrNull()
         val error = root?.get("error") as? JsonObject

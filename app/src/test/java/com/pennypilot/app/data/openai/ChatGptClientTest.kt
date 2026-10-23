@@ -131,6 +131,46 @@ class ChatGptClientTest {
         assertEquals(1, factory.calls.size)
     }
 
+    @Test fun `unexpected successful response exposes only safe format diagnostics without retry`() = runTest {
+        val factory = FakeCalls { call, callback -> callback.onResponse(call,
+            response(call, "<html>challenge-platform private-token</html>", mediaType = "text/html")) }
+        val result = runCatching { ChatGptClient(FakeAccess(), { "m" }, OpenAiHttp(factory)).chat(listOf(Message("user", "test"))) }
+        val message = result.exceptionOrNull()!!.message!!
+        assertTrue(message.contains("HTTP 200"))
+        assertTrue(message.contains("content_type=text/html"))
+        assertTrue(message.contains("response=html_challenge"))
+        assertFalse(message.contains("private-token"))
+        assertEquals(1, factory.calls.size)
+    }
+
+    @Test fun `JSON error with HTTP success preserves service error instead of hiding it as SSE error`() = runTest {
+        val factory = FakeCalls { call, callback -> callback.onResponse(call,
+            response(call, """{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"private-token"}}""", mediaType = "application/json")) }
+        val result = runCatching { ChatGptClient(FakeAccess(), { "m" }, OpenAiHttp(factory)).chat(listOf(Message("user", "test"))) }
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("额度"))
+        assertFalse(result.exceptionOrNull()!!.message!!.contains("private-token"))
+        assertEquals(1, factory.calls.size)
+    }
+
+    @Test fun `missing content type accepts only fully validated event streams`() = runTest {
+        val factory = FakeCalls { call, callback -> callback.onResponse(call,
+            response(call, "").newBuilder().body(answer("正常回答").toResponseBody(null)).build()) }
+        assertEquals("正常回答", ChatGptClient(FakeAccess(), { "m" }, OpenAiHttp(factory))
+            .chat(listOf(Message("user", "test"))))
+        assertEquals(1, factory.calls.size)
+    }
+
+    @Test fun `missing content type never promotes truncated SSE or HTML to success`() = runTest {
+        listOf("data: [DONE]\n\n", "data: {\"type\":\"response.created\"}\n\n", "<html>private-token</html>").forEach { body ->
+            val factory = FakeCalls { call, callback -> callback.onResponse(call,
+                response(call, "").newBuilder().body(body.toResponseBody(null)).build()) }
+            val result = runCatching { ChatGptClient(FakeAccess(), { "m" }, OpenAiHttp(factory)).chat(listOf(Message("user", "test"))) }
+            assertTrue(result.exceptionOrNull() is UserFacingLlmException)
+            assertFalse(result.exceptionOrNull()!!.message!!.contains("private-token"))
+            assertEquals(1, factory.calls.size)
+        }
+    }
+
     @Test fun `coroutine cancellation cancels pending HTTP and closes a late response`() = runTest {
         val factory = FakeCalls { _, _ -> Unit }
         val task = async { ChatGptClient(FakeAccess(), { "m" }, OpenAiHttp(factory)).chat(listOf(Message("user", "test"))) }

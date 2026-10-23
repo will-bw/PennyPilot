@@ -1,5 +1,11 @@
 package com.pennypilot.app.ui.input
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -16,9 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -29,6 +33,11 @@ import com.pennypilot.app.ui.edit.DiscardChangesDialog
 import com.pennypilot.app.ui.edit.TransactionCategorySelection
 import com.pennypilot.app.ui.edit.TransactionDateTimeFields
 import com.pennypilot.app.ui.edit.TransactionTypeSelector
+import com.pennypilot.app.ui.edit.TransactionFormError
+import com.pennypilot.app.ui.edit.TransactionSaveLabel
+import com.pennypilot.app.ui.theme.PennyMotion
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,6 +45,7 @@ fun KeypadSheet(
     categories: List<CategoryEntity>,
     isSaving: Boolean = false,
     error: String? = null,
+    dismissRequested: Boolean = false,
     onDismiss: () -> Unit,
     onSave: (type: TxType, categoryId: Long, amountCents: Long, note: String, occurredAt: Long) -> Unit
 ) {
@@ -49,6 +59,10 @@ fun KeypadSheet(
     var showCategories by rememberSaveable { mutableStateOf(false) }
     var showDiscard by rememberSaveable { mutableStateOf(false) }
     var allowDismiss by remember { mutableStateOf(false) }
+    var closing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val currentOnDismiss by rememberUpdatedState(onDismiss)
+    val locked = isSaving || closing || dismissRequested
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val pool = categories.filter { it.type == txType && it.enabled }
@@ -56,21 +70,42 @@ fun KeypadSheet(
     val selectedCategory = pool.find { it.id == selectedId }
     val currentSaving by rememberUpdatedState(isSaving)
     val currentDirty by rememberUpdatedState(amountText != "0" || note.isNotBlank() || txType != TxType.EXPENSE || occurredAt != initialTime)
-    val requestDismiss: () -> Unit = {
-        if (!isSaving) {
-            focus.clearFocus()
-            if (currentDirty) showDiscard = true else onDismiss()
-        }
-    }
     val sheetState = rememberModalBottomSheetState(
         skipPartiallyExpanded = true,
         confirmValueChange = { target ->
-            if (target != SheetValue.Hidden || allowDismiss) true
+            if (closing) target == SheetValue.Hidden
+            else if (target != SheetValue.Hidden || allowDismiss) true
             else if (currentSaving) false
             else if (currentDirty) { showDiscard = true; false }
             else true
         }
     )
+    val dismissSmoothly: () -> Unit = {
+        if (!closing) {
+            closing = true
+            allowDismiss = true
+            focus.clearFocus()
+            scope.launch {
+                try {
+                    sheetState.hide()
+                } finally {
+                    // A gesture can cancel this child animation, but cannot reopen a saved or
+                    // explicitly discarded form. A disposed composition has no active owner.
+                    if (scope.isActive) currentOnDismiss()
+                }
+            }
+        }
+    }
+    val requestDismiss: () -> Unit = {
+        if (!locked) {
+            focus.clearFocus()
+            if (currentDirty) showDiscard = true else dismissSmoothly()
+        }
+    }
+    // Keep the sheet mounted until its native exit completes, including after a successful save.
+    LaunchedEffect(dismissRequested) {
+        if (dismissRequested) dismissSmoothly()
+    }
     LaunchedEffect(pool) {
         if (pool.none { it.id == selectedId }) selectedId = pool.firstOrNull()?.id
     }
@@ -89,16 +124,16 @@ fun KeypadSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("手动记账", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f).semantics { heading() })
-                TextButton(onClick = requestDismiss, enabled = !isSaving, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") }
+                TextButton(onClick = requestDismiss, enabled = !locked, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") }
             }
             Column(
                 modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                TransactionTypeSelector(txType, enabled = !isSaving) { txType = it }
+                TransactionTypeSelector(txType, enabled = !locked) { txType = it }
                 OutlinedButton(
                     onClick = { focus.clearFocus(); keyboard?.hide() },
-                    enabled = !isSaving,
+                    enabled = !locked,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
                     shape = MaterialTheme.shapes.large
                 ) {
@@ -111,7 +146,7 @@ fun KeypadSheet(
                 }
                 OutlinedButton(
                     onClick = { focus.clearFocus(); showCategories = true },
-                    enabled = !isSaving,
+                    enabled = !locked,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     shape = MaterialTheme.shapes.large
                 ) {
@@ -120,20 +155,24 @@ fun KeypadSheet(
                 if (pool.isEmpty()) {
                     Text("暂无可用分类，请先在分类管理中添加。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                TransactionDateTimeFields(occurredAt, enabled = !isSaving) { occurredAt = it }
+                TransactionDateTimeFields(occurredAt, enabled = !locked) { occurredAt = it }
                 OutlinedTextField(
                     value = note,
                     onValueChange = { note = it },
-                    enabled = !isSaving,
+                    enabled = !locked,
                     label = { Text("备注（可选）") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { focus.clearFocus(); keyboard?.hide() }),
                     modifier = Modifier.fillMaxWidth().onFocusChanged { noteFocused = it.isFocused }
                 )
-                if (!noteFocused) {
+                AnimatedVisibility(
+                    visible = !noteFocused,
+                    enter = expandVertically(PennyMotion.spatial()) + fadeIn(PennyMotion.effects()),
+                    exit = shrinkVertically(PennyMotion.spatial()) + fadeOut(tween(PennyMotion.Exit))
+                ) {
                     KeypadGrid(
-                        enabled = !isSaving,
+                        enabled = !locked && !noteFocused,
                         onDigit = { amountText = amount.appendDigit(it).display },
                         onDot = { amountText = amount.appendDot().display },
                         onBackspace = { amountText = amount.backspace().display }
@@ -142,27 +181,20 @@ fun KeypadSheet(
                 Spacer(Modifier.height(4.dp))
             }
             Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                error?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                }
+                TransactionFormError(error)
                 Button(
                     onClick = { focus.clearFocus(); onSave(txType, selectedId!!, amount.cents, note.trim(), occurredAt) },
-                    enabled = amount.cents > 0 && selectedCategory != null && !isSaving,
+                    enabled = amount.cents > 0 && selectedCategory != null && !locked,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     shape = MaterialTheme.shapes.large,
                     colors = ButtonDefaults.buttonColors(
-                        disabledContainerColor = if (isSaving) MaterialTheme.colorScheme.primaryContainer
+                        disabledContainerColor = if (isSaving || dismissRequested) MaterialTheme.colorScheme.primaryContainer
                             else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-                        disabledContentColor = if (isSaving) MaterialTheme.colorScheme.onPrimaryContainer
+                        disabledContentColor = if (isSaving || dismissRequested) MaterialTheme.colorScheme.onPrimaryContainer
                             else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     )
                 ) {
-                    if (isSaving) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Text(if (isSaving) "正在保存…" else "保存账目")
+                    TransactionSaveLabel(isSaving = isSaving, label = if (dismissRequested) "已保存" else "保存账目")
                 }
             }
         }
@@ -182,7 +214,7 @@ fun KeypadSheet(
     if (showDiscard) {
         DiscardChangesDialog(
             onKeepEditing = { showDiscard = false },
-            onDiscard = { allowDismiss = true; showDiscard = false; onDismiss() }
+            onDiscard = { showDiscard = false; dismissSmoothly() }
         )
     }
 }

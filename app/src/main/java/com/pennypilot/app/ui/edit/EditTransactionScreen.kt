@@ -1,6 +1,12 @@
 package com.pennypilot.app.ui.edit
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardActions
@@ -14,15 +20,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennypilot.app.ui.components.LedgerState
+import com.pennypilot.app.ui.theme.PennyMotion
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,24 +72,27 @@ fun EditTransactionScreen(
             )
         },
         bottomBar = {
-            if (!state.isLoading && !state.loadFailed) {
+            AnimatedVisibility(
+                visible = !state.isLoading && !state.loadFailed,
+                enter = expandVertically(PennyMotion.spatial()) + fadeIn(PennyMotion.effects()),
+                exit = shrinkVertically(PennyMotion.spatial()) + fadeOut(tween(PennyMotion.Exit))
+            ) {
                 Surface(color = MaterialTheme.colorScheme.surface) {
                     Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        state.error?.let {
-                            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                        }
+                        TransactionFormError(state.error)
                         Button(
                             onClick = { focusManager.clearFocus(); vm.save(onBack) },
                             enabled = !state.isSaving && state.categories.isNotEmpty(),
                             modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                            shape = MaterialTheme.shapes.large
+                            shape = MaterialTheme.shapes.large,
+                            colors = ButtonDefaults.buttonColors(
+                                disabledContainerColor = if (state.isSaving) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = .12f),
+                                disabledContentColor = if (state.isSaving) MaterialTheme.colorScheme.onPrimaryContainer
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = .38f)
+                            )
                         ) {
-                            if (state.isSaving) {
-                                CircularProgressIndicator(Modifier.size(18.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
-                                Spacer(Modifier.width(8.dp))
-                            }
-                            Text(if (state.isSaving) "正在保存…" else "保存账目")
+                            TransactionSaveLabel(state.isSaving)
                         }
                     }
                 }
@@ -98,11 +105,11 @@ fun EditTransactionScreen(
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             when {
-                state.isLoading -> item { LedgerState("正在加载账目", "请稍候…", loading = true) }
-                state.loadFailed -> item { LedgerState("暂时无法编辑", state.error.orEmpty(), actionLabel = "返回流水", onAction = onBack) }
+                state.isLoading -> item(key = "loading") { LedgerState("正在加载账目", "请稍候…", loading = true, modifier = Modifier.animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))) }
+                state.loadFailed -> item(key = "load_error") { LedgerState("暂时无法编辑", state.error.orEmpty(), actionLabel = "返回流水", onAction = onBack, modifier = Modifier.animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))) }
                 else -> {
-                    item { TransactionTypeSelector(state.type, enabled = !state.isSaving, onSelect = vm::setType) }
-                    item {
+                    item(key = "type") { TransactionTypeSelector(state.type, enabled = !state.isSaving, onSelect = vm::setType) }
+                    item(key = "amount") {
                         OutlinedTextField(
                             value = state.amountText,
                             onValueChange = vm::updateAmount,
@@ -111,41 +118,41 @@ fun EditTransactionScreen(
                             prefix = { Text("¥") },
                             singleLine = true,
                             isError = state.amountError != null,
-                            supportingText = { state.amountError?.let { Text(it) } },
+                            supportingText = { TransactionFormError(state.amountError) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Done),
                             keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                             textStyle = MaterialTheme.typography.headlineMedium,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth().animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))
                         )
                     }
-                    item {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    item(key = "category") {
+                        Column(Modifier.animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit)), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text("分类", style = MaterialTheme.typography.titleMedium)
                             TransactionCategorySelection(state.categories, state.selectedCategoryId, enabled = !state.isSaving, onSelect = vm::selectCategory)
                         }
                     }
-                    item { TransactionDateTimeFields(state.occurredAt, enabled = !state.isSaving, onChange = vm::setOccurredAt) }
-                    item {
+                    item(key = "date_time") { TransactionDateTimeFields(state.occurredAt, enabled = !state.isSaving, onChange = vm::setOccurredAt) }
+                    item(key = "note") {
                         OutlinedTextField(
                             value = state.note, onValueChange = vm::updateNote,
                             enabled = !state.isSaving, label = { Text("备注（可选）") },
-                            maxLines = 4, modifier = Modifier.fillMaxWidth()
+                            maxLines = 4, modifier = Modifier.fillMaxWidth().animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))
                         )
                     }
-                    item {
+                    item(key = "merchant") {
                         OutlinedTextField(
                             value = state.merchant, onValueChange = vm::updateMerchant,
                             enabled = !state.isSaving, label = { Text("商户（可选）") }, singleLine = true,
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next), modifier = Modifier.fillMaxWidth()
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next), modifier = Modifier.fillMaxWidth().animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))
                         )
                     }
-                    item {
+                    item(key = "account") {
                         OutlinedTextField(
                             value = state.accountTag, onValueChange = vm::updateAccountTag,
                             enabled = !state.isSaving, label = { Text("账户标签（可选）") },
                             placeholder = { Text("例如：现金、银行卡") }, singleLine = true,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }), modifier = Modifier.fillMaxWidth()
+                            keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }), modifier = Modifier.fillMaxWidth().animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))
                         )
                     }
                 }

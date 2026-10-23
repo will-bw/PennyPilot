@@ -1,0 +1,23 @@
+{
+  "format": "pennypilot",
+  "version": 1,
+  "categories": [
+    {"id":7,"name":"餐饮","icon":"🍜","colorIndex":0,"type":"EXPENSE","sortOrder":0,"enabled":true,"isPreset":true},
+    {"id":9,"name":"工资","icon":"💼","colorIndex":6,"type":"INCOME","sortOrder":1,"enabled":false,"isPreset":false}
+  ],
+  "transactions": [
+    {"id":41,"amount":1234,"type":"EXPENSE","categoryId":7,"note":"测试备份","merchant":"餐厅","accountTag":"微信","occurredAt":1720000000000,"createdAt":1720000000001,"source":"NOTIFICATION","status":"PENDING","rawPayload":"微信支付 ¥12.34","captureEventKey":"event-41","duplicateOf":99},
+    {"id":42,"amount":-90000,"type":"INCOME","categoryId":9,"note":null,"merchant":null,"accountTag":null,"occurredAt":1720000000100,"createdAt":1720000000101,"source":"AI_VOICE","status":"CONFIRMED","rawPayload":null,"captureEventKey":null,"duplicateOf":null},
+    {"id":43,"amount":2000,"type":"EXPENSE","categoryId":7,"note":null,"merchant":"咖啡店","accountTag":"支付宝","occurredAt":1720000000200,"createdAt":1720000000201,"source":"ACCESSIBILITY","status":"IGNORED","rawPayload":"支付成功 20.00元","captureEventKey":"event-43","duplicateOf":41}
+  ],
+  "rules": [
+    {"id":11,"appPackage":"com.example.payment","regexAmount":"(?i)paid (\\d++)","regexMerchant":"(?i)merchant (.+)","directionHint":"EXPENSE","enabled":false,"priority":-5}
+  ],
+  "reports": [
+    {"id":5,"yearMonth":"2026-09","totalExpense":1234,"totalIncome":90000,"byCategoryJson":"[{\"name\":\"餐饮\",\"total\":1234,\"count\":1}]","llmSummary":"测试月报：收入与支出。","generatedAt":1790800000000}
+  ],
+  "captureEvents": [
+    {"eventKey":"event-41","transactionId":41,"packageName":"com.tencent.mm","source":"NOTIFICATION","observedAt":1720000000000,"firstObservedAt":1720000000000,"notificationKey":"notification-41","textFingerprint":"fingerprint-41","orderId":"order-41","orderDomain":"wechat","amount":1234,"type":"EXPENSE","merchantFingerprint":"merchant-41"},
+    {"eventKey":"event-43","transactionId":43,"packageName":"com.eg.android.AlipayGphone","source":"ACCESSIBILITY","observedAt":1720000000200,"firstObservedAt":1720000000200,"notificationKey":null,"textFingerprint":"fingerprint-43","orderId":null,"orderDomain":"alipay","amount":2000,"type":"EXPENSE","merchantFingerprint":null}
+  ]
+}

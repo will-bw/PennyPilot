@@ -1,5 +1,8 @@
 package com.pennypilot.app.ui.navigation
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -14,12 +17,15 @@ import androidx.compose.material.icons.outlined.InsertChart
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.pennypilot.app.ui.theme.PennyMotion
 
 enum class TabItem(val label: String, val route: String, val icon: ImageVector, val selectedIcon: ImageVector = icon) {
     TRANSACTIONS("流水", "transactions", Icons.AutoMirrored.Outlined.ReceiptLong, Icons.AutoMirrored.Filled.ReceiptLong),
@@ -31,12 +37,13 @@ enum class TabItem(val label: String, val route: String, val icon: ImageVector, 
 
 /** Material 导航负责系统底部留白与选中语义；记账入口始终保留文字标签。 */
 @Composable
-fun PennyPilotBottomBar(currentRoute: String?, onTabClick: (TabItem) -> Unit) {
+fun PennyPilotBottomBar(currentRoute: String?, onTabClick: (TabItem) -> Unit, enabled: Boolean = true) {
     NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
         TabItem.entries.forEach { item ->
             val selected = currentRoute == item.route
             NavigationBarItem(
                 selected = selected,
+                enabled = enabled,
                 onClick = { onTabClick(item) },
                 icon = { TabIcon(item, selected) },
                 label = { TabLabel(item, selected) },
@@ -53,13 +60,14 @@ fun PennyPilotBottomBar(currentRoute: String?, onTabClick: (TabItem) -> Unit) {
 }
 
 @Composable
-fun PennyPilotNavigationRail(currentRoute: String?, onTabClick: (TabItem) -> Unit) {
+fun PennyPilotNavigationRail(currentRoute: String?, onTabClick: (TabItem) -> Unit, enabled: Boolean = true) {
     NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
         Spacer(Modifier.height(16.dp))
         TabItem.entries.forEach { item ->
             val selected = currentRoute == item.route
             NavigationRailItem(
                 selected = selected,
+                enabled = enabled,
                 onClick = { onTabClick(item) },
                 icon = { TabIcon(item, selected) },
                 label = { TabLabel(item, selected) },
@@ -78,21 +86,37 @@ fun PennyPilotNavigationRail(currentRoute: String?, onTabClick: (TabItem) -> Uni
 
 @Composable
 private fun TabIcon(item: TabItem, selected: Boolean) {
+    val emphasis by animateFloatAsState(
+        targetValue = if (selected) 1f else 0.92f,
+        animationSpec = PennyMotion.spatial(), label = "navigationEmphasis"
+    )
     // Every destination has the same icon slot, keeping all five labels on one baseline.
     Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
         if (item == TabItem.ADD) {
+            val container by animateColorAsState(
+                if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+                PennyMotion.effects(), label = "addDestinationContainer"
+            )
+            val foreground by animateColorAsState(
+                if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+                PennyMotion.effects(), label = "addDestinationIcon"
+            )
             Surface(
                 modifier = Modifier.fillMaxSize(),
-                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
-                contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+                color = container,
+                contentColor = foreground,
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(item.icon, contentDescription = null, modifier = Modifier.size(24.dp))
+                    Icon(item.icon, contentDescription = null, modifier = Modifier.size(24.dp)
+                        .graphicsLayer { scaleX = emphasis; scaleY = emphasis })
                 }
             }
         } else {
-            Icon(if (selected) item.selectedIcon else item.icon, contentDescription = null, modifier = Modifier.size(24.dp))
+            Crossfade(selected, animationSpec = PennyMotion.effects(), label = "navigationIcon") { active ->
+                Icon(if (active) item.selectedIcon else item.icon, contentDescription = null,
+                    modifier = Modifier.size(24.dp).graphicsLayer { scaleX = emphasis; scaleY = emphasis })
+            }
         }
     }
 }

@@ -1,10 +1,26 @@
 package com.pennypilot.app.ui.transactions
 
+import android.annotation.SuppressLint
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -19,6 +35,10 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,11 +76,11 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item(key = "month") {
-                MonthHero(state, daysElapsed, vm::shiftMonth, vm::returnToCurrentMonth)
+                MonthHero(state, daysElapsed, vm::shiftMonth, vm::returnToCurrentMonth, ledgerMotion())
             }
             if (!state.isLoading && state.error == null && strip.first.isNotEmpty()) {
                 item(key = "strip") {
-                    MonthStrip(strip.first, strip.second, state.today, Modifier.padding(horizontal = 20.dp))
+                    MonthStrip(strip.first, strip.second, state.today, ledgerMotion().padding(horizontal = 20.dp))
                 }
             }
             item(key = "search") {
@@ -75,12 +95,12 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
                     }) else null,
                     singleLine = true,
                     shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)
+                    modifier = ledgerMotion().fillMaxWidth().padding(horizontal = 20.dp)
                 )
             }
             item(key = "filters") {
                 Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+                    ledgerMotion().fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -94,11 +114,11 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
             }
             when {
                 state.isLoading -> item(key = "loading") {
-                    LedgerState("正在读取账单", "稍候即可查看本月收支。", loading = true, modifier = Modifier.padding(horizontal = 20.dp))
+                    LedgerState("正在读取账单", "稍候即可查看本月收支。", loading = true, modifier = ledgerMotion().padding(horizontal = 20.dp))
                 }
                 state.error != null -> item(key = "error") {
                     LedgerState("账单加载失败", state.error.orEmpty(), actionLabel = "重试", onAction = vm::retry,
-                        modifier = Modifier.padding(horizontal = 20.dp))
+                        modifier = ledgerMotion().padding(horizontal = 20.dp))
                 }
                 state.dayGroups.isEmpty() -> item(key = "empty") {
                     val pending = state.filter == TxFilter.Pending && state.query.isBlank()
@@ -107,7 +127,7 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
                         message = if (pending) "待确认记录会显示在它发生的月份。" else if (filtered) "试试其他关键词，或清除筛选条件。" else "点击底部记账按钮，记下第一笔收支。",
                         actionLabel = if (filtered) "查看本月全部" else null,
                         onAction = if (filtered) vm::clearFilters else null,
-                        modifier = Modifier.padding(horizontal = 20.dp)
+                        modifier = ledgerMotion().padding(horizontal = 20.dp)
                     )
                 }
                 else -> {
@@ -118,12 +138,12 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
                             else "已确认记录计入收支，待确认记录单独标记",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 20.dp)
+                            modifier = ledgerMotion().padding(horizontal = 20.dp)
                         )
                     }
                     state.dayGroups.forEach { group ->
                         item(key = "day_${group.date}") {
-                            Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Column(ledgerMotion().animateContentSize(PennyMotion.spatial()).padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text("${group.label} · ${group.dateText}", style = DayHeadDateStyle,
                                     modifier = Modifier.semantics { heading() })
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -138,15 +158,12 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
                             Card(
                                 shape = RoundedCornerShape(22.dp),
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)
+                                modifier = ledgerMotion().fillMaxWidth().padding(horizontal = 20.dp)
                             ) {
                                 val busy = item.tx.id in state.processingIds
-                                if (item.tx.status == TxStatus.PENDING) {
-                                    TransactionRow(item, busy, { onEditTx(item.tx.id) },
-                                        { vm.confirmTx(item.tx.id) }, { vm.ignoreTx(item.tx.id) })
-                                } else {
-                                    SwipeableTxRow(item, busy, { onEditTx(item.tx.id) }, { deleteTarget = item })
-                                }
+                                SwipeableTxRow(item, busy, { onEditTx(item.tx.id) }, { deleteTarget = item },
+                                    { vm.confirmTx(item.tx.id) }, { vm.ignoreTx(item.tx.id) },
+                                    item.tx.duplicateOf?.let { relatedId -> { onEditTx(relatedId) } })
                             }
                         }
                     }
@@ -171,10 +188,19 @@ fun TransactionsScreen(onEditTx: (Long) -> Unit = {}, vm: TransactionsViewModel 
     }
 }
 
+// Stable keys keep an edited or confirmed transaction in place while its neighbors settle.
+// animateItem is scoped to LazyItemScope, so this factory must retain that receiver.
+@SuppressLint("ModifierFactoryExtensionFunction")
+private fun LazyItemScope.ledgerMotion(): Modifier = Modifier.animateItem(
+    fadeInSpec = PennyMotion.effects(),
+    placementSpec = PennyMotion.spatial(),
+    fadeOutSpec = tween(PennyMotion.Exit)
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun MonthHero(state: TransactionsUiState, daysElapsed: Int, shift: (Int) -> Unit, returnToCurrent: () -> Unit) {
-    Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+private fun MonthHero(state: TransactionsUiState, daysElapsed: Int, shift: (Int) -> Unit, returnToCurrent: () -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier.animateContentSize(PennyMotion.spatial()).padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             if (maxWidth < 340.dp || LocalDensity.current.fontScale > 1.2f) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -188,7 +214,11 @@ private fun MonthHero(state: TransactionsUiState, daysElapsed: Int, shift: (Int)
                 }
             }
         }
-        if (YearMonth.from(state.selectedMonth) != YearMonth.from(state.today)) {
+        AnimatedVisibility(
+            visible = YearMonth.from(state.selectedMonth) != YearMonth.from(state.today),
+            enter = fadeIn(PennyMotion.effects()),
+            exit = fadeOut(tween(PennyMotion.Exit))
+        ) {
             TextButton(onClick = returnToCurrent, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回本月") }
         }
         Text(
@@ -209,8 +239,19 @@ private fun MonthHero(state: TransactionsUiState, daysElapsed: Int, shift: (Int)
 @Composable
 private fun MonthHeading(state: TransactionsUiState, modifier: Modifier = Modifier) {
     Column(modifier) {
-        Text("${state.selectedMonth.year} 年 ${state.selectedMonth.monthValue} 月", style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.semantics { heading() })
+        AnimatedContent(
+            targetState = state.selectedMonth,
+            transitionSpec = {
+                val direction = if (targetState > initialState) 1 else -1
+                (slideInHorizontally(PennyMotion.spatial()) { it / 8 * direction } +
+                    fadeIn(tween(PennyMotion.Enter, delayMillis = PennyMotion.Exit))) togetherWith
+                    (slideOutHorizontally(PennyMotion.spatial()) { -it / 8 * direction } + fadeOut(tween(PennyMotion.Exit)))
+            },
+            label = "ledger month"
+        ) { month ->
+            Text("${month.year} 年 ${month.monthValue} 月", style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.semantics { heading() })
+        }
         Text("本月支出 · 已确认", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -242,11 +283,20 @@ private fun MonthStrip(values: List<Long>, windowStart: LocalDate, today: LocalD
             horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.Bottom
         ) {
             values.forEachIndexed { i, v ->
-                Box(Modifier.weight(1f).height(((v.toDouble() / maxVal) * 44).toFloat().dp.coerceAtLeast(2.dp))
-                    .background(when { v == 0L -> MaterialTheme.colorScheme.outlineVariant
+                key(windowStart.plusDays(i.toLong())) {
+                    val fraction = animateFloatAsState(
+                        (v.toDouble() / maxVal).coerceIn(0.0, 1.0).toFloat(),
+                        PennyMotion.spatial(), label = "daily expense height"
+                    )
+                    val color = animateColorAsState(when { v == 0L -> MaterialTheme.colorScheme.outlineVariant
                         windowStart.plusDays(i.toLong()) == today -> MaterialTheme.colorScheme.primary
-                        else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.72f) },
-                        RoundedCornerShape(3.dp)))
+                        else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.72f) }, PennyMotion.effects(), label = "daily expense color")
+                    Canvas(Modifier.weight(1f).fillMaxHeight()) {
+                        val height = (size.height * fraction.value.coerceIn(0f, 1f)).coerceAtLeast(2.dp.toPx())
+                        drawRoundRect(color.value, topLeft = Offset(0f, size.height - height),
+                            size = Size(size.width, height), cornerRadius = CornerRadius(3.dp.toPx()))
+                    }
+                }
             }
         }
         Text("近 30 日支出 · ${windowStart.monthValue}/${windowStart.dayOfMonth}—${windowEnd.monthValue}/${windowEnd.dayOfMonth}",
@@ -291,30 +341,49 @@ private fun CategoryDialog(categories: List<CategoryEntity>, filter: TxFilter, o
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SwipeableTxRow(item: TxWithCategory, busy: Boolean, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun SwipeableTxRow(item: TxWithCategory, busy: Boolean, onEdit: () -> Unit, onDelete: () -> Unit, onConfirm: () -> Unit, onIgnore: () -> Unit, onReviewDuplicate: (() -> Unit)? = null) {
+    val pending = item.tx.status == TxStatus.PENDING
+    val canDelete by rememberUpdatedState(!busy && !pending)
+    val requestDelete by rememberUpdatedState(onDelete)
     val state = rememberSwipeToDismissBoxState(confirmValueChange = {
-        if (it == SwipeToDismissBoxValue.EndToStart && !busy) onDelete()
+        if (it == SwipeToDismissBoxValue.EndToStart && canDelete) requestDelete()
         false
     })
-    SwipeToDismissBox(state = state, enableDismissFromStartToEnd = false, enableDismissFromEndToStart = !busy,
+    val armed = state.targetValue == SwipeToDismissBoxValue.EndToStart
+    val iconScale by animateFloatAsState(if (armed) 1.12f else 1f, PennyMotion.spatial(), label = "delete threshold")
+    val deleteBackground by animateColorAsState(
+        if (armed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.errorContainer,
+        PennyMotion.effects(), label = "delete background"
+    )
+    val deleteTint by animateColorAsState(
+        if (armed) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.error,
+        PennyMotion.effects(), label = "delete icon"
+    )
+    SwipeToDismissBox(state = state, enableDismissFromStartToEnd = false, enableDismissFromEndToStart = !busy && !pending,
         backgroundContent = {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.errorContainer), contentAlignment = Alignment.CenterEnd) {
-                Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.padding(24.dp))
+            Box(Modifier.fillMaxSize().background(deleteBackground), contentAlignment = Alignment.CenterEnd) {
+                Icon(Icons.Default.Delete, null, tint = deleteTint,
+                    modifier = Modifier.padding(24.dp).graphicsLayer { scaleX = iconScale; scaleY = iconScale })
             }
         }) {
-        TransactionRow(item, busy, onEdit, {}, {}, onDelete)
+        TransactionRow(item, busy, onEdit, onConfirm, onIgnore, onDelete, onReviewDuplicate)
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TransactionRow(item: TxWithCategory, busy: Boolean, onEdit: () -> Unit, onConfirm: () -> Unit, onIgnore: () -> Unit, onDelete: (() -> Unit)? = null) {
+private fun TransactionRow(item: TxWithCategory, busy: Boolean, onEdit: () -> Unit, onConfirm: () -> Unit, onIgnore: () -> Unit, onDelete: (() -> Unit)? = null, onReviewDuplicate: (() -> Unit)? = null) {
     val tx = item.tx
     val pending = tx.status == TxStatus.PENDING
+    val possibleDuplicate = tx.duplicateOf != null
     var menuOpen by remember { mutableStateOf(false) }
     val time = remember(tx.occurredAt) { java.time.Instant.ofEpochMilli(tx.occurredAt).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")) }
     val title = tx.merchant?.takeIf { it.isNotBlank() } ?: tx.note?.takeIf { it.isNotBlank() } ?: item.category?.name ?: "未命名账目"
-    BoxWithConstraints(Modifier.fillMaxWidth().background(if (pending) MaterialTheme.pendingAmberSoftColor else MaterialTheme.colorScheme.surface)) {
+    val background by animateColorAsState(
+        if (pending) MaterialTheme.pendingAmberSoftColor else MaterialTheme.colorScheme.surface,
+        PennyMotion.effects(), label = "transaction status"
+    )
+    BoxWithConstraints(Modifier.fillMaxWidth().background(background)) {
         val compact = maxWidth < 340.dp || LocalDensity.current.fontScale > 1.2f
         Column(
             Modifier.fillMaxWidth().then(if (!pending) Modifier.clickable(enabled = !busy, onClickLabel = "编辑账目", onClick = onEdit) else Modifier)
@@ -342,12 +411,26 @@ private fun TransactionRow(item: TxWithCategory, busy: Boolean, onEdit: () -> Un
                     }
                 }
             }
-            if (pending) {
-                Text(if (busy) "正在处理…" else "待确认 · 尚未计入统计", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.pendingAmberColor)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    FilledTonalButton(onClick = onConfirm, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("记入") }
-                    OutlinedButton(onClick = onIgnore, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("忽略") }
-                    TextButton(onClick = onEdit, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("编辑") }
+            AnimatedVisibility(
+                visible = pending,
+                enter = expandVertically(PennyMotion.spatial(), expandFrom = Alignment.Top) + fadeIn(PennyMotion.effects()),
+                exit = shrinkVertically(PennyMotion.spatial(), shrinkTowards = Alignment.Top) + fadeOut(tween(PennyMotion.Exit))
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (busy) "正在处理…" else if (possibleDuplicate) "疑似重复 · 尚未计入统计" else "待确认 · 尚未计入统计", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.pendingAmberColor, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    if (possibleDuplicate) {
+                        Text("与另一笔记录相似。请核对是否为同一笔支付，也可能是连续发生的不同交易。",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (onReviewDuplicate != null) {
+                            TextButton(onClick = onReviewDuplicate, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("查看相近记录") }
+                        }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        FilledTonalButton(onClick = onConfirm, enabled = !busy && pending, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (possibleDuplicate) "仍然记入" else "记入") }
+                        OutlinedButton(onClick = onIgnore, enabled = !busy && pending, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (possibleDuplicate) "重复，忽略" else "忽略") }
+                        TextButton(onClick = onEdit, enabled = !busy && pending, modifier = Modifier.heightIn(min = 48.dp)) { Text("编辑") }
+                    }
                 }
             }
         }

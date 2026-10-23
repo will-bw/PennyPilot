@@ -1,5 +1,7 @@
 package com.pennypilot.app.ui.categories
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -21,6 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
@@ -37,6 +40,9 @@ import com.pennypilot.app.ui.components.CategoryIconOptions
 import com.pennypilot.app.ui.components.LedgerState
 import com.pennypilot.app.ui.settings.ManagementHeader
 import com.pennypilot.app.ui.settings.ManagementMessage
+import com.pennypilot.app.ui.settings.ManagementNotice
+import com.pennypilot.app.ui.settings.ManagementTransition
+import com.pennypilot.app.ui.theme.PennyMotion
 
 @Composable
 fun CategoriesScreen(onBack: () -> Unit, vm: CategoriesViewModel = hiltViewModel()) {
@@ -57,7 +63,7 @@ fun CategoriesScreen(onBack: () -> Unit, vm: CategoriesViewModel = hiltViewModel
 
     Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item {
+            item(key = "header") {
                 ManagementHeader("分类管理", "整理记账分类；停用后不再出现在新账目中，已有账目保留。", onBack)
                 Spacer(Modifier.height(20.dp))
                 TabRow(selectedTabIndex = if (selectedType == TxType.EXPENSE) 0 else 1) {
@@ -72,17 +78,21 @@ fun CategoriesScreen(onBack: () -> Unit, vm: CategoriesViewModel = hiltViewModel
                     Text("新增${if (selectedType == TxType.EXPENSE) "支出" else "收入"}分类")
                 }
             }
-            if (error != null && !adding && editing == null && deleting == null) item { ManagementMessage(error!!, error = true) }
-            if (!loaded) item { LedgerState("正在读取分类", "你的分类和排序会显示在这里。", loading = true) }
-            else if (filtered.isEmpty()) item { LedgerState("还没有这类分类", "添加一个常用分类，之后记账时就能快速选择。") }
+            if (error != null && !adding && editing == null && deleting == null) item(key = "error") {
+                Box(Modifier.animateItem()) { ManagementMessage(error!!, error = true) }
+            }
+            if (!loaded) item(key = "loading") { LedgerState("正在读取分类", "你的分类和排序会显示在这里。", loading = true) }
+            else if (filtered.isEmpty()) item(key = "empty") { LedgerState("还没有这类分类", "添加一个常用分类，之后记账时就能快速选择。") }
             else {
-                item { Text("${filtered.count { it.enabled }} 个已启用 · ${filtered.size} 个分类", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                item(key = "summary") { Text("${filtered.count { it.enabled }} 个已启用 · ${filtered.size} 个分类", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 itemsIndexed(filtered, key = { _, category -> category.id }) { index, category ->
                     CategoryRow(category, busy, index > 0, index < filtered.lastIndex,
                         onToggle = { vm.toggleEnabled(category) },
                         onEdit = { vm.clearError(); editingId = category.id },
                         onDelete = { vm.clearError(); deletingId = category.id },
-                        onMove = { vm.moveCategory(category, it) })
+                        onMove = { vm.moveCategory(category, it) },
+                        modifier = Modifier.animateItem(fadeInSpec = PennyMotion.effects(),
+                            placementSpec = PennyMotion.spatial(), fadeOutSpec = PennyMotion.effects()))
                 }
             }
         }
@@ -99,7 +109,7 @@ fun CategoriesScreen(onBack: () -> Unit, vm: CategoriesViewModel = hiltViewModel
             title = { Text("删除「${category.name}」？") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("该分类下的账目会移到同类型的「其他」，账目不会删除。分类删除后无法撤销。")
-                error?.let { ManagementMessage(it, error = true) }
+                ManagementNotice(error, error = true)
             } },
             confirmButton = { TextButton(onClick = { vm.deleteCategory(category) { deletingId = null } }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (busy) "正在删除…" else "删除分类", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { deletingId = null; vm.clearError() }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") } })
@@ -108,16 +118,19 @@ fun CategoriesScreen(onBack: () -> Unit, vm: CategoriesViewModel = hiltViewModel
 
 @Composable
 private fun CategoryRow(category: CategoryEntity, busy: Boolean, canMoveUp: Boolean, canMoveDown: Boolean,
-    onToggle: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit) {
+    onToggle: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit,
+    modifier: Modifier = Modifier) {
     var menuOpen by remember { mutableStateOf(false) }
-    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
+    Card(modifier.fillMaxWidth().animateContentSize(PennyMotion.spatial()), shape = MaterialTheme.shapes.large) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             CatIcon(colorIndex = category.colorIndex, emoji = category.icon, size = 40)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(category.name, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text("${if (category.enabled) "已启用" else "已停用"} · ${if (category.isPreset) "预设" else "自定义"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                ManagementTransition("${if (category.enabled) "已启用" else "已停用"} · ${if (category.isPreset) "预设" else "自定义"}") {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
             Switch(checked = category.enabled, onCheckedChange = { onToggle() }, enabled = !busy,
                 modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "${category.name}分类${if (category.enabled) "已启用" else "已停用"}" })
@@ -144,6 +157,7 @@ private fun CategoryRow(category: CategoryEntity, busy: Boolean, canMoveUp: Bool
 @Composable
 private fun CategoryEditDialog(category: CategoryEntity?, initialType: TxType, busy: Boolean, error: String?,
     onDismiss: () -> Unit, onChange: () -> Unit, onSave: (String, String, TxType) -> Unit) {
+    val focusManager = LocalFocusManager.current
     var name by rememberSaveable(category?.id) { mutableStateOf(category?.name.orEmpty()) }
     var icon by rememberSaveable(category?.id) { mutableStateOf(category?.icon ?: "📌") }
     var customIcon by rememberSaveable(category?.id) {
@@ -153,21 +167,23 @@ private fun CategoryEditDialog(category: CategoryEntity?, initialType: TxType, b
     AlertDialog(onDismissRequest = onDismiss, title = { Text(if (category == null) "新增分类" else "编辑分类") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(value = name, onValueChange = { name = it; onChange() }, label = { Text("分类名称") }, supportingText = { Text("同类型下不重名 · ${name.trim().length}/20 字") }, isError = name.trim().length > 20, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
-            CategoryIconPicker(icon, enabled = !busy, onSelect = { icon = it; customIcon = false; onChange() })
-            if (customIcon) {
-                OutlinedTextField(value = icon, onValueChange = { icon = it; onChange() }, label = { Text("自定义符号") },
-                    supportingText = { Text("输入一个习惯使用的符号，或从上方选择常用图标。") },
-                    singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
-            } else {
-                TextButton(onClick = { customIcon = true; icon = ""; onChange() }, enabled = !busy,
-                    modifier = Modifier.heightIn(min = 48.dp)) { Text("使用自定义符号") }
+            CategoryIconPicker(icon, enabled = !busy, onSelect = { focusManager.clearFocus(); icon = it; customIcon = false; onChange() })
+            ManagementTransition(customIcon) { useCustomIcon ->
+                if (useCustomIcon) {
+                    OutlinedTextField(value = icon, onValueChange = { icon = it; onChange() }, label = { Text("自定义符号") },
+                        supportingText = { Text("输入一个习惯使用的符号，或从上方选择常用图标。") },
+                        singleLine = true, enabled = !busy && useCustomIcon == customIcon, modifier = Modifier.fillMaxWidth())
+                } else {
+                    TextButton(onClick = { customIcon = true; icon = ""; onChange() }, enabled = !busy && useCustomIcon == customIcon,
+                        modifier = Modifier.heightIn(min = 48.dp)) { Text("使用自定义符号") }
+                }
             }
             if (category == null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(TxType.EXPENSE to "支出", TxType.INCOME to "收入").forEach { (value, label) ->
                     FilterChip(selected = type == value, onClick = { type = value; onChange() }, label = { Text(label) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
                 }
             }
-            error?.let { ManagementMessage(it, error = true) }
+            ManagementNotice(error, error = true)
         } },
         confirmButton = { TextButton(onClick = { onSave(name, icon, type) }, enabled = !busy && name.isNotBlank() && icon.isNotBlank() && name.trim().length <= 20, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (busy) "保存中…" else "保存分类") } },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") } })
@@ -186,10 +202,16 @@ private fun CategoryIconPicker(value: String, enabled: Boolean, onSelect: (Strin
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         row.forEach { option ->
                             val selected = option == choice
+                            val background by animateColorAsState(
+                                if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                PennyMotion.effects(), label = "categoryIconBackground")
+                            val border by animateColorAsState(
+                                if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                PennyMotion.effects(), label = "categoryIconBorder")
                             Box(Modifier.weight(1f).heightIn(min = 48.dp)
                                 .clip(MaterialTheme.shapes.small)
-                                .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
-                                .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else Color.Transparent, MaterialTheme.shapes.small)
+                                .background(background)
+                                .border(1.dp, border, MaterialTheme.shapes.small)
                                 .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = { onSelect(option.value) })
                                 .semantics { contentDescription = "${option.label}图标" }, contentAlignment = Alignment.Center) {
                                 Icon(option.icon, contentDescription = null, modifier = Modifier.size(22.dp),

@@ -125,4 +125,19 @@ class ParseRuleEngineTest {
         assertEquals("EXPENSE", ParseRuleEngine.parse("付款18.00元",
             listOf(invalid, disabled) + wechatRules)?.direction)
     }
+
+    @Test
+    fun `rules cannot select original amount over actual amount`() {
+        assertNull(ParseRuleEngine.parse("支付成功，原支付金额30元，实付18元", wechatRules))
+    }
+
+    @Test
+    fun `rules cannot select one of conflicting payment amounts`() {
+        assertNull(ParseRuleEngine.parse("付款18元，付款28元", wechatRules))
+    }
+
+    @Test
+    fun `expense rule cannot misclassify a completed refund`() {
+        assertNull(ParseRuleEngine.parse("退款成功，退款5元，原支付金额30元", wechatRules))
+    }
 }

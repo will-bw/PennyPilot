@@ -13,14 +13,15 @@ import com.pennypilot.app.data.db.dao.MonthlyReportDao
 import com.pennypilot.app.data.db.dao.ParseRuleDao
 import com.pennypilot.app.data.db.dao.TransactionDao
 import com.pennypilot.app.data.db.entity.CategoryEntity
+import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.domain.model.TxType
 
 @Database(
-    entities = [TransactionEntity::class, CategoryEntity::class, ParseRuleEntity::class, MonthlyReportEntity::class],
-    version = 4,
+    entities = [TransactionEntity::class, CategoryEntity::class, ParseRuleEntity::class, MonthlyReportEntity::class, CaptureEvidenceEntity::class],
+    version = 5,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -34,7 +35,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun backupDao(): BackupDao
 
     companion object {
-        const val VERSION = 4
+        const val VERSION = 5
         const val NAME = "pennypilot.db"
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -62,7 +63,32 @@ abstract class AppDatabase : RoomDatabase() {
                 PresetParseRules.upgradeLegacyRules(db)
             }
         }
-        val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN duplicate_of INTEGER")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS capture_events (
+                    event_key TEXT NOT NULL PRIMARY KEY,
+                    transaction_id INTEGER NOT NULL,
+                    package_name TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    observed_at INTEGER NOT NULL,
+                    first_observed_at INTEGER NOT NULL,
+                    notification_key TEXT,
+                    text_fingerprint TEXT NOT NULL,
+                    order_id TEXT,
+                    order_domain TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    merchant_fingerprint TEXT,
+                    FOREIGN KEY(transaction_id) REFERENCES transactions(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                )""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capture_events_transaction_id ON capture_events(transaction_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capture_events_observed_at ON capture_events(observed_at)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capture_events_order_domain_order_id ON capture_events(order_domain, order_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capture_events_package_name_notification_key ON capture_events(package_name, notification_key)")
+            }
+        }
+        val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 
         fun build(context: Context): AppDatabase = builder(context, NAME)
             .addCallback(object : Callback() {

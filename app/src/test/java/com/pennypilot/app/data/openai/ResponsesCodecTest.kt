@@ -108,6 +108,42 @@ class ResponsesCodecTest {
         }
     }
 
+    @Test fun `empty terminal output uses final streamed text after completion`() {
+        val item = textOutput("完整回答").single().jsonObject
+        val sse = itemEvent("response.output_item.done", 0, item) + stream(JsonArray(emptyList()))
+        assertEquals("完整回答", parse(sse).text)
+    }
+
+    @Test fun `empty terminal output preserves completed tools and encrypted reasoning in index order`() {
+        val sse = itemEvent("response.output_item.done", 1, toolOutput[1].jsonObject) +
+            itemEvent("response.output_item.done", 0, toolOutput[0].jsonObject) + stream(JsonArray(emptyList()))
+        val result = parse(sse, setOf("query_transactions"))
+        assertEquals(toolOutput, result.items)
+        assertEquals("call_expense", result.toolCalls.single().id)
+        assertThrows(UserFacingLlmException::class.java) { parse(sse) }
+    }
+
+    @Test fun `completed items never substitute for missing failed or incomplete response completion`() {
+        val done = itemEvent("response.output_item.done", 0, textOutput("完整单项").single().jsonObject)
+        listOf("", "data: [DONE]\n\n", "data: {\"type\":\"response.incomplete\"}\n\n",
+            "data: {\"type\":\"response.failed\",\"response\":{}}\n\n").forEach { tail ->
+            assertThrows(UserFacingLlmException::class.java) { parse(done + tail) }
+        }
+    }
+
+    @Test fun `streamed fallback rejects missing duplicate mismatched and incomplete items`() {
+        val item = textOutput("回答").single().jsonObject
+        val done = itemEvent("response.output_item.done", 0, item)
+        val added = itemEvent("response.output_item.added", 0, item)
+        val incomplete = Json.parseToJsonElement(item.toString().replace("completed", "in_progress")).jsonObject
+        val other = Json.parseToJsonElement(item.toString().replace("msg_1", "msg_other")).jsonObject
+        listOf("", added, done + done, itemEvent("response.output_item.done", 1, item),
+            added + itemEvent("response.output_item.done", 0, other),
+            itemEvent("response.output_item.done", 0, incomplete)).forEach { prefix ->
+            assertThrows(UserFacingLlmException::class.java) { parse(prefix + stream(JsonArray(emptyList()))) }
+        }
+    }
+
     @Test fun `completion requires completed status and full event framing`() {
         listOf(
             stream(textOutput("答案")).replace("\"status\":\"completed\"", "\"status\":\"incomplete\""),
@@ -156,6 +192,10 @@ class ResponsesCodecTest {
     }
 
     private fun parse(sse: String, tools: Set<String> = emptySet()) = ResponsesCodec.readStream(Buffer().writeUtf8(sse), tools, "req_test")
+
+    private fun itemEvent(type: String, index: Int, item: JsonObject) = "data: " + buildJsonObject {
+        put("type", type); put("output_index", index); put("item", item)
+    } + "\n\n"
 
     companion object {
         val tool = ToolDefinition(function = FunctionDef("query_transactions", "查询交易", buildJsonObject { put("type", "object") }))

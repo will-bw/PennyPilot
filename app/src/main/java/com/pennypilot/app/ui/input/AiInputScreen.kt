@@ -4,9 +4,17 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
@@ -18,9 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -31,6 +37,8 @@ import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.components.CatIcon
 import com.pennypilot.app.ui.components.InputDock
 import com.pennypilot.app.ui.components.LedgerState
+import com.pennypilot.app.ui.theme.PennyMotion
+import com.pennypilot.app.ui.edit.TransactionSaveLabel
 import com.pennypilot.app.ui.theme.incomeColor
 import com.pennypilot.app.util.MoneyUtil
 import java.text.SimpleDateFormat
@@ -40,6 +48,7 @@ import java.util.Locale
 @Composable
 fun AiInputScreen(
     onNavigateToManual: () -> Unit,
+    onViewLedger: () -> Unit,
     vm: AiInputViewModel = hiltViewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -47,7 +56,9 @@ fun AiInputScreen(
     val context = LocalContext.current
     val focus = LocalFocusManager.current
     val snackbar = remember { SnackbarHostState() }
+    val listState = rememberLazyListState()
     var showKeypad by rememberSaveable { mutableStateOf(false) }
+    var keypadSaved by rememberSaveable { mutableStateOf(false) }
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var removingId by rememberSaveable { mutableStateOf<String?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -62,6 +73,10 @@ fun AiInputScreen(
         }
     }
 
+    LaunchedEffect(state.lastSave) {
+        if (state.lastSave != null) listState.animateScrollToItem(0)
+    }
+
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
@@ -69,58 +84,42 @@ fun AiInputScreen(
         ) {
             Text("记一笔", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f).semantics { heading() })
             TextButton(
-                onClick = { focus.clearFocus(); vm.clearError(); showKeypad = true },
+                onClick = { focus.clearFocus(); vm.clearError(); keypadSaved = false; showKeypad = true },
                 enabled = !state.isSaving && !state.isRecording && !state.isRecognizing,
                 modifier = Modifier.heightIn(min = 48.dp)
             ) { Text("手动记账") }
         }
         LazyColumn(
             modifier = Modifier.weight(1f),
+            state = listState,
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (state.previewItems.isEmpty() && !state.isParsing) {
-                item(key = "example") {
-                    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text("说一句，记下多笔账", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                            Text("“昨天午饭 25 元，打车去公司 32 元。”", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                            Text("支持日期、金额和分类识别。先确认预览，再保存到账本。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                            TextButton(onClick = onNavigateToManual, modifier = Modifier.heightIn(min = 48.dp)) { Text("打开完整记账表单") }
-                        }
-                    }
-                }
-            }
-            if (state.isParsing) {
-                item(key = "parsing") { LedgerState("正在整理账目", "已有预览会保留，你也可以继续输入下一笔。", loading = true) }
+            item(key = "flow_status") {
+                InputFlowFeedback(state, onNavigateToManual, onViewLedger)
             }
             state.error?.let { error ->
                 item(key = "error") {
                     LedgerState(
                         "操作未完成", error,
                         actionLabel = if (state.previewItems.isNotEmpty()) "继续核对账目" else "改用手动记账",
-                        onAction = { vm.clearError(); if (state.previewItems.isEmpty()) { focus.clearFocus(); showKeypad = true } }
+                        onAction = { vm.clearError(); if (state.previewItems.isEmpty()) { focus.clearFocus(); keypadSaved = false; showKeypad = true } },
+                        modifier = Modifier.animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))
                     )
                 }
             }
-            if (state.previewItems.isNotEmpty()) {
-                item(key = "preview_heading") {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("待确认 · ${state.previewItems.size} 笔", style = MaterialTheme.typography.titleLarge,
-                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                        Text("可逐笔修改金额、分类和时间。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-                items(state.previewItems, key = { it.draftId }) { item ->
-                    PreviewCard(
-                        item = item,
-                        enabled = !state.isSaving,
-                        onEdit = { focus.clearFocus(); editingId = item.draftId },
-                        onRemove = { removingId = item.draftId }
-                    )
-                }
+            items(state.displayedItems, key = { it.draftId }) { item ->
+                PreviewCard(
+                    item = item,
+                    enabled = !state.isSaving,
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit)
+                    ),
+                    onEdit = { focus.clearFocus(); editingId = item.draftId },
+                    onRemove = { removingId = item.draftId }
+                )
             }
-            if (state.savedCount > 0 && state.previewItems.isNotEmpty()) {
+            if (!state.isSaving && state.savedCount > 0 && state.previewItems.isNotEmpty()) {
                 item(key = "partial_saved") {
                     Text("已保存 ${state.savedCount} 笔，其余账目仍在预览中。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
                 }
@@ -129,10 +128,14 @@ fun AiInputScreen(
         Surface(color = MaterialTheme.colorScheme.background) {
             Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SnackbarHost(snackbar)
-                if (state.previewItems.isNotEmpty()) {
+                AnimatedVisibility(
+                    visible = state.displayedItems.isNotEmpty(),
+                    enter = expandVertically(PennyMotion.spatial()) + fadeIn(PennyMotion.effects()),
+                    exit = shrinkVertically(PennyMotion.spatial()) + fadeOut(tween(PennyMotion.Exit))
+                ) {
                     Button(
                         onClick = { focus.clearFocus(); vm.saveAll {} },
-                        enabled = !state.isSaving && !state.isParsing,
+                        enabled = state.previewItems.isNotEmpty() && !state.isSaving && !state.isParsing,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                         shape = MaterialTheme.shapes.large,
                         colors = ButtonDefaults.buttonColors(
@@ -142,11 +145,10 @@ fun AiInputScreen(
                                 else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                         )
                     ) {
-                        if (state.isSaving) {
-                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        Text(if (state.isSaving) "正在保存…" else "保存 ${state.previewItems.size} 笔账目")
+                        TransactionSaveLabel(
+                            isSaving = state.isSaving,
+                            label = if (state.previewItems.isEmpty()) "保存账目" else "确认并保存 ${state.previewItems.size} 笔"
+                        )
                     }
                 }
                 InputDock(
@@ -161,7 +163,8 @@ fun AiInputScreen(
                     onMicRelease = vm::stopRecording,
                     isRecording = state.isRecording,
                     isRecognizing = state.isRecognizing,
-                    isSending = state.isParsing || state.isSaving,
+                    isSending = state.isParsing,
+                    sendLabel = "识别账目",
                     enabled = !state.isSaving,
                     placeholder = if (state.previewItems.isEmpty()) "输入一笔或多笔账目…" else "继续输入，追加待确认账目…"
                 )
@@ -171,9 +174,10 @@ fun AiInputScreen(
     if (showKeypad) {
         KeypadSheet(
             categories = categories, isSaving = state.isSaving, error = state.error,
-            onDismiss = { if (!state.isSaving) { showKeypad = false; vm.clearError() } },
+            dismissRequested = keypadSaved,
+            onDismiss = { if (!state.isSaving) { showKeypad = false; keypadSaved = false; vm.clearError() } },
             onSave = { type, categoryId, cents, note, occurredAt ->
-                vm.saveManual(type, categoryId, cents, note, occurredAt) { showKeypad = false }
+                vm.saveManual(type, categoryId, cents, note, occurredAt) { keypadSaved = true }
             }
         )
     }
@@ -199,9 +203,9 @@ fun AiInputScreen(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PreviewCard(item: PreviewItem, enabled: Boolean, onEdit: () -> Unit, onRemove: () -> Unit) {
-    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        modifier = Modifier.fillMaxWidth()) {
+private fun PreviewCard(item: PreviewItem, enabled: Boolean, modifier: Modifier = Modifier, onEdit: () -> Unit, onRemove: () -> Unit) {
+    Card(onClick = onEdit, enabled = enabled, shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = modifier.fillMaxWidth().animateContentSize(PennyMotion.spatial())) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 CatIcon(item.categoryColorIndex, item.categoryIcon, size = 40)

@@ -7,10 +7,16 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.pennypilot.app.data.db.AppDatabase
+import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.db.legacyDatabase
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.domain.model.TxType
+import com.pennypilot.app.domain.model.TxSource
+import com.pennypilot.app.domain.model.TxStatus
+import com.pennypilot.app.service.CaptureEvidence
+import com.pennypilot.app.service.CapturePersistence
+import com.pennypilot.app.service.CaptureResult
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -106,5 +112,31 @@ class BackupUseCaseTest {
         insert(3000)
         useCase.restoreFromFile(context, incoming)
         assertEquals(1850L, db.backupDao().transactions().single().amount)
+    }
+
+    @Test fun `backup preserves capture evidence ignored status and duplicate links`() = runTest {
+        val timestamp = 1770000000000L
+        val captured = TransactionEntity(amount = 1800, type = TxType.EXPENSE, categoryId = 1,
+            merchant = "小王面馆", occurredAt = timestamp, source = TxSource.NOTIFICATION)
+        val evidence = CaptureEvidence("com.sankuai.meituan", "order-notification", timestamp,
+            "小王面馆支付成功18元", notificationKey = "notice-1")
+        val first = CapturePersistence.capture(db, LedgerRevision.current, captured, evidence) as CaptureResult.Inserted
+        db.transactionDao().updateStatus(first.transactionId, TxStatus.IGNORED)
+        val second = CapturePersistence.capture(db, LedgerRevision.current,
+            captured.copy(source = TxSource.ACCESSIBILITY), evidence.copy(eventKey = "page", notificationKey = null)) as CaptureResult.Inserted
+        val target = File(directory, "capture-export.db")
+        useCase.exportToFile(context, target)
+        val oldRevision = LedgerRevision.current
+        db.transactionDao().deleteById(first.transactionId)
+        assertEquals(1, db.backupDao().captureEvents().size)
+        useCase.restoreFromFile(context, target)
+        assertTrue(LedgerRevision.current > oldRevision)
+        assertEquals(2, db.backupDao().captureEvents().size)
+        assertEquals(TxStatus.IGNORED, db.transactionDao().getById(first.transactionId)!!.status)
+        assertEquals(first.transactionId, db.transactionDao().getById(second.transactionId)!!.duplicateOf)
+        assertEquals(CaptureResult.StaleRevision,
+            CapturePersistence.capture(db, oldRevision, captured, evidence.copy(eventKey = "stale")))
+        assertEquals(CaptureResult.Duplicate(first.transactionId),
+            CapturePersistence.capture(db, LedgerRevision.current, captured, evidence))
     }
 }

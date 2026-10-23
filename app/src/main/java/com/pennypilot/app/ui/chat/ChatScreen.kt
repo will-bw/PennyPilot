@@ -1,5 +1,13 @@
 package com.pennypilot.app.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,6 +33,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennypilot.app.ui.components.InputDock
 import com.pennypilot.app.ui.components.LedgerState
 import com.pennypilot.app.ui.components.MiniChart
+import com.pennypilot.app.ui.theme.PennyMotion
 
 @Composable
 fun ChatScreen(vm: ChatViewModel = hiltViewModel()) {
@@ -76,28 +85,38 @@ internal fun ChatContent(
                 Text("查收支、看变化，让账目更清楚", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
             }
-            if (state.messages.isNotEmpty()) IconButton(
-                onClick = { confirmClear = true }, enabled = !state.isLoading
-            ) { Icon(Icons.Outlined.DeleteOutline, "清空本次对话") }
+            AnimatedVisibility(
+                visible = state.messages.isNotEmpty(),
+                enter = expandHorizontally(PennyMotion.spatial()) + fadeIn(PennyMotion.effects()),
+                exit = shrinkHorizontally(PennyMotion.spatial()) + fadeOut(tween(PennyMotion.Exit))
+            ) {
+                IconButton(onClick = { confirmClear = true }, enabled = state.messages.isNotEmpty() && !state.isLoading) {
+                    Icon(Icons.Outlined.DeleteOutline, "清空本次对话")
+                }
+            }
         }
 
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState,
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            if (state.messages.isEmpty()) item {
-                LedgerState("从一个问题开始", "试着问问最近的支出、某个分类，或两个月的变化。回答可长按复制。")
-                FlowRow(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    state.suggestions.forEach { question ->
-                        SuggestionChip(onClick = { followLatest = true; onSuggestion(question) }, enabled = !state.isLoading,
-                            label = { Text(question, style = MaterialTheme.typography.labelLarge) },
-                            modifier = Modifier.heightIn(min = 48.dp))
+            if (state.messages.isEmpty()) item(key = "conversation_empty") {
+                Column(Modifier.animateItem(fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit))) {
+                    LedgerState("从一个问题开始", "试着问问最近的支出、某个分类，或两个月的变化。回答可长按复制。")
+                    FlowRow(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        state.suggestions.forEach { question ->
+                            SuggestionChip(onClick = { followLatest = true; onSuggestion(question) }, enabled = !state.isLoading,
+                                label = { Text(question, style = MaterialTheme.typography.labelLarge) },
+                                modifier = Modifier.heightIn(min = 48.dp))
+                        }
                     }
                 }
             }
             items(state.messages, key = { it.id }) { message ->
                 val user = message.role == "user"
-                Box(Modifier.fillMaxWidth(), contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart) {
+                Box(Modifier.fillMaxWidth().animateItem(
+                    fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit)
+                ), contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart) {
                     Surface(
                         modifier = Modifier.widthIn(max = 540.dp).fillMaxWidth(if (user) .88f else 1f),
                         color = when { user -> MaterialTheme.colorScheme.primaryContainer
@@ -119,8 +138,10 @@ internal fun ChatContent(
                     }
                 }
             }
-            if (state.isLoading) item {
-                Row(Modifier.fillMaxWidth().padding(8.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            if (state.isLoading) item(key = "conversation_loading") {
+                Row(Modifier.fillMaxWidth().animateItem(
+                    fadeInSpec = PennyMotion.effects(), placementSpec = PennyMotion.spatial(), fadeOutSpec = tween(PennyMotion.Exit)
+                ).padding(8.dp).semantics { liveRegion = LiveRegionMode.Polite },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -129,8 +150,14 @@ internal fun ChatContent(
                 }
             }
         }
-        if (showLatestShortcut && state.messages.isNotEmpty()) {
-            TextButton(onClick = { followLatest = true }, modifier = Modifier.align(Alignment.CenterHorizontally).heightIn(min = 48.dp)) {
+        AnimatedVisibility(
+            visible = showLatestShortcut && state.messages.isNotEmpty(),
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            enter = expandVertically(PennyMotion.spatial()) + fadeIn(PennyMotion.effects()),
+            exit = shrinkVertically(PennyMotion.spatial()) + fadeOut(tween(PennyMotion.Exit))
+        ) {
+            TextButton(onClick = { followLatest = true }, enabled = showLatestShortcut,
+                modifier = Modifier.heightIn(min = 48.dp)) {
                 Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("回到最新消息")
@@ -145,6 +172,6 @@ internal fun ChatContent(
     if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false },
         title = { Text("清空本次对话？") },
         text = { Text("对话内容将移除，账本记录和正在输入的问题会保留。") },
-        confirmButton = { TextButton(onClick = { confirmClear = false; onClear() }) { Text("清空对话") } },
+        confirmButton = { TextButton(onClick = { confirmClear = false; followLatest = true; onClear() }) { Text("清空对话") } },
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("保留对话") } })
 }

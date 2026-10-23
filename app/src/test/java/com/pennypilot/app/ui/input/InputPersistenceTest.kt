@@ -126,11 +126,65 @@ class InputPersistenceTest {
         assertEquals(1, transactions.saved.size)
         assertEquals(3000L, vm.state.value.previewItems.single().amount)
         assertFalse(vm.state.value.isSaving)
+        assertEquals(vm.state.value.previewItems, vm.state.value.displayedItems)
+        assertTrue(vm.state.value.savingItems.isEmpty())
+        assertNull(vm.state.value.lastSave)
         transactions.beforeInsert = {}
         vm.saveAll {}
         runCurrent()
         assertEquals(listOf(2500L, 3000L), transactions.saved.map { it.amount })
         assertTrue(vm.state.value.previewItems.isEmpty())
+        assertEquals(InputSaveReceipt(1, 3000, 0), vm.state.value.lastSave)
+    }
+
+    @Test fun `saving keeps review visible until every insert finishes and ignores repeated taps`() = runTest(dispatcher) {
+        val twoItems = """{"transactions":[{"amount":2500,"type":"EXPENSE","category":"餐饮"},{"amount":3000,"type":"EXPENSE","category":"餐饮"}]}"""
+        val vm = input(client { twoItems })
+        vm.updateInput("午饭25晚饭30")
+        vm.sendForParsing()
+        runCurrent()
+        val reviewed = vm.state.value.previewItems
+        val pending = CompletableDeferred<Unit>()
+        transactions.beforeInsert = { if (transactions.attempts == 2) pending.await() }
+        var completed = 0
+        vm.saveAll { completed++ }
+        runCurrent()
+        assertEquals(1, transactions.saved.size)
+        assertEquals(reviewed, vm.state.value.displayedItems)
+        assertEquals(1, vm.state.value.previewItems.size)
+        assertTrue(vm.state.value.isSaving)
+        assertNull(vm.state.value.lastSave)
+        vm.saveAll { completed++ }
+        runCurrent()
+        assertEquals(2, transactions.attempts)
+        pending.complete(Unit)
+        runCurrent()
+        assertEquals(1, completed)
+        assertTrue(vm.state.value.displayedItems.isEmpty())
+        assertEquals(InputSaveReceipt(2, 5500, 0), vm.state.value.lastSave)
+    }
+
+    @Test fun `receipt uses reviewed amounts and clears only when the next recognition starts`() = runTest(dispatcher) {
+        categories.cats = categories.cats + CategoryEntity(id = 2, name = "工资", icon = "薪", colorIndex = 1,
+            type = TxType.INCOME, sortOrder = 1)
+        val mixed = """{"transactions":[{"amount":2500,"type":"EXPENSE","category":"餐饮"},{"amount":50000,"type":"INCOME","category":"工资"}]}"""
+        val vm = input(client { mixed })
+        vm.updateInput("午饭25，工资500")
+        vm.sendForParsing()
+        assertEquals("午饭25，工资500", vm.state.value.submittedText)
+        runCurrent()
+        vm.updatePreviewItem(vm.state.value.previewItems.first().copy(amount = 2800))
+        vm.saveAll {}
+        runCurrent()
+        assertEquals(InputSaveReceipt(2, 2800, 50000), vm.state.value.lastSave)
+        assertEquals(listOf(2800L, -50000L), transactions.saved.map { it.amount })
+        vm.updateInput("下一笔")
+        assertNotNull(vm.state.value.lastSave)
+        vm.sendForParsing()
+        assertNull(vm.state.value.lastSave)
+        assertEquals("下一笔", vm.state.value.submittedText)
+        assertTrue(vm.state.value.isParsing)
+        runCurrent()
     }
 
     @Test fun `edit validates amount and prevents duplicate inserts`() = runTest(dispatcher) {
@@ -225,13 +279,23 @@ class InputPersistenceTest {
         }
         override suspend fun insertCaptured(tx: TransactionEntity) = insert(tx)
         override suspend fun hasCaptureEvent(eventKey: String) = false
+        override suspend fun getByCaptureEvent(eventKey: String) = saved.firstOrNull { it.captureEventKey == eventKey }
+        override suspend fun insertCaptureEvidence(evidence: com.pennypilot.app.data.db.entity.CaptureEvidenceEntity) {}
+        override suspend fun captureEvidenceByKey(eventKey: String): com.pennypilot.app.data.db.entity.CaptureEvidenceEntity? = null
+        override suspend fun captureEvidenceByOrder(domain: String, orderId: String) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
+        override suspend fun captureEvidenceByNotification(packageName: String, notificationKey: String, start: Long, end: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
+        override suspend fun captureEvidenceNear(start: Long, end: Long, amount: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
+        override suspend fun nonCapturedTransactionsNear(start: Long, end: Long, amount: Long, type: TxType) = emptyList<TransactionEntity>()
         override suspend fun update(tx: TransactionEntity) { updated = tx }
         override suspend fun updateStatus(id: Long, status: TxStatus) = 0
         override suspend fun updateCapturedStatus(id: Long, eventKey: String, status: TxStatus) = 0
         override suspend fun getById(id: Long) = saved.firstOrNull { it.id == id }
         override suspend fun countBySourceSince(source: TxSource, since: Long) = 0
+        override suspend fun countCapturedSince(since: Long) = 0
         override suspend fun reassignCategory(oldId: Long, newId: Long) {}
         override suspend fun deleteById(id: Long) {}
+        override suspend fun clearDuplicateReferences(id: Long) {}
+        override suspend fun deleteTransactionById(id: Long) {}
         override fun observeByMonth(start: Long, end: Long) = flowOf(saved.toList())
         override fun observeMonthExpense(start: Long, end: Long) = flowOf(0L)
         override fun observeMonthIncome(start: Long, end: Long) = flowOf(0L)

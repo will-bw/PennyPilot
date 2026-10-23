@@ -15,6 +15,19 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], application = Application::class)
 class NotificationHelperTest {
     @Test
+    fun `suspected duplicate requires opening record instead of one tap confirmation`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        NotificationHelper.createChannels(context)
+        NotificationHelper.postCaptureNotification(context, 43, "possible-duplicate", "交易", "疑似重复",
+            allowQuickConfirm = false)
+        val notification = manager.activeNotifications.single { it.tag == "possible-duplicate" }.notification
+        assertNotNull(notification.contentIntent)
+        assertEquals(listOf("忽略", "核对记录"), notification.actions.map { it.title.toString() })
+        assertEquals(43L, shadowOf(notification.contentIntent).savedIntent.getLongExtra("edit_tx_id", -1))
+    }
+
+    @Test
     fun `reused transaction ID cannot replace an older event pending intent or cancel new reminder`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val manager = context.getSystemService(NotificationManager::class.java)

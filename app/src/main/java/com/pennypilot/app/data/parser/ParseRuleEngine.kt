@@ -6,7 +6,9 @@ import com.pennypilot.app.util.MoneyUtil
 data class NotificationParseResult(
     val amountCents: Long,
     val merchant: String?,
-    val direction: String  // "EXPENSE" or "INCOME"
+    val direction: String,  // "EXPENSE" or "INCOME"
+    val orderId: String? = null,
+    val paymentMethod: String? = null
 )
 
 object ParseRuleEngine {
@@ -18,7 +20,7 @@ object ParseRuleEngine {
      * Returns null if no rule matches.
      */
     fun parse(text: String, rules: List<ParseRuleEntity>): NotificationParseResult? {
-        if (unsuccessful.containsMatchIn(text)) return null
+        if (unsuccessful.containsMatchIn(text) || !PaymentTextParser.canUseFallback(text)) return null
         for (rule in rules.filter { it.enabled }.sortedBy { it.priority }) {
             // 自定义/恢复的坏规则只跳过本条，不能让整个通知链路失效。
             val amountMatch = runCatching { Regex(rule.regexAmount).find(text) }.getOrNull() ?: continue
@@ -37,11 +39,12 @@ object ParseRuleEngine {
                 runCatching { Regex(regex).find(text)?.groupValues?.getOrNull(1)?.trim() }.getOrNull()
             }
 
-            return NotificationParseResult(
+            val result = NotificationParseResult(
                 amountCents = amountCents,
                 merchant = merchant,
                 direction = rule.directionHint
             )
+            if (PaymentTextParser.isConsistentFallback(text, result)) return result
         }
         return null
     }

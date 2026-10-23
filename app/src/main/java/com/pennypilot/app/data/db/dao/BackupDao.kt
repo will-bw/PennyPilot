@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Transaction
 import com.pennypilot.app.data.db.entity.CategoryEntity
+import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
@@ -13,7 +14,8 @@ data class BackupSnapshot(
     val categories: List<CategoryEntity>,
     val transactions: List<TransactionEntity>,
     val rules: List<ParseRuleEntity>,
-    val reports: List<MonthlyReportEntity>
+    val reports: List<MonthlyReportEntity>,
+    val captureEvents: List<CaptureEvidenceEntity> = emptyList()
 )
 
 @Dao
@@ -26,10 +28,15 @@ interface BackupDao {
     suspend fun rules(): List<ParseRuleEntity>
     @Query("SELECT * FROM monthly_reports")
     suspend fun reports(): List<MonthlyReportEntity>
+    @Query("SELECT * FROM capture_events")
+    suspend fun captureEvents(): List<CaptureEvidenceEntity>
 
     @Transaction
     suspend fun snapshot(): BackupSnapshot =
-        BackupSnapshot(categories(), transactions(), rules(), reports())
+        BackupSnapshot(categories(), transactions(), rules(), reports(), captureEvents())
+
+    @Query("DELETE FROM capture_events")
+    suspend fun clearCaptureEvents()
 
     @Query("DELETE FROM transactions")
     suspend fun clearTransactions()
@@ -47,10 +54,13 @@ interface BackupDao {
     suspend fun insertRules(rows: List<ParseRuleEntity>)
     @Insert
     suspend fun insertReports(rows: List<MonthlyReportEntity>)
+    @Insert
+    suspend fun insertCaptureEvents(rows: List<CaptureEvidenceEntity>)
 
     /** 通过事务恢复行，保留活动 Room 连接和观察者；任何失败都会回滚原账本。 */
     @Transaction
     suspend fun replace(snapshot: BackupSnapshot) {
+        clearCaptureEvents()
         clearTransactions()
         clearReports()
         clearRules()
@@ -59,5 +69,6 @@ interface BackupDao {
         insertTransactions(snapshot.transactions)
         insertRules(snapshot.rules)
         insertReports(snapshot.reports)
+        insertCaptureEvents(snapshot.captureEvents)
     }
 }

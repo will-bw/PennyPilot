@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${FLUTTER_ROOT:-}" && -x "$FLUTTER_ROOT/bin/flutter" ]]; then
+  flutter_bin="$FLUTTER_ROOT/bin/flutter"
+elif [[ -x "$repo_root/.tooling/flutter/bin/flutter" ]]; then
+  flutter_bin="$repo_root/.tooling/flutter/bin/flutter"
+elif command -v flutter >/dev/null 2>&1; then
+  flutter_bin="$(command -v flutter)"
+else
+  sdk_path="$(sed -n 's/^flutter.sdk=//p' "$repo_root/android/local.properties" 2>/dev/null | head -1 || true)"
+  if [[ -n "$sdk_path" && -x "$sdk_path/bin/flutter" ]]; then
+    flutter_bin="$sdk_path/bin/flutter"
+  else
+    printf '%s\n' '需要 Flutter 3.47.7。请安装官方 SDK 后加入 PATH，或设置 FLUTTER_ROOT。详见 README.md。' >&2
+    exit 1
+  fi
+fi
+cd "$repo_root"
+exec "$flutter_bin" "$@"

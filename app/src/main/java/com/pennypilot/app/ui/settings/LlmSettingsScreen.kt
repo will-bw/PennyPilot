@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -30,6 +31,7 @@ private data class AiConfiguration(val provider: String, val deepSeekKey: String
 @Composable
 fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
     val keyStore = viewModel.keyStore
+    val focusManager = LocalFocusManager.current
     val auth by viewModel.chatGptAuth.state.collectAsStateWithLifecycle()
     val models by viewModel.models.collectAsStateWithLifecycle()
     val accountBusy by viewModel.accountBusy.collectAsStateWithLifecycle()
@@ -67,13 +69,15 @@ fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ManagementHeader("AI 设置", "使用 ChatGPT 套餐，或连接已有的 AI 服务。", ::back)
-        if (recoveryNeeded && !saved) ManagementMessage("原 AI 密钥无法解密，请重新填写后保存。账本数据不受影响。", error = true)
+        ManagementNotice(if (recoveryNeeded && !saved) "原 AI 密钥无法解密，请重新填写后保存。账本数据不受影响。" else null, error = true)
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("AI 服务", style = MaterialTheme.typography.titleMedium)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("chatgpt" to "ChatGPT", "deepseek" to "DeepSeek", "qwen" to "通义千问").forEach { (value, label) ->
-                        FilterChip(selected = draft.provider == value, onClick = { changed(draft.copy(provider = value)) },
+                        FilterChip(selected = draft.provider == value, onClick = {
+                            if (draft.provider != value) { focusManager.clearFocus(); changed(draft.copy(provider = value)) }
+                        },
                             enabled = controlsEnabled, label = { Text(label) }, modifier = Modifier.heightIn(min = 48.dp))
                     }
                 }
@@ -81,31 +85,36 @@ fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        when (draft.provider) {
-            "chatgpt" -> ChatGptAccountSection(viewModel, selectedModel, onModelSelected = {
-                selectedModel = it; saved = false; error = null
-            }, enabled = !saving)
-            "deepseek" -> {
-                Text("DeepSeek 配置", style = MaterialTheme.typography.titleMedium)
-                SecretField(draft.deepSeekKey, { changed(draft.copy(deepSeekKey = it)) }, !saving, "DeepSeek API Key")
-                OutlinedTextField(draft.deepSeekModel, { changed(draft.copy(deepSeekModel = it)) },
-                    label = { Text("模型名称") }, supportingText = { Text("例如 deepseek-chat") },
-                    singleLine = true, enabled = !saving, modifier = Modifier.fillMaxWidth())
+        ManagementTransition(draft.provider, Modifier.fillMaxWidth()) { provider ->
+            val providerEnabled = !saving && provider == draft.provider
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                when (provider) {
+                    "chatgpt" -> ChatGptAccountSection(viewModel, selectedModel, onModelSelected = {
+                        selectedModel = it; saved = false; error = null
+                    }, enabled = providerEnabled)
+                    "deepseek" -> {
+                        Text("DeepSeek 配置", style = MaterialTheme.typography.titleMedium)
+                        SecretField(draft.deepSeekKey, { changed(draft.copy(deepSeekKey = it)) }, providerEnabled, "DeepSeek API Key")
+                        OutlinedTextField(draft.deepSeekModel, { changed(draft.copy(deepSeekModel = it)) },
+                            label = { Text("模型名称") }, supportingText = { Text("例如 deepseek-chat") },
+                            singleLine = true, enabled = providerEnabled, modifier = Modifier.fillMaxWidth())
+                    }
+                    "qwen" -> {
+                        Text("通义千问 / 百炼配置", style = MaterialTheme.typography.titleMedium)
+                        SecretField(draft.qwenKey, { changed(draft.copy(qwenKey = it)) }, providerEnabled, "通义千问 API Key")
+                        OutlinedTextField(draft.qwenBaseUrl, { changed(draft.copy(qwenBaseUrl = it)) },
+                            label = { Text("服务地址（Base URL）") }, supportingText = { Text("填写供应商提供的 HTTPS 兼容接口地址，以 /v1 结尾。") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), enabled = providerEnabled, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(draft.qwenModel, { changed(draft.copy(qwenModel = it)) },
+                            label = { Text("模型名称") }, supportingText = { Text("例如 qwen-plus，需与服务地址对应。") },
+                            singleLine = true, enabled = providerEnabled, modifier = Modifier.fillMaxWidth())
+                    }
+                    else -> ManagementMessage("尚未选择供应商。选择后可配置 AI 记账与查询。")
+                }
             }
-            "qwen" -> {
-                Text("通义千问 / 百炼配置", style = MaterialTheme.typography.titleMedium)
-                SecretField(draft.qwenKey, { changed(draft.copy(qwenKey = it)) }, !saving, "通义千问 API Key")
-                OutlinedTextField(draft.qwenBaseUrl, { changed(draft.copy(qwenBaseUrl = it)) },
-                    label = { Text("服务地址（Base URL）") }, supportingText = { Text("填写供应商提供的 HTTPS 兼容接口地址，以 /v1 结尾。") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), enabled = !saving, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.qwenModel, { changed(draft.copy(qwenModel = it)) },
-                    label = { Text("模型名称") }, supportingText = { Text("例如 qwen-plus，需与服务地址对应。") },
-                    singleLine = true, enabled = !saving, modifier = Modifier.fillMaxWidth())
-            }
-            else -> ManagementMessage("尚未选择供应商。选择后可配置 AI 记账与查询。")
         }
-        error?.let { ManagementMessage(it, error = true) }
-        if (saved) ManagementMessage("配置已保存并生效。连接将在下次使用 AI 时验证。")
+        ManagementNotice(error, error = true)
+        ManagementNotice(if (saved) "配置已保存并生效。连接将在下次使用 AI 时验证。" else null)
         Button(onClick = {
             val value = draft.copy(deepSeekKey = draft.deepSeekKey.trim(), qwenKey = draft.qwenKey.trim(),
                 deepSeekModel = draft.deepSeekModel.trim(), qwenModel = draft.qwenModel.trim(), qwenBaseUrl = draft.qwenBaseUrl.trim().trimEnd('/'))
@@ -152,7 +161,7 @@ fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
         }, enabled = draft.provider.isNotBlank() && controlsEnabled,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
             if (saving) { CircularProgressIndicator(Modifier.size(20.dp), color = LocalContentColor.current, strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
-            Text(if (saving) "正在保存…" else "保存配置")
+            ManagementTransition(if (saving) "正在保存…" else "保存配置") { Text(it) }
         }
         Text("登录凭据与 API Key 加密保存在本机，不包含在账本备份中。使用 AI 功能时，输入与相关账本查询数据会发送给所选服务。",
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

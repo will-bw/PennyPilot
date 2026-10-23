@@ -34,8 +34,17 @@ data class AiInputUiState(
     val previewItems: List<PreviewItem> = emptyList(),
     val error: String? = null,
     val savedCount: Int = 0,
-    val message: String? = null
-)
+    val message: String? = null,
+    val submittedText: String = "",
+    val savingItems: List<PreviewItem> = emptyList(),
+    val lastSave: InputSaveReceipt? = null
+) {
+    // Keep the review list stable during writes; only unsaved drafts remain after a failure.
+    val displayedItems: List<PreviewItem>
+        get() = if (savingItems.isNotEmpty()) savingItems else previewItems
+}
+
+data class InputSaveReceipt(val count: Int, val expense: Long, val income: Long)
 
 data class PreviewItem(
     val amount: Long,
@@ -87,7 +96,8 @@ class AiInputViewModel @Inject constructor(
         if (text.isBlank() || _state.value.isParsing || _state.value.isSaving || _state.value.isRecording || _state.value.isRecognizing) return
         val submittedRevision = inputRevision
 
-        _state.update { it.copy(inputText = "", isParsing = true, error = null, savedCount = 0) }
+        _state.update { it.copy(inputText = "", submittedText = text, isParsing = true,
+            error = null, savedCount = 0, lastSave = null) }
 
         viewModelScope.launch {
             try {
@@ -169,7 +179,7 @@ class AiInputViewModel @Inject constructor(
         }
 
         // 同步锁定保存入口；每笔成功后才移除对应草稿，失败时仍可重试余下条目。
-        _state.update { it.copy(isSaving = true, error = null) }
+        _state.update { it.copy(isSaving = true, savingItems = items, error = null, lastSave = null) }
 
         viewModelScope.launch {
             try {
@@ -189,12 +199,18 @@ class AiInputViewModel @Inject constructor(
                     )
                     _state.update { s -> s.copy(previewItems = s.previewItems.filterNot { it.draftId == item.draftId }, savedCount = s.savedCount + 1) }
                 }
-                _state.update { it.copy(isSaving = false, message = "已保存 ${items.size} 笔账目") }
+                val receipt = InputSaveReceipt(
+                    count = items.size,
+                    expense = items.filter { it.type == TxType.EXPENSE }.sumOf { it.amount },
+                    income = items.filter { it.type == TxType.INCOME }.sumOf { it.amount }
+                )
+                _state.update { it.copy(isSaving = false, savingItems = emptyList(), lastSave = receipt) }
                 onDone()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.update { it.copy(isSaving = false, error = "保存失败，请重试：${e.message ?: "数据库不可用"}") }
+                _state.update { it.copy(isSaving = false, savingItems = emptyList(),
+                    error = "保存失败，请重试：${e.message ?: "数据库不可用"}") }
             }
         }
     }
@@ -212,7 +228,7 @@ class AiInputViewModel @Inject constructor(
             setError("金额必须大于 0 且不超过 9,999,999.99 元")
             return
         }
-        _state.update { it.copy(isSaving = true, error = null) }
+        _state.update { it.copy(isSaving = true, error = null, lastSave = null) }
         viewModelScope.launch {
             try {
                 val amount = if (type == TxType.EXPENSE) amountCents else -amountCents

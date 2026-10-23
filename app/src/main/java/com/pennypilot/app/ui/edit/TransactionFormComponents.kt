@@ -1,6 +1,17 @@
 package com.pennypilot.app.ui.edit
 
 import android.text.format.DateFormat
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -19,6 +30,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -29,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.domain.model.TxType
 import com.pennypilot.app.ui.components.CatIcon
+import com.pennypilot.app.ui.theme.PennyMotion
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -61,7 +75,7 @@ internal fun TransactionCategorySelection(
         Text("暂无可用分类，请先在分类管理中添加。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         return
     }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    BoxWithConstraints(Modifier.fillMaxWidth().animateContentSize(PennyMotion.spatial())) {
         val columns = (maxWidth / 88.dp).toInt().coerceIn(2, 6)
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             categories.chunked(columns).forEach { row ->
@@ -69,14 +83,22 @@ internal fun TransactionCategorySelection(
                     row.forEach { category ->
                         val selected = category.id == selectedId
                         val shape = RoundedCornerShape(14.dp)
+                        val containerColor by animateColorAsState(
+                            if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                            PennyMotion.effects(), label = "categoryContainer"
+                        )
+                        val borderColor by animateColorAsState(
+                            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                            PennyMotion.effects(), label = "categoryBorder"
+                        )
                         val label = category.name + if (!category.enabled) "（已停用）" else ""
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
                                 .clip(shape)
-                                .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh)
-                                .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, shape)
+                                .background(containerColor)
+                                .border(1.dp, borderColor, shape)
                                 .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = { onSelect(category.id) })
                                 .semantics(mergeDescendants = true) { contentDescription = label }
                                 .heightIn(min = 96.dp)
@@ -98,9 +120,15 @@ internal fun TransactionCategorySelection(
                                     color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
                                 )
                             }
-                            if (selected) Icon(Icons.Outlined.Check, contentDescription = null,
-                                modifier = Modifier.align(Alignment.TopEnd).padding(5.dp).size(14.dp),
-                                tint = MaterialTheme.colorScheme.primary)
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = selected,
+                                modifier = Modifier.align(Alignment.TopEnd),
+                                enter = fadeIn(PennyMotion.effects()) + scaleIn(PennyMotion.effects(), initialScale = .8f),
+                                exit = fadeOut(tween(PennyMotion.Exit)) + scaleOut(tween(PennyMotion.Exit), targetScale = .8f)
+                            ) {
+                                Icon(Icons.Outlined.Check, contentDescription = null,
+                                    modifier = Modifier.padding(5.dp).size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                            }
                         }
                     }
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
@@ -184,4 +212,40 @@ internal fun DiscardChangesDialog(onKeepEditing: () -> Unit, onDiscard: () -> Un
         confirmButton = { TextButton(onClick = onDiscard) { Text("放弃修改") } },
         dismissButton = { TextButton(onClick = onKeepEditing) { Text("继续编辑") } }
     )
+}
+
+/** Errors keep their text through the exit, then return the space to the form. */
+@Composable
+internal fun TransactionFormError(error: String?) {
+    AnimatedContent(
+        targetState = error,
+        contentKey = { it != null },
+        transitionSpec = {
+            (fadeIn(PennyMotion.effects()) togetherWith fadeOut(tween(PennyMotion.Exit)))
+                .using(SizeTransform { _, _ -> PennyMotion.spatial() })
+        },
+        label = "formError"
+    ) { message ->
+        if (message != null) {
+            Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        }
+    }
+}
+
+/** A fixed button remains the interaction anchor while its content acknowledges saving. */
+@Composable
+internal fun TransactionSaveLabel(isSaving: Boolean, label: String = "保存账目") {
+    AnimatedContent(
+        targetState = isSaving,
+        transitionSpec = {
+            fadeIn(tween(PennyMotion.Feedback, delayMillis = PennyMotion.Exit)) togetherWith fadeOut(tween(PennyMotion.Exit))
+        },
+        label = "saveAction"
+    ) { saving ->
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (saving) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = LocalContentColor.current)
+            Text(if (saving) "正在保存…" else label)
+        }
+    }
 }

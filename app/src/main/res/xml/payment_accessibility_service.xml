@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="350"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="false"
+    android:isAccessibilityTool="false"
+    android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone,com.sankuai.meituan,com.sankuai.meituan.takeoutnew,com.ss.android.ugc.aweme,com.ss.android.ugc.aweme.lite"
+    android:description="@string/payment_capture_service_description" />

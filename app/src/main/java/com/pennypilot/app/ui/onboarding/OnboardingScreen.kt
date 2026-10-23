@@ -23,7 +23,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
             BatteryOptimizationGuideStep()
             AppBackgroundGuideStep()
             Button(onClick = onFinish, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text("开始记账") }
-            Text("这些设置可在「我的 → 后台运行引导」中随时调整。",
+            Text("可在「我的 → 自动捕获」查看权限、开启可选的支付页面捕获，或随时暂停。没有通知和可读支付页面时，仍需手动记账。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }

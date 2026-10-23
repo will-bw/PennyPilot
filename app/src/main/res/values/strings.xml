@@ -1,0 +1,4 @@
+<resources>
+    <string name="payment_capture_service_name">PennyPilot 支付页面捕获</string>
+    <string name="payment_capture_service_description">在你开启应用内支付页面捕获后，读取微信、支付宝、美团和抖音中可访问的可见文字，在本机判断是否为支付结果，仅保存识别出的交易字段作为待确认记录。不读取密码或输入内容，不截图，不保存或上传整页，不代替你点击或付款。可随时在 PennyPilot 设置中暂停，或在此处关闭服务。系统与应用可能限制读取，无法保证每次支付都能捕获。</string>
+</resources>

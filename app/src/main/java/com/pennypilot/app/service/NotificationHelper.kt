@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.NotificationCompat
 import com.pennypilot.app.MainActivity
 
@@ -16,6 +17,13 @@ object NotificationHelper {
 
     private const val NOTIFY_ID_REPORT = 90001
     private const val NOTIFY_ID_PERMISSION = 90002
+
+    fun captureNotificationsEnabled(context: Context): Boolean {
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
+        val channel = context.getSystemService(NotificationManager::class.java)
+            .getNotificationChannel(CHANNEL_CAPTURE)
+        return channel == null || channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
 
     fun cancelCaptureNotification(context: Context, txId: Long, captureEventKey: String? = null) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -43,7 +51,8 @@ object NotificationHelper {
         ).apply { description = "权限与保活提醒" })
     }
 
-    fun postCaptureNotification(context: Context, txId: Long, captureEventKey: String, title: String, text: String) {
+    fun postCaptureNotification(context: Context, txId: Long, captureEventKey: String, title: String, text: String,
+        allowQuickConfirm: Boolean = true) {
         val nm = context.getSystemService(NotificationManager::class.java)
 
         // Confirm action
@@ -75,16 +84,18 @@ object NotificationHelper {
         val editPi = PendingIntent.getActivity(context, txId.toInt() * 3 + 2, editIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val notification = NotificationCompat.Builder(context, CHANNEL_CAPTURE)
+        val builder = NotificationCompat.Builder(context, CHANNEL_CAPTURE)
             .setSmallIcon(android.R.drawable.ic_menu_edit)
             .setContentTitle(title)
             .setContentText(text)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .addAction(0, "✓ 记入", confirmPi)
-            .addAction(0, "✗ 忽略", ignorePi)
-            .addAction(0, "✎ 编辑", editPi)
+            .setContentIntent(editPi)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
-            .build()
+        if (allowQuickConfirm) builder.addAction(0, "记入", confirmPi)
+        builder.addAction(0, "忽略", ignorePi)
+            .addAction(0, if (allowQuickConfirm) "编辑" else "核对记录", editPi)
+        val notification = builder.build()
 
         nm.notify(captureEventKey, txId.toInt(), notification)
     }

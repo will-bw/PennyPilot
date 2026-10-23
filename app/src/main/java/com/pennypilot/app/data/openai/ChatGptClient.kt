@@ -63,10 +63,19 @@ class ChatGptClient internal constructor(
             .post(OneShotBody(requestBody.toRequestBody("application/json".toMediaType())))
             .build()
         val result = http.request(request) { response ->
-            if (response.body?.contentType()?.let { it.type == "text" && it.subtype == "event-stream" } != true) {
-                throw OpenAiErrors.protocol("未收到事件流", response.header("x-request-id"))
-            }
             val source = response.body?.source() ?: throw OpenAiErrors.protocol("响应为空", response.header("x-request-id"))
+            val contentType = response.body?.contentType()
+            val declaredStream = contentType?.let { it.type == "text" && it.subtype == "event-stream" } == true
+            // Some direct-route responses omit Content-Type. Inspect a bounded, unconsumed
+            // prefix only in that case; the full SSE completion checks remain mandatory.
+            if (!declaredStream && !(contentType == null && ResponsesCodec.looksLikeEventStream(source))) {
+                val preview = source.let {
+                    if (it.request(64 * 1024L + 1)) "" else it.readUtf8()
+                }
+                throw OpenAiErrors.unexpectedResponse(response.code, contentType?.let {
+                    "${it.type}/${it.subtype}"
+                }, preview, response.header("x-request-id"))
+            }
             ResponsesCodec.readStream(source, tools.map { it.function.name }.toSet(), response.header("x-request-id"))
         }
         access.requireSameAccount(accountId)

@@ -1,8 +1,6 @@
 package com.pennypilot.app.ui.settings
 
-import android.content.ComponentName
 import android.net.Uri
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -24,12 +22,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.pennypilot.app.service.NotificationCaptorService
-import com.pennypilot.app.ui.theme.pendingAmberColor
-import com.pennypilot.app.ui.theme.successColor
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -43,7 +36,6 @@ fun SettingsScreen(
     viewModel: SettingsViewModel
 ) {
     val context = LocalContext.current
-    val health by viewModel.serviceMonitor.health.collectAsStateWithLifecycle()
     val lastBackupAt by viewModel.lastBackupAt.collectAsStateWithLifecycle()
     val busy by viewModel.isBusy.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
@@ -53,12 +45,6 @@ fun SettingsScreen(
     var showBackupDialog by rememberSaveable { mutableStateOf(false) }
     var restoreDocuments by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var showAboutDialog by rememberSaveable { mutableStateOf(false) }
-    var isListenerEnabled by remember { mutableStateOf(false) }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        val cn = ComponentName(context, NotificationCaptorService::class.java)
-        isListenerEnabled = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-            ?.split(':')?.contains(cn.flattenToString()) == true
-    }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         uri?.let { viewModel.exportDb(context, it) }
     }
@@ -66,11 +52,6 @@ fun SettingsScreen(
     LaunchedEffect(message) {
         message?.let { snackbar.showSnackbar(it); viewModel.clearMessage() }
     }
-    val stale = health.isBound && health.lastNotificationTime > 0 &&
-        System.currentTimeMillis() - health.lastNotificationTime > 24 * 3600 * 1000L
-    val statusColor = when { !isListenerEnabled -> MaterialTheme.pendingAmberColor
-        !health.isBound -> MaterialTheme.colorScheme.error
-        else -> MaterialTheme.successColor }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -80,27 +61,10 @@ fun SettingsScreen(
                 Text("设置好工具，安心管理账本", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Surface(shape = MaterialTheme.shapes.extraLarge) {
-                Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Icon(Icons.Outlined.NotificationsActive, contentDescription = null, tint = statusColor)
-                        Text(when { !isListenerEnabled -> "自动捕获尚未授权"
-                            !health.isBound -> "捕获服务未连接"
-                            else -> "捕获服务已连接" }, style = MaterialTheme.typography.titleMedium)
-                    }
-                    Text(when { !isListenerEnabled -> "授权通知使用权后，可识别微信和支付宝的支付通知。"
-                        !health.isBound -> "通知使用权已授权，请检查后台运行设置。"
-                        stale -> "超过 24 小时未收到通知；这不一定表示服务异常。"
-                        else -> "仅识别支持的支付通知；捕获后请在流水中核对。" },
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("今日捕获 ${health.todayCaptureCount} 笔 · 通知权限${if (isListenerEnabled) "已授权" else "未授权"}",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = onNavigateToColorOsGuide) { Text("检查自动捕获设置") }
-                }
-            }
+            CaptureSettingsSection(viewModel, onNavigateToColorOsGuide)
             SettingsSection("记账") {
                 SettingRow(Icons.Outlined.Category, "分类管理", "调整分类、排序与启用状态", onClick = onNavigateToCategories)
-                SettingRow(Icons.AutoMirrored.Outlined.Rule, "通知解析规则", "管理支持的通知格式与匹配顺序", onClick = onNavigateToParseRules)
+                SettingRow(Icons.AutoMirrored.Outlined.Rule, "通知解析规则", "管理本地通知格式；支付页面使用内置识别", onClick = onNavigateToParseRules)
                 SettingRow(Icons.Outlined.BatteryChargingFull, "后台运行引导", "检查通知、电池与自启动设置", onClick = onNavigateToColorOsGuide)
             }
             SettingsSection("智能助手") {
@@ -122,7 +86,7 @@ fun SettingsScreen(
             SettingsSection("账本数据") {
                 SettingRow(Icons.Outlined.Backup, "备份与恢复", if (busy) "正在处理，请稍候…" else backupSubtitle(lastBackupAt),
                     enabled = !busy, onClick = { showBackupDialog = true })
-                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                Box(Modifier.padding(horizontal = 16.dp)) { ManagementProgress(busy) }
                 SettingRow(Icons.Outlined.Info, "关于 PennyPilot", appVersionName(context), onClick = { showAboutDialog = true })
             }
             Text("账本保存在本机。使用 AI 功能时，输入和相关查询数据会发送给所选服务。",
@@ -177,7 +141,7 @@ fun SettingsScreen(
             text = {
                 Text(
                     "版本 ${appVersionName(context)}\n\n" +
-                        "自用 AI 记账 App：一句话智能记账、微信/支付宝通知自动捕获、" +
+                        "自用 AI 记账 App：一句话智能记账、支付通知与可选支付页面捕获、" +
                         "对话查账与月度报告。账本保存在本机；使用 AI 功能时，输入和相关查询数据会发送到所选供应商。系统备份遵循设备设置。"
                 )
             },
@@ -222,7 +186,9 @@ private fun SettingRow(icon: ImageVector, title: String, subtitle: String, enabl
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, style = if (onClick == null) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium,
                 color = if (onClick == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            ManagementTransition(subtitle) {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         if (onClick != null) Icon(Icons.Outlined.ChevronRight, contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))

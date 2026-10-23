@@ -5,7 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import com.pennypilot.app.data.parser.PresetParseRules
 import java.io.File
 
-/** 历史版本 1/2/3 的真实表结构，不使用当前实体模拟旧库。 */
+/** 历史版本 1/2/3/4 的真实表结构，不使用当前实体模拟旧库。 */
 internal fun legacyDatabase(context: Context, name: String, version: Int): File {
     val file = context.getDatabasePath(name)
     file.parentFile!!.mkdirs()
@@ -27,6 +27,13 @@ internal fun legacyDatabase(context: Context, name: String, version: Int): File 
             db.execSQL("CREATE TABLE monthly_reports (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, year_month TEXT NOT NULL, total_expense INTEGER NOT NULL, total_income INTEGER NOT NULL, by_category_json TEXT NOT NULL, llm_summary TEXT NOT NULL, generated_at INTEGER NOT NULL)")
             db.execSQL("INSERT INTO monthly_reports VALUES (1, '2026-01', 10, 0, '[]', '旧报告', 100)")
             db.execSQL("INSERT INTO monthly_reports VALUES (2, '2026-01', 20, 0, '[]', '最新报告', 200)")
+        }
+        if (version >= 4) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN capture_event_key TEXT")
+            db.execSQL("CREATE UNIQUE INDEX index_transactions_capture_event_key ON transactions(capture_event_key)")
+            db.execSQL("INSERT INTO transactions VALUES (78, 1800, 'EXPENSE', 42, NULL, '小王面馆', NULL, 1770000000000, 1770000000000, 'NOTIFICATION', 'IGNORED', '支付成功18元', 'legacy-capture')")
+            db.execSQL("DELETE FROM monthly_reports WHERE id = 1")
+            db.execSQL("CREATE UNIQUE INDEX index_monthly_reports_year_month ON monthly_reports(year_month)")
         }
         db.version = version
     }
