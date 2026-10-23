@@ -9,6 +9,12 @@ String screenCaptureStatusLabel(String? status) => switch (status) {
   'event_received' => '已收到页面变化',
   'unreadable' => '页面暂时无法读取',
   'protected' => '已跳过输入或受保护页面',
+  'input_page' => '已跳过含输入框的页面',
+  'password_page' => '已跳过含密码控件的页面',
+  'incomplete_tree' => '页面内容暂未读取完整',
+  'traversal_limit' => '页面结构超出读取范围',
+  'text_limit' => '页面文字超出读取上限',
+  'empty_page' => '未读到可见页面文字',
   'not_receipt' => '未识别到完整支付凭证',
   'parsed' => '已识别，正在保存',
   'saved' => '已生成待确认账单',
@@ -23,6 +29,15 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'event_received' => '正在等待页面内容稳定。',
   'unreadable' => '支付应用未提供可读取的页面文字，或结果页已离开；请核对流水，必要时补记。',
   'protected' => '输入框、密码或不完整页面不会用于记账，避免误读聊天或待支付内容。',
+  'input_page' =>
+    '页面包含可见输入框，为避免误读聊天或待支付内容已跳过。请在本次支付完成页停留约 5 秒后再查看诊断；仍无法识别时可手动或语音补记。',
+  'password_page' => '页面包含可见密码控件，已停止读取。请完成支付后在本次结果页停留约 5 秒，再回到流水核对。',
+  'incomplete_tree' =>
+    '本次读取缺少部分页面节点，尚不能判断支付结果。请在本次支付完成页停留约 5 秒，让服务重新读取；仍无记录时可手动或语音补记。',
+  'traversal_limit' =>
+    '页面节点数量或层级已达到读取上限，本次未用于记账。请在本次支付完成页停留后查看诊断；仍无法识别时可手动或语音补记。',
+  'text_limit' => '本次页面文字超过读取上限，未用于记账。请查看本次支付完成页的诊断；仍无法识别时可手动或语音补记。',
+  'empty_page' => '当前页面没有可读取的可见文字。请在本次支付完成页停留约 5 秒后再查看诊断；仍无记录时可手动或语音补记。',
   'not_receipt' => '没有同时找到明确完成状态和有效金额。失败、待支付、聊天和历史页面也会被跳过。',
   'parsed' => '正在将识别出的交易字段保存到待确认列表。',
   'saved' => '请回到流水核对；即使关闭记账提醒，也可在待确认列表中查看。',
@@ -30,6 +45,34 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'error' => '请查看下方运行记录，检查权限并核对最近交易。',
   _ => '完成支付后在结果页稍作停留。若时间一直不更新，请核对应用内开关、系统授权和服务连接。',
 };
+
+String? screenReadDiagnosticsSummary(Object? diagnostics) {
+  if (diagnostics is! Map) return null;
+  int? count(String key) {
+    final value = diagnostics[key];
+    return value is int && value >= 0 ? value : null;
+  }
+
+  final visited = count('visitedNodes');
+  final text = count('textNodes');
+  final details = <String>[
+    if (visited != null) '检查 $visited 个节点',
+    if (text != null) '可读文字 $text 处',
+  ];
+  for (final field in [
+    ('editableNodes', '输入框', '处'),
+    ('passwordNodes', '密码控件', '处'),
+    ('missingChildren', '缺失子节点', '个'),
+    ('hiddenNodes', '跳过隐藏节点', '个'),
+    ('foreignNodes', '跳过其他应用节点', '个'),
+  ]) {
+    final value = count(field.$1);
+    if (value != null && value > 0) {
+      details.add('${field.$2} $value ${field.$3}');
+    }
+  }
+  return details.isEmpty ? null : details.join(' · ');
+}
 
 String captureAppLabel(String packageName) => switch (packageName) {
   'com.tencent.mm' => '微信',
@@ -40,6 +83,70 @@ String captureAppLabel(String packageName) => switch (packageName) {
   'com.ss.android.ugc.aweme.lite' => '抖音极速版',
   _ => '支付应用',
 };
+
+typedef _ScreenReadHistoryEntry = ({
+  String status,
+  int timestamp,
+  int sequence,
+  String? app,
+  String? summary,
+});
+
+List<_ScreenReadHistoryEntry> _screenReadHistory(Object? value) {
+  if (value is! List) return const [];
+  const knownStatuses = {
+    'input_page',
+    'password_page',
+    'incomplete_tree',
+    'traversal_limit',
+    'text_limit',
+    'empty_page',
+    'unreadable',
+    'not_receipt',
+    'parsed',
+    'saved',
+    'duplicate',
+    'error',
+    'protected',
+  };
+  final history = <_ScreenReadHistoryEntry>[];
+  for (final (sequence, entry) in value.indexed) {
+    if (entry is! Map) continue;
+    final status = entry['status'];
+    final timestamp = entry['timestamp'];
+    if (status is! String ||
+        !knownStatuses.contains(status) ||
+        timestamp is! int ||
+        timestamp <= 0 ||
+        timestamp > 8640000000000000) {
+      continue;
+    }
+    final package = entry['packageName'];
+    final label = package is String ? captureAppLabel(package) : null;
+    history.add((
+      status: status,
+      timestamp: timestamp,
+      sequence: sequence,
+      app: label == '支付应用' ? null : label,
+      summary: screenReadDiagnosticsSummary(entry['diagnostics']),
+    ));
+  }
+  history.sort((a, b) {
+    final byTime = b.timestamp.compareTo(a.timestamp);
+    return byTime != 0 ? byTime : b.sequence.compareTo(a.sequence);
+  });
+  return history.take(8).toList(growable: false);
+}
+
+String _screenReadHistoryDetail(_ScreenReadHistoryEntry entry) {
+  final time = DateTime.fromMillisecondsSinceEpoch(entry.timestamp);
+  final second = time.second.toString().padLeft(2, '0');
+  return [
+    '${settingsTimestamp(entry.timestamp)}:$second',
+    ?entry.app,
+    ?entry.summary,
+  ].join(' · ');
+}
 
 class CaptureSettingsScreen extends StatefulWidget {
   const CaptureSettingsScreen({super.key, required this.controller});
@@ -215,6 +322,12 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
           capabilities['notificationServiceConnected'] == true;
       final accessibilityConnected =
           capabilities['accessibilityServiceConnected'] == true;
+      final screenReadSummary = screenReadDiagnosticsSummary(
+        capabilities['screenReadDiagnostics'],
+      );
+      final screenReadHistory = _screenReadHistory(
+        capabilities['screenReadHistory'],
+      );
       return Scaffold(
         appBar: AppBar(
           title: const Text('自动采集与权限'),
@@ -426,7 +539,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
               ),
               SettingsSection(
                 title: '页面识别诊断',
-                description: '转账后返回本页可查看处理停在哪一步。仅记录状态和时间，不保存页面全文。',
+                description: '转账后返回本页可查看处理停在哪一步。仅记录状态、时间和节点数量，不保存页面全文。',
                 children: [
                   SettingsRow(
                     title: screenCaptureStatusLabel(
@@ -436,6 +549,8 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                       capabilities['screenCaptureStatus'] as String?,
                     ),
                   ),
+                  if (screenReadSummary != null)
+                    SettingsRow(title: '页面节点摘要', subtitle: screenReadSummary),
                   SettingsRow(
                     title: '最近收到页面事件',
                     subtitle: settingsTimestamp(
@@ -459,6 +574,18 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                         capabilities['lastScreenPackage'] as String,
                       ),
                     ),
+                  if (screenReadHistory.isNotEmpty) ...[
+                    const SettingsRow(
+                      title: '最近识别过程',
+                      subtitle: '按时间从近到远，仅保留最近 8 条。',
+                    ),
+                    for (final (index, entry) in screenReadHistory.indexed)
+                      SettingsRow(
+                        key: ValueKey('screen-read-history-$index'),
+                        title: screenCaptureStatusLabel(entry.status),
+                        subtitle: _screenReadHistoryDetail(entry),
+                      ),
+                  ],
                 ],
               ),
               SettingsSection(

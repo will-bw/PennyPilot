@@ -50,7 +50,8 @@ import java.util.concurrent.Executor
  * This does not establish compatibility with a particular WeChat build or phone background policy.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], application = Application::class, shadows = [PaymentAccessibilityWindowShadow::class])
+@Config(sdk = [34], application = Application::class,
+    shadows = [PaymentAccessibilityWindowShadow::class, PaymentScreenReaderChildShadow::class])
 @OptIn(ExperimentalCoroutinesApi::class)
 @Suppress("DEPRECATION")
 class PaymentAccessibilityServiceIntegrationTest {
@@ -212,7 +213,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertTrue(rows().isEmpty())
         window.root = { screen("转账成功\n¥18.00\n完成", editableChild = true) }
         sendEvent()
-        awaitStatus("protected")
+        awaitStatus("input_page")
         drainRetries()
         assertTrue(rows().isEmpty())
         assertEquals(0, cloudCalls)
@@ -225,7 +226,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         awaitStatus("saved")
         window.root = { screen("转账\n¥18.00\n确认转账", editableChild = true) }
         sendEvent()
-        awaitStatus("protected")
+        awaitStatus("input_page")
         scheduler.advanceTimeBy(2_000)
         window.root = { screen("转账成功\n¥18.00\n收款方\n小明\n完成") }
         sendEvent()
@@ -278,6 +279,136 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertTrue(rows().isEmpty())
     }
 
+    @Test fun `stable wechat result under a hidden container is captured without notification`() {
+        connect(enabled = true)
+        window.root = {
+            screen("", visible = false).apply {
+                shadowOf(this).addChild(screen("转账成功\n¥18.00\n收款方\n小明\n完成"))
+            }
+        }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(1800L, rows().single().amount)
+        assertEquals(1, monitor.health.value.screenReadDiagnostics["hiddenNodes"])
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `foreign input overlay does not poison a complete wechat result or its deduplication`() {
+        connect(enabled = true)
+        window.root = {
+            screen("已转账\n¥18.00\n待对方收款\n完成").apply {
+                shadowOf(this).addChild(screen("never read this input", packageName = "com.example.keyboard").apply {
+                    isEditable = true
+                    isPassword = true
+                })
+            }
+        }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(0, monitor.health.value.screenReadDiagnostics["editableNodes"])
+        assertEquals(0, monitor.health.value.screenReadDiagnostics["passwordNodes"])
+        assertEquals(1, monitor.health.value.screenReadDiagnostics["foreignNodes"])
+        scheduler.advanceTimeBy(2_000)
+        sendEvent()
+        awaitStatus("duplicate")
+        assertEquals(1, rows().size)
+    }
+
+    @Test fun `receipt with more than old node budget is scanned completely while late failure still rejects`() {
+        connect(enabled = true)
+        fun largeResult(failure: Boolean) = screen("转账成功\n¥18.00\n完成").apply {
+            repeat(300) { shadowOf(this).addChild(screen("")) }
+            if (failure) shadowOf(this).addChild(screen("支付失败"))
+        }
+        window.root = { largeResult(true) }
+        sendEvent()
+        awaitStatus("not_receipt")
+        assertTrue(rows().isEmpty())
+        window.root = { largeResult(false) }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(1, rows().size)
+        assertTrue(monitor.health.value.screenReadDiagnostics.getValue("visitedNodes") > 250)
+    }
+
+    @Test fun `empty cached tree is diagnosed and invalidated before retrying stable receipt`() {
+        connect(enabled = true)
+        val initialClears = window.cacheClears
+        window.root = {
+            if (window.cacheClears == initialClears) screen("")
+            else screen("转账成功\n¥18.00\n完成")
+        }
+        sendEvent()
+        awaitStatus("empty_page")
+        assertEquals(0, monitor.health.value.screenReadDiagnostics["textNodes"])
+        assertTrue(rows().isEmpty())
+        scheduler.advanceTimeBy(250)
+        awaitStatus("saved")
+        assertTrue(window.cacheClears > initialClears)
+        assertEquals(1, rows().size)
+    }
+
+    @Test fun `receipt arriving after previous retry window still captures without a new event`() {
+        connect(enabled = true)
+        window.root = { screen("") }
+        sendEvent()
+        awaitStatus("empty_page")
+        scheduler.advanceTimeBy(3_000)
+        scheduler.runCurrent()
+        assertTrue(rows().isEmpty())
+        window.root = { screen("转账成功\n¥18.00\n完成") }
+        scheduler.advanceTimeBy(2_000)
+        awaitStatus("saved")
+        assertEquals(1, rows().size)
+    }
+
+    @Test fun `missing subtree retries without saving partial receipt or forgetting handled identity`() {
+        connect(enabled = true)
+        var incomplete = true
+        window.root = {
+            screen("转账成功\n¥18.00\n完成").apply {
+                shadowOf(this).addChild(screen("收款方\n小明"))
+                Shadow.extract<PaymentScreenReaderChildShadow>(this).nullReadsRemaining = if (incomplete) 2 else 0
+            }
+        }
+        sendEvent()
+        awaitStatus("incomplete_tree")
+        assertEquals(1, monitor.health.value.screenReadDiagnostics["missingChildren"])
+        assertTrue(rows().isEmpty())
+        incomplete = false
+        scheduler.advanceTimeBy(250)
+        awaitStatus("saved")
+        assertEquals(1, rows().size)
+        incomplete = true
+        sendEvent()
+        awaitStatus("incomplete_tree")
+        scheduler.advanceTimeBy(2_000)
+        incomplete = false
+        sendEvent()
+        awaitStatus("duplicate")
+        assertEquals(1, rows().size)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `password and oversized trees have precise reasons and never persist partial evidence`() {
+        connect(enabled = true)
+        window.root = { screen("转账成功\n¥18.00\n完成").apply { isPassword = true } }
+        sendEvent()
+        awaitStatus("password_page")
+        assertEquals(1, monitor.health.value.screenReadDiagnostics["passwordNodes"])
+        assertTrue(rows().isEmpty())
+        window.root = {
+            screen("转账成功\n¥18.00\n完成").apply {
+                repeat(2_001) { shadowOf(this).addChild(screen("")) }
+            }
+        }
+        sendEvent()
+        awaitStatus("traversal_limit")
+        drainRetries()
+        assertTrue(rows().isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
     private fun connect(enabled: Boolean, expectedStatus: String = if (enabled) "waiting" else "disabled") {
         runBlocking { preferences.setScreenCaptureEnabled(enabled) }
         ReflectionHelpers.callInstanceMethod<Unit>(service, "onServiceConnected")
@@ -298,13 +429,13 @@ class PaymentAccessibilityServiceIntegrationTest {
     }
 
     private fun screen(text: String, packageName: String = "com.tencent.mm", windowId: Int = 7,
-                       editableChild: Boolean = false): AccessibilityNodeInfo {
+                       editableChild: Boolean = false, visible: Boolean = true): AccessibilityNodeInfo {
         val accessibilityWindow = AccessibilityWindowInfo.obtain()
         shadowOf(accessibilityWindow).setId(windowId)
         return AccessibilityNodeInfo.obtain().apply {
             this.packageName = packageName
             this.text = text
-            isVisibleToUser = true
+            isVisibleToUser = visible
             shadowOf(this).setAccessibilityWindowInfo(accessibilityWindow)
             if (editableChild) {
                 val input = AccessibilityNodeInfo.obtain().apply {
@@ -336,7 +467,7 @@ class PaymentAccessibilityServiceIntegrationTest {
     }
 
     private fun drainRetries() {
-        repeat(4) {
+        repeat(6) {
             scheduler.advanceTimeBy(1_000)
             scheduler.runCurrent()
         }
@@ -348,6 +479,13 @@ class PaymentAccessibilityServiceIntegrationTest {
 class PaymentAccessibilityWindowShadow : ShadowAccessibilityService() {
     var root: () -> AccessibilityNodeInfo? = { null }
     var reads = 0
+    var cacheClears = 0
+
+    @Implementation(minSdk = 33)
+    protected fun clearCache(): Boolean {
+        cacheClears++
+        return true
+    }
 
     @Implementation
     protected fun getRootInActiveWindow(): AccessibilityNodeInfo? {

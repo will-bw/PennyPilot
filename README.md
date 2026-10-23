@@ -23,7 +23,7 @@
 
 ## 安装与更新
 
-当前发布版本为 **v0.4.2（构建号 6）**，提供 Android 8.0 及以上的通用 APK：`PennyPilot-v0.4.2-android.apk`。从 [GitHub Releases](https://github.com/will-bw/PennyPilot/releases) 下载后，按 Android 提示允许当前安装来源并确认安装。iOS 工程可自行构建，目前没有对外分发的 iOS 安装包。
+当前发布版本为 **v0.4.3（构建号 7）**，提供 Android 8.0 及以上的通用 APK：`PennyPilot-v0.4.3-android.apk`。从 [GitHub Releases](https://github.com/will-bw/PennyPilot/releases) 下载后，按 Android 提示允许当前安装来源并确认安装。iOS 工程可自行构建，目前没有对外分发的 iOS 安装包。
 
 打开「设置 → 数据与应用 → 检查更新」。检查和下载均由用户主动触发；发现新版后选择「下载更新」，校验成功后选择「安装更新」。若系统要求安装授权，按页面提示前往授权，再返回继续安装。iOS 可查看发布说明，目前 Release 仅提供 Android 包。
 

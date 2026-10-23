@@ -2,6 +2,7 @@ package com.pennypilot.app.service
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -58,12 +59,12 @@ class PaymentAccessibilityService : AccessibilityService() {
                     for (request in requests) {
                         var newest = requests.tryReceive().getOrNull() ?: request
                         // 支付结果可能在 window 事件后才加载；短时有界重试不依赖通知或二次事件。
-                        for (pause in longArrayOf(0, 250, 750, 1_500)) {
+                        for (pause in longArrayOf(0, 250, 750, 1_500, 2_500)) {
                             // 新页面事件应立即唤醒采样，不能被上一页的重试等待挡住。
                             if (pause > 0) newest = withTimeoutOrNull(pause) {
                                 requests.receive()
                             } ?: newest
-                            if (!isCurrent(newest) || readScreen(newest)) break
+                            if (!isCurrent(newest) || readScreen(newest, refreshCache = pause > 0)) break
                         }
                     }
                 }
@@ -127,12 +128,15 @@ class PaymentAccessibilityService : AccessibilityService() {
 
     /** true 表示本轮结果已处理；false 允许当前窗口在短时重试中变为可读。 */
     @Suppress("DEPRECATION")
-    private suspend fun readScreen(request: ReadRequest): Boolean {
+    private suspend fun readScreen(request: ReadRequest, refreshCache: Boolean = false): Boolean {
         if (!isCurrent(request)) return true
         try {
+            // Android 13+ 的旧节点缓存可能连续返回同一棵缺失树；补读前重新向目标应用取树。
+            // 旧系统仍使用有界补读；不能以缓存清理失败为由放行不完整页面。
+            if (refreshCache && Build.VERSION.SDK_INT >= 33) runCatching { clearCache() }
             val root = activeRoot()
             if (root == null) {
-                entryPoint.monitor().onScreenRead("unreadable")
+                entryPoint.monitor().onScreenRead("unreadable", packageName = request.packageName)
                 return false
             }
             val snapshot: PaymentScreenReader.Snapshot
@@ -142,7 +146,7 @@ class PaymentAccessibilityService : AccessibilityService() {
                 // 部分事件的 windowId 未定义；已给出 id 时必须匹配，不能误读旧窗口。
                 if (root.packageName?.toString() != request.packageName ||
                     (request.windowId >= 0 && actualWindowId >= 0 && actualWindowId != request.windowId)) {
-                    entryPoint.monitor().onScreenRead("unreadable")
+                    entryPoint.monitor().onScreenRead("unreadable", packageName = request.packageName)
                     return false
                 }
                 snapshot = PaymentScreenReader.inspect(root, request.packageName)
@@ -154,27 +158,27 @@ class PaymentAccessibilityService : AccessibilityService() {
                 if (snapshot.hasInput) synchronized(session) {
                     session.observe(request.packageName, actualWindowId, null, nowMillis())
                 }
-                entryPoint.monitor().onScreenRead("protected")
+                entryPoint.monitor().onScreenRead(snapshot.status, snapshot.diagnostics, request.packageName)
                 return false
             }
             val parsed = PaymentTextParser.parseScreen(request.packageName, text)
-            entryPoint.monitor().onScreenRead(if (parsed == null) "not_receipt" else "parsed")
+            entryPoint.monitor().onScreenRead(if (parsed == null) "not_receipt" else "parsed", snapshot.diagnostics, request.packageName)
             val now = nowMillis()
             val key = synchronized(session) { session.observe(request.packageName, actualWindowId, parsed, now) }
             if (parsed == null) return false
             if (key == null) {
-                entryPoint.monitor().onScreenStatus("duplicate")
+                entryPoint.monitor().onScreenStatus("duplicate", request.packageName)
                 return true
             }
             if (entryPoint.captureProcessor().processScreen(request.packageName, parsed, key, now, request.revision)) {
                 synchronized(session) { session.markHandled(key) }
                 return true
             }
-            entryPoint.monitor().onScreenStatus("error")
+            entryPoint.monitor().onScreenStatus("error", request.packageName)
             return false
         } catch (e: CancellationException) { throw e
         } catch (_: Exception) {
-            entryPoint.monitor().onScreenStatus("error")
+            entryPoint.monitor().onScreenStatus("error", request.packageName)
             entryPoint.monitor().onError("支付页面读取未完成；可检查授权或手动补记")
             return false
         }

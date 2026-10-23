@@ -372,6 +372,11 @@ class NativeLedgerBridge @Inject constructor(
             "lastScreenReadTime" to health.lastScreenReadTime,
             "lastScreenPackage" to health.lastScreenPackage,
             "screenCaptureStatus" to health.screenCaptureStatus,
+            "screenReadDiagnostics" to health.screenReadDiagnostics,
+            "screenReadHistory" to health.screenReadHistory.map { trace -> mapOf(
+                "status" to trace.status, "timestamp" to trace.timestamp,
+                "packageName" to trace.packageName, "diagnostics" to trace.diagnostics
+            ) },
             "todayCaptureCount" to health.todayCaptureCount, "duplicateCount" to health.duplicateCount,
             "lastCaptureAt" to health.lastNotificationTime, "lastError" to health.lastError
         )
