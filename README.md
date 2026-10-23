@@ -1,92 +1,76 @@
 # PennyPilot
 
-本地优先的个人记账应用，面向 **Android 与 iOS**。Flutter / Dart 共用界面、账务计算、录入校验、DeepSeek / Qwen AI 请求、账本查询与月报逻辑。Android 保留 Room、支付采集和现有 ChatGPT 登录；iOS 使用 SQLite、Keychain 与系统语音服务。构建和设备验证状态见 [跨平台验收记录](docs/reviews/2026-10-23-cross-platform.md)。
+本地优先的个人记账应用，使用 Flutter / Dart 构建 Android 与 iOS 共用界面。记录收支、核对支付记录、查看预算与月报，也可以用文字或语音录入和查询账本。
+
+[下载 Android 版](https://github.com/will-bw/PennyPilot/releases/latest) · [更新记录](CHANGELOG.md) · [发布说明](docs/RELEASING.md)
 
 ## 功能
 
-- 手动录入、编辑、删除，收入与支出分开记录，整数分金额校验。
-- 一句话或语音解析多笔账单，逐笔核对、修改后原子保存。
-- 支付通知与支付页面采集，待确认队列、疑似重复提示、确认或忽略。
-- 月份切换、商户/备注/分类搜索、收支和已忽略筛选。
-- 月度总预算、已用与剩余提示、超支状态。
-- 每日支出图、分类明细与历史月度回顾。
-- 基于真实账本的 AI 问答，支持 ChatGPT 账号、DeepSeek、Qwen。
-- 分类与通知解析规则管理、系统权限诊断、数据库备份恢复。
-- 浅色/深色/跟随系统，手机底部导航与宽屏侧边导航。
+- 手动录入、编辑和删除账单，支持分类、月份、搜索与收支筛选。
+- 一句话或语音解析多笔账单，逐笔核对后保存。
+- Android 支付通知与支付页面采集，待确认队列、重复提示、确认或忽略。
+- 月度预算、每日支出、分类统计和历史月报。
+- 基于账本的 AI 问答，支持 ChatGPT 账号、DeepSeek 和 Qwen。
+- JSON 账本备份与跨端恢复，浅色、深色和宽屏布局。
+- 在设置中手动检查 GitHub Release，Android 下载更新后由系统确认安装。
 
-支付通知与其他应用页面的自动采集仅在 Android 上提供。iOS 使用手动、文字和语音录入，界面不会显示无法使用的 Android 权限开关。两端使用同一 JSON 备份格式转移账本；目前没有自动云同步。
+账本保存在设备上，目前没有自动云同步。使用 AI 时，相关输入和必要账本数据会按功能发送给所选服务。自动采集仅适用于 Android；iOS 提供手动、文字和语音录入，不提供跨应用通知监听或支付页面采集。
 
-## 运行
+## 安装与更新
 
-验证环境：Flutter **3.47.7** / Dart **3.13.5**、JDK 17、Android compile SDK 36、NDK 28.2.13676358（compile SDK 和 NDK 跟随 Flutter，目标 Android SDK 35）；新 Android 构建使用 Gradle 8.14.3、AGP 8.11.1、Kotlin 2.2.20。首次构建需要网络下载标准工具与依赖。
+当前发布版本为 **v0.4.0（构建号 4）**，提供 Android 8.0 及以上的通用 APK：`PennyPilot-v0.4.0-android.apk`。从 [GitHub Releases](https://github.com/will-bw/PennyPilot/releases) 下载后，按 Android 提示允许当前安装来源并确认安装。iOS 工程可自行构建，目前没有对外分发的 iOS 安装包。
+
+打开「设置 → 数据与应用 → 检查更新」。检查和下载均由用户主动触发；发现新版后选择「下载更新」，校验成功后选择「安装更新」。若系统要求安装授权，按页面提示前往授权，再返回继续安装。iOS 可查看发布说明，目前 Release 仅提供 Android 包。
+
+每次 Release 同时提供 `update.json` 和 `SHA256SUMS`。应用校验下载大小和 SHA-256，并在调用 Android 安装器前验证包名、构建号与签名；最终安装由系统提示确认。后续正式版必须使用相同应用 ID、同一发布签名和更高构建号，才能覆盖安装并保留本地数据。
+
+**旧开发版使用 debug 签名，不能直接覆盖为此正式签名版**：先从旧版导出账本备份，妥善保存后再迁移到正式版并恢复。Flutter 版使用 JSON 备份；旧原生版导出的 `.db` 备份可在「导入旧版数据库备份」中恢复，如有同名 `-wal` 文件需一并保留并选择。备份不含账号凭据、预算、主题或权限，迁移后需重新设置。不要在尚未确认备份可用时卸载旧版。
+
+将 APK、`update.json` 和 `SHA256SUMS` 下载到同一目录，可手动验证文件：
 
 ```sh
-# 已配置 Flutter PATH 或 FLUTTER_ROOT 时直接使用 flutter 也可。
+shasum -a 256 -c SHA256SUMS
+```
+
+## 开发
+
+工具链：Flutter 3.47.7 / Dart 3.13.5、JDK 17、Android SDK 36；iOS 需要 macOS、Xcode 和对应模拟器或已配置签名的真机。先配置 `FLUTTER_ROOT` 或把 Flutter 加入 `PATH`，然后运行：
+
+```sh
 ./tool/flutterw pub get
 ./tool/flutterw analyze
 ./tool/flutterw test
-./tool/flutterw run -d <android-device-id>
+./tool/flutterw run -d <device-id>
+
+# Android 调试包
 ./tool/flutterw build apk --debug
-
-# macOS + Xcode + 已安装的 iOS Simulator runtime
+# iOS 模拟器
 ./tool/flutterw build ios --simulator --debug --no-codesign
-# iPhone 真机需要在 Xcode 配置自己的开发团队与签名
-./tool/flutterw run -d <ios-device-id>
-```
-
-Flutter SDK 从 [官方安装页](https://docs.flutter.dev/install/manual) 获取。`tool/flutterw` 依次读取 `FLUTTER_ROOT`、项目内 `.tooling/flutter`、PATH、`android/local.properties`。本工作区已将官方 SDK 放在 `.tooling/flutter`，重新克隆仓库时需自行配置 SDK。本机 SDK 路径、构建缓存与安装包不进入 Git。
-
-调试 APK 位于 `build/app/outputs/flutter-apk/app-debug.apk`。发布版需为 `android/app/build.gradle.kts` 配置自己的 signingConfig；项目不会把调试签名当作发布签名。
-
-## 架构
-
-```text
-lib/
-  core/                   模型、仓储组合、状态与账务计算
-    ai/                   共用 AI 请求、查询、月报、iOS ChatGPT OAuth
-    storage/              iOS SQLite 与可移植备份校验
-    platform/             语音、系统文件选择器、权限能力
-  features/
-    ledger/               流水、搜索筛选、待确认队列
-    entry/                手动/文字/语音录入与核对
-    reports/              统计与月报
-    chat/                 账本问答
-    settings/             采集、AI、分类、规则、预算、备份
-  ui/                     Material 3 主题与共享组件
-android/app/              Flutter Android 宿主与平台桥接
-ios/                      Flutter iOS 宿主、权限说明与 Keychain 配置
-app/src/main/java/        复用的 Kotlin 数据/平台/AI 核心
-app/src/test/             原生核心回归测试
-```
-
-`android/app` 的 `prepareNativeCore` 任务从原生源码同步生成只含数据、服务与工具的构建目录，使 Kotlin 和 KSP 使用相同输入；旧 `ui/**`、旧 `MainActivity.kt` 和 Compose 专用 `CategoryColors.kt` 已排除。原 Compose 源码与根 Gradle 构建保留作历史参考和既有回归测试，不会打进 Flutter 应用。迁移时工作区已有修改均保留。
-
-原生回归测试仍可执行：
-
-```sh
+# Android 原生核心回归
 ./gradlew testDebugUnitTest
 ```
 
-桥接契约见 [docs/flutter-bridge-contract.md](docs/flutter-bridge-contract.md)。界面设计依据和规范见 [DESIGN.md](DESIGN.md)。
+`tool/flutterw` 也支持项目内 `.tooling/flutter` 和 `android/local.properties` 指定的 SDK。SDK、缓存、密钥和安装包不进入 Git。正式签名、构建与发布步骤见 [RELEASING.md](docs/RELEASING.md)。
 
-真实平台集成测试（只在专用测试模拟器运行）：
+平台集成测试只在专用测试设备运行，先备份，并保留 `--no-uninstall`，避免 Flutter 测试结束时卸载应用：
 
 ```sh
-./tool/flutterw test integration_test/android_smoke_test.dart -d <test-emulator-id> --no-uninstall
-./tool/flutterw test integration_test/cross_platform_smoke_test.dart -d <test-emulator-id> --no-uninstall
-# 第二条同样支持 iOS Simulator，替换设备 ID 即可。
+./tool/flutterw test integration_test/cross_platform_smoke_test.dart -d <test-device-id> --no-uninstall
 ```
 
-该测试只创建带唯一标记的临时记录，结束时恢复并核对原有账本记录。**Flutter 测试工具默认在结束后卸载应用，必须保留 `--no-uninstall`**；即便如此，也不要在日常使用的真实账本设备上运行集成测试。测试前备份，结束后重新构建正常入口，Android 用 `adb install -r build/app/outputs/flutter-apk/app-debug.apk` 覆盖安装，iOS Simulator 用 `xcrun simctl install <device-id> build/ios/iphonesimulator/Runner.app` 安装。验收结果见 [跨平台验收记录](docs/reviews/2026-10-23-cross-platform.md)。
+测试后重新构建并安装普通 `main.dart` 入口。单元测试和模拟器验证不替代真实账户授权、语音识别、手机后台行为或 iPhone 真机验收。
 
-## 数据与权限
+## 项目结构
 
-应用 ID 为 `com.pennypilot.app`。Android 沿用 `pennypilot.db`（Room v5）及原加密存储，同签名覆盖安装可保留旧账本和账号，不要先卸载旧版。iOS 在应用私有目录使用 `pennypilot-portable.sqlite`，凭据留在 Keychain。两端首次打开均为空账本，不注入示例账单。
+| 路径 | 用途 |
+| --- | --- |
+| `lib/` | Flutter 界面、账务逻辑、AI、跨平台存储适配 |
+| `android/` | Android 宿主与平台桥接 |
+| `ios/` | iOS 宿主、权限和 Keychain 配置 |
+| `app/` | Android Room、支付采集、原生账号等核心及回归测试 |
+| `test/`、`integration_test/` | Flutter 单元、组件与平台集成测试 |
+| `docs/` | 桥接契约、设计约束和发布流程 |
 
-金额存储保持旧版约定：支出为正分、收入为负分；Dart 模型以正金额和收支类型表示，桥接统一转换。统计只计算已确认账单。
+Android Flutter 构建会从 `app/` 同步原生核心源码，不能删除该目录。原 Compose UI 不进入 Flutter APK；根 Gradle 构建保留原生回归测试入口。Android 沿用 Room 数据库，iOS 使用 SQLite；两端使用同一 JSON 备份格式，凭据分别保存在设备安全存储。
 
-新备份为 `format: pennypilot, version: 1` 的 JSON，包含账单、分类、规则、月报及原有采集证据，不包含凭据、主题、预算或设备权限，最大 20 MiB。恢复前验证格式和引用关系，在单个事务中替换账本；恢复后清空旧页面与草稿，拒绝恢复前版本的写入。Android 的“导入旧版数据库备份”保留 `.db` / 同名 `-wal` 的兼容路径；旧备份先在 Android 恢复，再导出 JSON 传到 iOS。
-
-自动采集当前支持微信、支付宝、美团和抖音相关支付通知/页面，实际可用性受通知内容、系统授权和手机后台策略影响。通知权限、通知读取权、无障碍权限彼此独立；屏幕读取和云端解析默认关闭，开启前显示用途说明。
-
-Android 和 iOS 的普通账本功能使用相同应用接口，各自的存储适配器负责事务和持久性。桌面、Web 尚未作为发布目标。iOS 不能照搬 Android 的跨应用通知监听与无障碍支付采集；不以模拟成功代替缺失系统能力。真实账户登录、语音识别、系统文件选择器与 OEM 后台行为的验证边界单独记录，不把单元测试当真机证据。
+[产品范围](PRODUCT.md) · [视觉规范](DESIGN.md) · [桥接契约](docs/flutter-bridge-contract.md) · [Apache-2.0 许可证](LICENSE)

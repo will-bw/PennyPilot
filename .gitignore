@@ -13,6 +13,32 @@ local.properties
 # Local agent configs
 .qoder/
 .workbuddy/
+.agents/
+.codex/
+.impeccable/
+
+# Local development notes and prototypes
+/docs/reviews/
+/docs/superpowers/
+/docs/ui/
+
+# Private configuration and signing material
+.env
+.env.*
+!.env.example
+.signing/
+key.properties
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+
+# Distribute installable packages through GitHub Releases
+/releases/
+*.apk
+*.aab
+*.ipa
+*.dSYM.zip
 
 # Flutter / Dart
 .dart_tool/

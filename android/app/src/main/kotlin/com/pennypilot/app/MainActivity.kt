@@ -15,6 +15,7 @@ import javax.inject.Inject
 class MainActivity : FlutterFragmentActivity() {
     @Inject lateinit var ledgerBridge: NativeLedgerBridge
     private var attached = false
+    private var updateBridge: AppUpdateBridge? = null
     private var exportRequest: CompletableDeferred<Uri?>? = null
     private var restoreRequest: CompletableDeferred<List<Uri>>? = null
     private var permissionRequest: CompletableDeferred<Boolean>? = null
@@ -34,6 +35,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         ledgerBridge.attach(this, flutterEngine.dartExecutor.binaryMessenger)
+        updateBridge = AppUpdateBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         attached = true
     }
 
@@ -54,12 +56,16 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        updateBridge?.dispose()
+        updateBridge = null
         if (attached) ledgerBridge.detach()
         attached = false
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
     override fun onDestroy() {
+        updateBridge?.dispose()
+        updateBridge = null
         exportRequest?.cancel()
         restoreRequest?.cancel()
         permissionRequest?.cancel()

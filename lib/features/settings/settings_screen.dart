@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
 import 'package:pennypilot/core/models.dart';
+import 'package:pennypilot/core/updates/app_update_service.dart';
 
 import 'ai_settings_screen.dart';
 import 'capture_settings_screen.dart';
 import 'categories_screen.dart';
 import 'rules_screen.dart';
 import 'settings_widgets.dart';
+import 'update_settings_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.controller});
@@ -19,9 +21,43 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _backupBusy = false;
+  bool _aboutBusy = false;
 
   Future<void> _open(Widget page) =>
       Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
+
+  Future<void> _about() async {
+    if (_aboutBusy) return;
+    setState(() => _aboutBusy = true);
+    final updates = AppUpdateService();
+    InstalledAppVersion? installed;
+    try {
+      installed = await updates.installedVersion();
+    } catch (_) {
+      // About and license information remain available if metadata is missing.
+    } finally {
+      updates.dispose();
+      if (mounted) setState(() => _aboutBusy = false);
+    }
+    if (!mounted) return;
+    showAboutDialog(
+      context: context,
+      applicationName: 'PennyPilot',
+      applicationVersion: installed == null
+          ? '版本信息暂不可用'
+          : '${installed.version}（构建 ${installed.versionCode}）',
+      applicationIcon: Icon(
+        Icons.account_balance_wallet_outlined,
+        size: 40,
+        color: Theme.of(context).colorScheme.primary,
+      ),
+      children: const [
+        Text('把日常收支记清楚。账本保存在本机，支持手动与 AI 记账、预算、报表和跨平台备份。Android 还支持支付通知与页面采集。'),
+        SizedBox(height: 12),
+        Text('使用 AI 功能时，输入与相关查询数据会发送给所选服务。登录凭据和 API Key 加密保存在本机，不包含在账本备份中。'),
+      ],
+    );
+  }
 
   Future<void> _backup({required bool restore, bool legacy = false}) async {
     if (restore) {
@@ -231,28 +267,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       onTap: () => _backup(restore: true, legacy: true),
                     ),
                   SettingsRow(
+                    title: '检查更新',
+                    subtitle: '查看新版本与更新说明',
+                    icon: Icons.system_update_outlined,
+                    onTap: () => _open(const UpdateSettingsScreen()),
+                  ),
+                  SettingsRow(
                     title: '关于 PennyPilot',
-                    subtitle: '0.3.0 · Android / iOS',
+                    subtitle: '版本、隐私与应用信息',
                     icon: Icons.info_outline,
-                    onTap: () => showAboutDialog(
-                      context: context,
-                      applicationName: 'PennyPilot',
-                      applicationVersion: '0.3.0',
-                      applicationIcon: Icon(
-                        Icons.account_balance_wallet_outlined,
-                        size: 40,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                      children: const [
-                        Text(
-                          '把日常收支记清楚。账本保存在本机，支持手动与 AI 记账、预算、报表和跨平台备份。Android 还支持支付通知与页面采集。',
-                        ),
-                        SizedBox(height: 12),
-                        Text(
-                          '使用 AI 功能时，输入与相关查询数据会发送给所选服务。登录凭据和 API Key 加密保存在本机，不包含在账本备份中。',
-                        ),
-                      ],
-                    ),
+                    enabled: !_aboutBusy,
+                    onTap: _about,
+                    trailing: _aboutBusy ? const SettingsBusy() : null,
                   ),
                 ],
               ),
