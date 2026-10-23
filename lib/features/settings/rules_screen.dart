@@ -85,7 +85,7 @@ class _RulesScreenState extends State<RulesScreen> {
         ),
         body: SafeArea(
           top: false,
-          child: ListView(
+          child: SettingsList(
             padding: const EdgeInsets.only(bottom: 100),
             children: [
               if (_busy) const LinearProgressIndicator(),
@@ -98,45 +98,65 @@ class _RulesScreenState extends State<RulesScreen> {
                   padding: EdgeInsets.all(24),
                   child: Text('暂无通知规则，可新增规则或恢复预置规则。'),
                 ),
-              for (final rule in rules)
-                ListTile(
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 8,
-                  ),
-                  title: Text(_paymentApps[rule.appPackage] ?? rule.appPackage),
-                  subtitle: Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '${rule.directionHint.label} · 优先级 ${rule.priority}${rule.enabled ? '' : ' · 已停用'}',
+              if (rules.isNotEmpty)
+                SettingsSection(
+                  title: '本地规则',
+                  description: '${rules.length} 条规则 · 点击查看或修改',
+                  children: [
+                    for (final rule in rules)
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 10,
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          rule.regexAmount,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                        leading: Icon(
+                          Icons.rule_outlined,
+                          size: 22,
+                          color: Theme.of(context).colorScheme.primary,
                         ),
-                      ],
-                    ),
-                  ),
-                  onTap: _busy ? null : () => _edit(rule),
-                  trailing: Semantics(
-                    label:
-                        '${rule.enabled ? '停用' : '启用'}${_paymentApps[rule.appPackage] ?? rule.appPackage}规则',
-                    child: Switch(
-                      value: rule.enabled,
-                      onChanged: _busy
-                          ? null
-                          : (value) => _run(() async {
-                              await widget.controller.saveRule(
-                                rule.copyWith(enabled: value),
-                              );
-                            }, value ? '规则已启用' : '规则已停用'),
-                    ),
-                  ),
+                        title: Text(
+                          _paymentApps[rule.appPackage] ?? rule.appPackage,
+                        ),
+                        subtitle: Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${rule.directionHint.label} · 优先级 ${rule.priority}${rule.enabled ? '' : ' · 已停用'}',
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                rule.regexAmount,
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        onTap: _busy ? null : () => _edit(rule),
+                        trailing: Semantics(
+                          label:
+                              '${rule.enabled ? '停用' : '启用'}${_paymentApps[rule.appPackage] ?? rule.appPackage}规则',
+                          child: Switch(
+                            value: rule.enabled,
+                            onChanged: _busy
+                                ? null
+                                : (value) => _run(() async {
+                                    await widget.controller.saveRule(
+                                      rule.copyWith(enabled: value),
+                                    );
+                                  }, value ? '规则已启用' : '规则已停用'),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
             ],
           ),
@@ -302,8 +322,8 @@ class _RuleEditorState extends State<_RuleEditor> {
       ),
       body: SafeArea(
         top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        child: SettingsList(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
           children: [
             TextField(
               controller: _package,

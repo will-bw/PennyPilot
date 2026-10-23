@@ -5,7 +5,7 @@ import '../../ui/common.dart';
 import '../../ui/theme.dart';
 import '../entry/entry_screen.dart';
 
-class LedgerScreen extends StatelessWidget {
+class LedgerScreen extends StatefulWidget {
   const LedgerScreen({
     super.key,
     required this.controller,
@@ -13,149 +13,245 @@ class LedgerScreen extends StatelessWidget {
   });
   final LedgerController controller;
   final VoidCallback onBudget;
-  void _entry(BuildContext context, [LedgerTransaction? tx]) =>
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => EntryScreen(controller: controller, transaction: tx),
-        ),
-      );
+  @override
+  State<LedgerScreen> createState() => _LedgerScreenState();
+}
+
+class _LedgerScreenState extends State<LedgerScreen> {
+  bool searching = false;
+  late final search = TextEditingController(text: widget.controller.keyword);
+  @override
+  void dispose() {
+    search.dispose();
+    super.dispose();
+  }
+
+  void _entry([LedgerTransaction? tx]) => Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) =>
+          EntryScreen(controller: widget.controller, transaction: tx),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
-    final c = controller, colors = Theme.of(context).colorScheme;
+    final c = widget.controller;
+    final colors = Theme.of(context).colorScheme;
     final rows = c.filteredTransactions;
     final summary = c.monthSummary;
+    final days = <DateTime, List<LedgerTransaction>>{};
+    for (final tx in rows) {
+      days.putIfAbsent(DateUtils.dateOnly(tx.occurredAt), () => []).add(tx);
+    }
     return Scaffold(
       appBar: AppBar(
         title: const Text('账本'),
         actions: [
           IconButton(
+            tooltip: searching ? '收起搜索' : '搜索账单',
+            onPressed: () => setState(() => searching = !searching),
+            icon: Icon(
+              searching ? Icons.close : Icons.search,
+              color: c.keyword.isNotEmpty ? colors.primary : null,
+            ),
+          ),
+          IconButton(
             tooltip: '刷新账本',
-            onPressed: c.isLoading ? null : () => c.refresh(),
-            icon: const Icon(Icons.refresh),
+            onPressed: c.isLoading ? null : c.refresh,
+            icon: const Icon(Icons.refresh, size: 21),
           ),
           const SizedBox(width: 8),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _entry(context),
-        icon: const Icon(Icons.add),
+        onPressed: _entry,
+        icon: const Icon(Icons.add, size: 22),
         label: const Text('记一笔'),
       ),
       body: ContentWidth(
         child: RefreshIndicator(
           onRefresh: c.refresh,
           child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
             slivers: [
               SliverPadding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+                padding: const EdgeInsets.symmetric(horizontal: 20),
                 sliver: SliverToBoxAdapter(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      MonthSelector(
-                        month: c.selectedMonth,
-                        onChanged: c.setMonth,
-                      ),
-                      const SizedBox(height: 12),
-                      LayoutBuilder(
-                        builder: (context, constraints) => Wrap(
-                          spacing: 20,
-                          runSpacing: 20,
+                      SectionSurface(
+                        padding: const EdgeInsets.fromLTRB(18, 2, 18, 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _Total('支出', summary.expenseFen, colors.onSurface),
-                            _Total('收入', summary.incomeFen, colors.primary),
-                            _Total(
-                              '结余',
-                              summary.balanceFen,
-                              colors.onSurfaceVariant,
+                            MonthSelector(
+                              month: c.selectedMonth,
+                              onChanged: c.setMonth,
+                            ),
+                            const SizedBox(height: 6),
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                final label = Text(
+                                  '本月支出',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: colors.onSurfaceVariant,
+                                  ),
+                                );
+                                final value = Text(
+                                  money(summary.expenseFen),
+                                  style: TextStyle(
+                                    fontSize: 30,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: -.6,
+                                    fontFeatures: moneyFigures,
+                                    color: colors.onSurface,
+                                  ),
+                                );
+                                if (constraints.maxWidth < 300 ||
+                                    MediaQuery.textScalerOf(context).scale(14) >
+                                        18) {
+                                  return Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      label,
+                                      const SizedBox(height: 4),
+                                      value,
+                                    ],
+                                  );
+                                }
+                                return Row(
+                                  children: [
+                                    Expanded(child: label),
+                                    Flexible(child: value),
+                                  ],
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 28,
+                              runSpacing: 12,
+                              children: [
+                                _Total(
+                                  '收入',
+                                  summary.incomeFen,
+                                  colors.tertiary,
+                                ),
+                                _Total(
+                                  '结余',
+                                  summary.balanceFen,
+                                  colors.onSurface,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 16),
+                            const Divider(),
+                            InkWell(
+                              onTap: widget.onBudget,
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                constraints: const BoxConstraints(
+                                  minHeight: 48,
+                                ),
+                                alignment: Alignment.centerLeft,
+                                padding: const EdgeInsets.only(
+                                  top: 12,
+                                  bottom: 8,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          Icons.pie_chart_outline,
+                                          size: 17,
+                                          color: colors.onSurfaceVariant,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            c.budgetFen > 0
+                                                ? (c.budgetRemainingFen >= 0
+                                                      ? '预算还剩 ${money(c.budgetRemainingFen)}'
+                                                      : '预算已超出 ${money(-c.budgetRemainingFen)}')
+                                                : '设置月预算',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              color:
+                                                  c.budgetRemainingFen < 0 &&
+                                                      c.budgetFen > 0
+                                                  ? colors.error
+                                                  : colors.onSurfaceVariant,
+                                            ),
+                                          ),
+                                        ),
+                                        Icon(
+                                          Icons.chevron_right,
+                                          size: 18,
+                                          color: colors.onSurfaceVariant,
+                                        ),
+                                      ],
+                                    ),
+                                    if (c.budgetFen > 0) ...[
+                                      const SizedBox(height: 9),
+                                      Semantics(
+                                        label:
+                                            '本月预算已用 ${(c.budgetProgress * 100).round()}%',
+                                        child: LinearProgressIndicator(
+                                          value: c.budgetProgress.clamp(0, 1),
+                                          minHeight: 3,
+                                          borderRadius: BorderRadius.circular(
+                                            2,
+                                          ),
+                                          color: c.budgetRemainingFen < 0
+                                              ? colors.error
+                                              : colors.primary,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 24),
-                      if (c.budgetFen > 0)
-                        InkWell(
-                          onTap: onBudget,
-                          borderRadius: BorderRadius.circular(12),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 4),
-                            child: Column(
-                              children: [
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: Wrap(
-                                    alignment: WrapAlignment.spaceBetween,
-                                    spacing: 12,
-                                    runSpacing: 8,
-                                    children: [
-                                      const Text('本月预算'),
-                                      Text(
-                                        c.budgetRemainingFen >= 0
-                                            ? '还可用 ${money(c.budgetRemainingFen)}'
-                                            : '已超出 ${money(-c.budgetRemainingFen)}',
-                                        style: TextStyle(
-                                          color: c.budgetRemainingFen >= 0
-                                              ? colors.primary
-                                              : colors.error,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(3),
-                                  child: LinearProgressIndicator(
-                                    value: c.budgetProgress.clamp(0, 1),
-                                    minHeight: 5,
-                                    color: c.budgetRemainingFen < 0
-                                        ? colors.error
-                                        : colors.primary,
-                                    backgroundColor:
-                                        colors.surfaceContainerHighest,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    '预算 ${money(c.budgetFen)} · 已用 ${(c.budgetProgress * 100).round()}%',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: colors.onSurfaceVariant,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        )
-                      else
-                        TextButton.icon(
-                          onPressed: onBudget,
-                          icon: const Icon(Icons.track_changes, size: 18),
-                          label: const Text('设置月预算，让支出有个参考'),
-                        ),
-                      const SizedBox(height: 20),
                       if (c.pendingTransactions.isNotEmpty)
                         Padding(
-                          padding: const EdgeInsets.only(bottom: 20),
+                          padding: const EdgeInsets.only(top: 12),
                           child: Material(
-                            color: colors.secondaryContainer.withValues(
-                              alpha: .7,
-                            ),
-                            borderRadius: BorderRadius.circular(12),
+                            color: colors.secondaryContainer,
+                            borderRadius: BorderRadius.circular(10),
                             child: ListTile(
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
+                              minTileHeight: 48,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 14,
                               ),
-                              leading: const Icon(Icons.inbox_outlined),
+                              leading: Icon(
+                                Icons.inbox_outlined,
+                                size: 20,
+                                color: colors.onSecondaryContainer,
+                              ),
+                              minLeadingWidth: 20,
                               title: Text(
                                 '${c.pendingTransactions.length} 笔账单等待确认',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: colors.onSecondaryContainer,
+                                ),
                               ),
-                              subtitle: const Text('自动采集的账单，核对后才计入收支'),
-                              trailing: const Icon(Icons.chevron_right),
+                              trailing: Icon(
+                                Icons.chevron_right,
+                                size: 18,
+                                color: colors.onSecondaryContainer,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
                               onTap: () => Navigator.of(context).push(
                                 MaterialPageRoute<void>(
                                   builder: (_) => PendingScreen(controller: c),
@@ -164,15 +260,29 @@ class LedgerScreen extends StatelessWidget {
                             ),
                           ),
                         ),
-                      TextField(
-                        onChanged: c.setKeyword,
-                        decoration: const InputDecoration(
-                          hintText: '搜索商户、备注或分类',
-                          prefixIcon: Icon(Icons.search),
-                          isDense: true,
+                      const SizedBox(height: 18),
+                      if (searching) ...[
+                        TextField(
+                          controller: search,
+                          onChanged: c.setKeyword,
+                          decoration: InputDecoration(
+                            hintText: '搜索商户、备注或分类',
+                            prefixIcon: const Icon(Icons.search, size: 20),
+                            suffixIcon: c.keyword.isEmpty
+                                ? null
+                                : IconButton(
+                                    tooltip: '清空搜索',
+                                    icon: const Icon(Icons.close, size: 18),
+                                    onPressed: () {
+                                      search.clear();
+                                      c.setKeyword('');
+                                    },
+                                  ),
+                            isDense: true,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 12),
+                        const SizedBox(height: 8),
+                      ],
                       SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
                         child: Row(
@@ -182,14 +292,14 @@ class LedgerScreen extends StatelessWidget {
                               ...TxType.values,
                             ])
                               Padding(
-                                padding: const EdgeInsets.only(right: 8),
+                                padding: const EdgeInsets.only(right: 4),
                                 child: ChoiceChip(
                                   label: Text(type?.label ?? '全部收支'),
                                   selected: c.typeFilter == type,
                                   onSelected: (_) => c.setTypeFilter(type),
                                 ),
                               ),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 4),
                             FilterChip(
                               label: const Text('已忽略'),
                               selected: c.statusFilter == TxStatus.ignored,
@@ -200,11 +310,24 @@ class LedgerScreen extends StatelessWidget {
                           ],
                         ),
                       ),
-                      const SizedBox(height: 16),
+                      if (c.keyword.isNotEmpty && !searching)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6, bottom: 4),
+                          child: Text(
+                            '搜索“${c.keyword}” · ${rows.length} 笔',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: colors.primary,
+                            ),
+                          ),
+                        ),
                       if (c.error != null)
-                        Text(
-                          c.error.toString(),
-                          style: TextStyle(color: colors.error),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          child: Text(
+                            c.error.toString(),
+                            style: TextStyle(color: colors.error),
+                          ),
                         ),
                     ],
                   ),
@@ -222,50 +345,111 @@ class LedgerScreen extends StatelessWidget {
                         : '添加第一笔账单，或在设置中导入已有账本备份。',
                     action: c.keyword.isEmpty
                         ? OutlinedButton.icon(
-                            onPressed: () => _entry(context),
+                            onPressed: _entry,
                             icon: const Icon(Icons.add),
                             label: const Text('记下第一笔'),
                           )
                         : null,
                   ),
                 ),
-              SliverList(
-                delegate: SliverChildBuilderDelegate((context, index) {
-                  final tx = rows[index];
-                  final newDay =
-                      index == 0 ||
-                      !DateUtils.isSameDay(
-                        rows[index - 1].occurredAt,
-                        tx.occurredAt,
-                      );
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (newDay)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-                          child: Text(
-                            dateLabel(tx.occurredAt),
-                            style: TextStyle(
-                              color: colors.onSurfaceVariant,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      TransactionRow(
-                        transaction: tx,
-                        category: _category(c, tx.categoryId),
-                        onTap: () => _entry(context, tx),
-                      ),
-                    ],
-                  );
-                }, childCount: rows.length),
-              ),
-              const SliverToBoxAdapter(child: SizedBox(height: 110)),
+              for (final day in days.entries) ...[
+                SliverToBoxAdapter(
+                  child: _DayHeading(day: day.key, transactions: day.value),
+                ),
+                SliverList(
+                  delegate: SliverChildBuilderDelegate((context, index) {
+                    final tx = day.value[index];
+                    return TransactionRow(
+                      transaction: tx,
+                      category: _category(c, tx.categoryId),
+                      onTap: () => _entry(tx),
+                    );
+                  }, childCount: day.value.length),
+                ),
+              ],
+              const SliverToBoxAdapter(child: SizedBox(height: 100)),
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _DayHeading extends StatelessWidget {
+  const _DayHeading({required this.day, required this.transactions});
+  final DateTime day;
+  final List<LedgerTransaction> transactions;
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final expense = transactions
+        .where(
+          (t) => t.type == TxType.expense && t.status == TxStatus.confirmed,
+        )
+        .fold(0, (sum, t) => sum + t.amountFen);
+    final income = transactions
+        .where((t) => t.type == TxType.income && t.status == TxStatus.confirmed)
+        .fold(0, (sum, t) => sum + t.amountFen);
+    final weekday = const [
+      '周一',
+      '周二',
+      '周三',
+      '周四',
+      '周五',
+      '周六',
+      '周日',
+    ][day.weekday - 1];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 5),
+      child: Column(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${day.day}'.padLeft(2, '0'),
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w500,
+                  color: colors.onSurface,
+                  fontFeatures: moneyFigures,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  weekday,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    [
+                      if (expense > 0) '支 ${money(expense)}',
+                      if (income > 0) '收 ${money(income)}',
+                    ].join('  '),
+                    textAlign: TextAlign.end,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.onSurfaceVariant,
+                      fontFeatures: moneyFigures,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Divider(),
+        ],
       ),
     );
   }
@@ -291,16 +475,16 @@ class _Total extends StatelessWidget {
         label,
         style: TextStyle(
           color: Theme.of(context).colorScheme.onSurfaceVariant,
-          fontSize: 13,
+          fontSize: 12,
         ),
       ),
-      const SizedBox(height: 8),
+      const SizedBox(height: 4),
       Text(
         money(amount),
         style: TextStyle(
           color: color,
-          fontWeight: FontWeight.w700,
-          fontSize: 20,
+          fontWeight: FontWeight.w500,
+          fontSize: 17,
           fontFeatures: moneyFigures,
         ),
       ),
@@ -322,37 +506,81 @@ class TransactionRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final tx = transaction;
     final colors = Theme.of(context).colorScheme;
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
-      leading: CategoryMark(category: category),
-      title: Text(
-        tx.merchant?.isNotEmpty == true
-            ? tx.merchant!
-            : category?.name ?? '未分类',
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+    final title = tx.merchant?.isNotEmpty == true
+        ? tx.merchant!
+        : category?.name ?? '未分类';
+    final detail = [
+      category?.name ?? '未分类',
+      if (tx.note?.isNotEmpty == true) tx.note!,
+      if (tx.status != TxStatus.confirmed) tx.status.label,
+    ].join(' · ');
+    final amount = Text(
+      '${tx.type == TxType.income ? '+' : '−'}${money(tx.amountFen)}',
+      style: TextStyle(
+        fontSize: 16,
+        fontWeight: FontWeight.w600,
+        color: tx.type == TxType.income ? colors.tertiary : colors.onSurface,
+        fontFeatures: moneyFigures,
       ),
-      subtitle: Text(
-        [
-          category?.name ?? '未分类',
-          if (tx.note?.isNotEmpty == true) tx.note!,
-          if (tx.status != TxStatus.confirmed) tx.status.label,
-        ].join(' · '),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
-      ),
-      trailing: Text(
-        '${tx.type == TxType.income ? '+' : '−'}${money(tx.amountFen)}',
-        style: TextStyle(
-          fontSize: 16,
-          fontWeight: FontWeight.w600,
-          color: tx.type == TxType.income ? colors.primary : colors.onSurface,
-          fontFeatures: moneyFigures,
+    );
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final stacked =
+                constraints.maxWidth < 330 &&
+                MediaQuery.textScalerOf(context).scale(16) > 20;
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CategoryMark(category: category),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        detail,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                      if (stacked) ...[const SizedBox(height: 6), amount],
+                    ],
+                  ),
+                ),
+                if (!stacked) ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 1),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: amount,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
         ),
       ),
-      onTap: onTap,
     );
   }
 }

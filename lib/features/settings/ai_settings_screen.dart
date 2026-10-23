@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
 import 'package:pennypilot/core/models.dart';
+import '../../ui/common.dart';
 
 import 'settings_widgets.dart';
 
@@ -584,32 +585,49 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
         appBar: AppBar(title: const Text('AI 服务')),
         body: SafeArea(
           top: false,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+          child: SettingsList(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
             children: [
-              Text(
-                '用于文字解析、语音记账和账本问答。',
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+              SectionSurface(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      '用于文字解析、语音记账和账本问答。',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    DropdownButtonFormField<String>(
+                      initialValue: _provider,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: '使用的服务'),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'chatgpt',
+                          child: Text('ChatGPT'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'deepseek',
+                          child: Text('DeepSeek'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'qwen',
+                          child: Text('通义千问 / 百炼'),
+                        ),
+                      ],
+                      onChanged: _busy || _authorizing
+                          ? null
+                          : (value) => setState(() {
+                              _provider = value!;
+                              _dirty = true;
+                              _error = null;
+                            }),
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(height: 20),
-              DropdownButtonFormField<String>(
-                initialValue: _provider,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: '使用的服务'),
-                items: const [
-                  DropdownMenuItem(value: 'chatgpt', child: Text('ChatGPT')),
-                  DropdownMenuItem(value: 'deepseek', child: Text('DeepSeek')),
-                  DropdownMenuItem(value: 'qwen', child: Text('通义千问 / 百炼')),
-                ],
-                onChanged: _busy || _authorizing
-                    ? null
-                    : (value) => setState(() {
-                        _provider = value!;
-                        _dirty = true;
-                        _error = null;
-                      }),
               ),
               if (widget.controller.settings['needsReconfiguration'] ==
                   true) ...[
@@ -619,11 +637,13 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ],
-              const SizedBox(height: 28),
-              if (_provider == 'chatgpt')
-                _chatGpt(context)
-              else
-                _apiConfiguration(_provider == 'qwen'),
+              SectionTitle(_provider == 'chatgpt' ? '账号与授权' : '连接信息'),
+              SectionSurface(
+                padding: const EdgeInsets.all(20),
+                child: _provider == 'chatgpt'
+                    ? _chatGpt(context)
+                    : _apiConfiguration(_provider == 'qwen'),
+              ),
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 24),

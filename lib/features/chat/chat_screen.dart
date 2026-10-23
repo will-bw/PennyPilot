@@ -80,207 +80,278 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
       body: ContentWidth(
-        child: Column(
-          children: [
-            Expanded(
-              child: c.messages.isEmpty
-                  ? ListView(
-                      padding: const EdgeInsets.fromLTRB(24, 40, 24, 24),
-                      children: [
-                        Icon(
-                          Icons.forum_outlined,
-                          size: 40,
-                          color: colors.primary,
-                        ),
-                        const SizedBox(height: 24),
-                        Text(
-                          '从账单中找到答案。',
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          '用日常语言提问，从真实账单中找答案。',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: colors.onSurfaceVariant),
-                        ),
-                        const SizedBox(height: 32),
-                        for (final q in [
-                          '这个月一共花了多少钱？',
-                          '本月哪类支出最多？',
-                          '最近三个月支出有什么变化？',
-                        ])
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: OutlinedButton(
-                              onPressed: c.isAsking ? null : () => ask(q),
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 14,
+        child: SizedBox(
+          width: 720,
+          child: Column(
+            children: [
+              Expanded(
+                child: c.messages.isEmpty
+                    ? _suggestions(context)
+                    : ListView.builder(
+                        controller: scroll,
+                        padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+                        itemCount: c.messages.length + (c.isAsking ? 1 : 0),
+                        itemBuilder: (context, index) {
+                          if (index == c.messages.length) {
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 20),
+                              child: Row(
+                                children: [
+                                  const SizedBox.square(
+                                    dimension: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
                                   ),
-                                  child: Text(q),
-                                ),
-                              ),
-                            ),
-                          ),
-                        const SizedBox(height: 16),
-                        TextButton(
-                          onPressed: widget.onSettings,
-                          child: const Text('配置或切换 AI 服务'),
-                        ),
-                      ],
-                    )
-                  : ListView.builder(
-                      controller: scroll,
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-                      itemCount: c.messages.length + (c.isAsking ? 1 : 0),
-                      itemBuilder: (context, index) {
-                        if (index == c.messages.length) {
-                          return const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 20),
-                            child: Row(
-                              children: [
-                                SizedBox.square(
-                                  dimension: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                ),
-                                SizedBox(width: 12),
-                                Text('正在查询账本…'),
-                              ],
-                            ),
-                          );
-                        }
-                        final msg = c.messages[index],
-                            user = c.messages[index].role == 'user';
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          child: Column(
-                            crossAxisAlignment: user
-                                ? CrossAxisAlignment.end
-                                : CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                user ? '你' : 'PennyPilot',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: colors.onSurfaceVariant,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Container(
-                                padding: const EdgeInsets.all(16),
-                                decoration: BoxDecoration(
-                                  color: user
-                                      ? colors.primaryContainer
-                                      : colors.surfaceContainerLow,
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                child: SelectionArea(
-                                  child: Text(
-                                    msg.text,
+                                  const SizedBox(width: 12),
+                                  Text(
+                                    '正在查询账本…',
                                     style: TextStyle(
-                                      height: 1.65,
-                                      color: msg.isError
-                                          ? colors.error
-                                          : colors.onSurface,
+                                      color: colors.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }
+                          final msg = c.messages[index];
+                          final user = msg.role == 'user';
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 28),
+                            child: Column(
+                              crossAxisAlignment: user
+                                  ? CrossAxisAlignment.end
+                                  : CrossAxisAlignment.start,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: Text(
+                                    user ? '你' : '账本答复',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: colors.onSurfaceVariant,
                                     ),
                                   ),
                                 ),
-                              ),
-                              if (msg.chartData != null) ...[
-                                const SizedBox(height: 12),
-                                for (
-                                  var i = 0;
-                                  i < msg.chartData!.labels.length &&
-                                      i < msg.chartData!.values.length;
-                                  i++
-                                )
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 6,
+                                Container(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 640,
+                                  ),
+                                  padding: user
+                                      ? const EdgeInsets.symmetric(
+                                          horizontal: 16,
+                                          vertical: 12,
+                                        )
+                                      : EdgeInsets.zero,
+                                  decoration: user
+                                      ? BoxDecoration(
+                                          color: colors.surfaceContainerLow,
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                        )
+                                      : null,
+                                  child: SelectionArea(
+                                    child: Text(
+                                      msg.text,
+                                      style: TextStyle(
+                                        fontSize: 15,
+                                        height: 1.7,
+                                        color: msg.isError
+                                            ? colors.error
+                                            : colors.onSurface,
+                                      ),
                                     ),
-                                    child: Row(
+                                  ),
+                                ),
+                                if (msg.chartData != null) ...[
+                                  const SizedBox(height: 16),
+                                  SectionSurface(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
+                                    ),
+                                    child: Column(
                                       children: [
-                                        Expanded(
-                                          child: Text(msg.chartData!.labels[i]),
-                                        ),
-                                        Text(money(msg.chartData!.values[i])),
+                                        for (
+                                          var i = 0;
+                                          i < msg.chartData!.labels.length &&
+                                              i < msg.chartData!.values.length;
+                                          i++
+                                        ) ...[
+                                          if (i > 0) const Divider(),
+                                          Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 12,
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Expanded(
+                                                  child: Text(
+                                                    msg.chartData!.labels[i],
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 12),
+                                                AmountLabel(
+                                                  msg.chartData!.values[i],
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
                                       ],
                                     ),
                                   ),
+                                ],
+                                if (msg.isError &&
+                                    index == c.messages.length - 1 &&
+                                    c.retryQuestion != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 8),
+                                    child: TextButton.icon(
+                                      onPressed: c.isAsking
+                                          ? null
+                                          : () => runUi(context, c.retryAsk),
+                                      icon: const Icon(Icons.refresh, size: 18),
+                                      label: const Text('重试这个问题'),
+                                    ),
+                                  ),
                               ],
-                              if (msg.isError &&
-                                  index == c.messages.length - 1 &&
-                                  c.retryQuestion != null)
-                                TextButton.icon(
-                                  onPressed: c.isAsking
-                                      ? null
-                                      : () => runUi(context, c.retryAsk),
-                                  icon: const Icon(Icons.refresh),
-                                  label: const Text('重试这个问题'),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: colors.surfaceContainerLow,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: colors.outlineVariant),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(4, 4, 8, 4),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: input,
+                                  minLines: 1,
+                                  maxLines: 5,
+                                  maxLength: 2000,
+                                  decoration: const InputDecoration(
+                                    hintText: '想了解哪笔开销？',
+                                    counterText: '',
+                                    filled: false,
+                                    border: InputBorder.none,
+                                    enabledBorder: InputBorder.none,
+                                    focusedBorder: InputBorder.none,
+                                    contentPadding: EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 12,
+                                    ),
+                                  ),
+                                  textInputAction: TextInputAction.newline,
                                 ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 2),
+                                child: ValueListenableBuilder<TextEditingValue>(
+                                  valueListenable: input,
+                                  builder: (context, value, _) =>
+                                      IconButton.filled(
+                                        tooltip: '发送问题',
+                                        onPressed:
+                                            c.isAsking ||
+                                                value.text.trim().isEmpty
+                                            ? null
+                                            : () => ask(input.text),
+                                        icon: c.isAsking
+                                            ? const SizedBox.square(
+                                                dimension: 20,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                    ),
+                                              )
+                                            : const Icon(
+                                                Icons.arrow_upward,
+                                                size: 21,
+                                              ),
+                                      ),
+                                ),
+                              ),
                             ],
                           ),
-                        );
-                      },
-                    ),
-            ),
-            SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                child: Column(
-                  children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: input,
-                            minLines: 1,
-                            maxLines: 5,
-                            maxLength: 2000,
-                            decoration: const InputDecoration(
-                              hintText: '想了解哪笔开销？',
-                              counterText: '',
-                            ),
-                            textInputAction: TextInputAction.newline,
-                          ),
                         ),
-                        const SizedBox(width: 8),
-                        IconButton.filled(
-                          tooltip: '发送问题',
-                          onPressed: c.isAsking ? null : () => ask(input.text),
-                          icon: c.isAsking
-                              ? const SizedBox.square(
-                                  dimension: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(Icons.arrow_upward),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'AI 可能出错，请以账单明细为准。相关账本信息会发送到已配置的服务。',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: colors.onSurfaceVariant,
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 10),
+                      Text(
+                        'AI 可能出错，请以账单明细为准。相关账本信息会发送到已配置的服务。',
+                        style: TextStyle(
+                          fontSize: 11,
+                          height: 1.5,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _suggestions(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
+      children: [
+        const PageHeading(title: '看看钱花在哪里', subtitle: '用日常语言提问，从真实账单中找答案。'),
+        const SizedBox(height: 32),
+        for (final question in [
+          '这个月一共花了多少钱？',
+          '本月哪类支出最多？',
+          '最近三个月支出有什么变化？',
+        ]) ...[
+          InkWell(
+            onTap: widget.controller.isAsking ? null : () => ask(question),
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 19, horizontal: 2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(question, style: const TextStyle(fontSize: 15)),
+                  ),
+                  const SizedBox(width: 12),
+                  Icon(Icons.arrow_forward, size: 18, color: colors.primary),
+                ],
+              ),
+            ),
+          ),
+          const Divider(),
+        ],
+        const SizedBox(height: 20),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: widget.onSettings,
+            icon: const Icon(Icons.tune, size: 16),
+            label: const Text('配置或切换 AI 服务'),
+          ),
+        ),
+      ],
     );
   }
 }

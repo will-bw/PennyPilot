@@ -95,7 +95,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
     required String target,
     String? button,
   }) => Padding(
-    padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -105,7 +105,9 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
             Icon(
               granted ? Icons.check_circle_outline : Icons.info_outline,
               size: 18,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              color: granted
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.onSurfaceVariant,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -144,7 +146,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
         return Scaffold(
           appBar: AppBar(title: const Text('语音与系统权限')),
           body: SafeArea(
-            child: ListView(
+            child: SettingsList(
               padding: const EdgeInsets.symmetric(vertical: 24),
               children: [
                 const SettingsNotice(
@@ -190,7 +192,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
         ),
         body: SafeArea(
           top: false,
-          child: ListView(
+          child: SettingsList(
             padding: const EdgeInsets.only(bottom: 32),
             children: [
               if (_busy) const LinearProgressIndicator(),
@@ -201,8 +203,8 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                 children: [
                   SwitchListTile(
                     contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 8,
+                      horizontal: 16,
+                      vertical: 10,
                     ),
                     title: const Text('读取支付通知'),
                     subtitle: const Text('支持微信、支付宝、美团和抖音。未发通知或通知隐藏金额时，可能无法识别。'),
@@ -230,7 +232,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                   ),
                   if (listenerGranted && notification && !listenerConnected)
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: TextButton(
@@ -246,8 +248,8 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                     ),
                   SwitchListTile(
                     contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 8,
+                      horizontal: 16,
+                      vertical: 10,
                     ),
                     title: const Text('通知云端解析'),
                     subtitle: const Text('本地规则无法完整识别时，发送筛选出的支付通知正文给所选 AI 服务。'),
@@ -256,14 +258,13 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                   ),
                 ],
               ),
-              const Divider(indent: 24, endIndent: 24),
               SettingsSection(
                 title: '支付页面',
                 children: [
                   SwitchListTile(
                     contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 8,
+                      horizontal: 16,
+                      vertical: 10,
                     ),
                     title: const Text('读取可见支付结果'),
                     subtitle: const Text('通过无障碍服务补充识别支付结果页面。默认关闭。'),
@@ -286,7 +287,6 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                   ),
                 ],
               ),
-              const Divider(indent: 24, endIndent: 24),
               SettingsSection(
                 title: '提醒与后台',
                 children: [
@@ -300,7 +300,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                   ),
                   if (!reminders)
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: TextButton(
@@ -348,7 +348,6 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                   ),
                 ],
               ),
-              const Divider(indent: 24, endIndent: 24),
               SettingsSection(
                 title: '运行记录',
                 children: [

@@ -1,7 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../ui/common.dart';
 
-/// Settings use ordinary rows and dividers, so related controls remain easy to scan.
+/// A shared reading width keeps settings comfortable on phones and tablets.
+class SettingsList extends StatelessWidget {
+  const SettingsList({super.key, required this.children, this.padding});
+  final List<Widget> children;
+  final EdgeInsetsGeometry? padding;
+
+  @override
+  Widget build(BuildContext context) => ContentWidth(
+    child: ListView(
+      padding: padding ?? const EdgeInsets.only(bottom: 32),
+      children: children,
+    ),
+  );
+}
+
 class SettingsSection extends StatelessWidget {
   const SettingsSection({
     super.key,
@@ -17,33 +32,33 @@ class SettingsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 28, 24, 8),
-          child: Semantics(
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Semantics(
             header: true,
-            child: Text(
-              title,
-              style: theme.textTheme.titleSmall?.copyWith(
-                color: theme.colorScheme.primary,
-              ),
-            ),
+            child: Text(title, style: theme.textTheme.titleMedium),
           ),
-        ),
-        if (description != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
-            child: Text(
+          if (description != null) ...[
+            const SizedBox(height: 6),
+            Text(
               description!,
-              style: theme.textTheme.bodyMedium?.copyWith(
+              style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
+          ],
+          const SizedBox(height: 12),
+          Material(
+            color: theme.colorScheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(12),
+            clipBehavior: Clip.antiAlias,
+            child: Column(children: children),
           ),
-        ...children,
-      ],
+        ],
+      ),
     );
   }
 }
@@ -67,24 +82,40 @@ class SettingsRow extends StatelessWidget {
   final bool enabled;
 
   @override
-  Widget build(BuildContext context) => ListTile(
-    contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
-    minVerticalPadding: 12,
-    enabled: enabled,
-    leading: icon == null
-        ? null
-        : Icon(icon, color: Theme.of(context).colorScheme.onSurfaceVariant),
-    title: Text(title),
-    subtitle: subtitle == null
-        ? null
-        : Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(subtitle!),
-          ),
-    trailing:
-        trailing ?? (onTap == null ? null : const Icon(Icons.chevron_right)),
-    onTap: enabled ? onTap : null,
-  );
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+      minVerticalPadding: 12,
+      horizontalTitleGap: 14,
+      enabled: enabled,
+      leading: icon == null
+          ? null
+          : Icon(icon, size: 22, color: theme.colorScheme.primary),
+      title: Text(title, style: theme.textTheme.bodyLarge),
+      subtitle: subtitle == null
+          ? null
+          : Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                subtitle!,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+      trailing:
+          trailing ??
+          (onTap == null
+              ? null
+              : Icon(
+                  Icons.chevron_right,
+                  size: 18,
+                  color: theme.colorScheme.onSurfaceVariant,
+                )),
+      onTap: enabled ? onTap : null,
+    );
+  }
 }
 
 class SettingsNotice extends StatelessWidget {
@@ -98,20 +129,21 @@ class SettingsNotice extends StatelessWidget {
     return Semantics(
       liveRegion: true,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(
               error ? Icons.error_outline : Icons.info_outline,
-              size: 20,
+              size: 18,
               color: error ? colors.error : colors.onSurfaceVariant,
             ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
                 message,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  height: 1.6,
                   color: error ? colors.error : colors.onSurfaceVariant,
                 ),
               ),

@@ -203,10 +203,20 @@ class _AppHomeState extends State<_AppHome> {
       ),
       bottomNavigationBar: wide
           ? null
-          : NavigationBar(
-              selectedIndex: selected,
-              onDestinationSelected: (v) => setState(() => selected = v),
-              destinations: destinations,
+          : DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                    width: .6,
+                  ),
+                ),
+              ),
+              child: NavigationBar(
+                selectedIndex: selected,
+                onDestinationSelected: (v) => setState(() => selected = v),
+                destinations: destinations,
+              ),
             ),
     );
   }
@@ -222,13 +232,16 @@ class _Welcome extends StatelessWidget {
         child: ListView(
           padding: const EdgeInsets.all(28),
           children: [
-            const SizedBox(height: 60),
-            Icon(
-              Icons.account_balance_wallet_outlined,
-              size: 52,
-              color: Theme.of(context).colorScheme.primary,
+            const SizedBox(height: 40),
+            Text(
+              'PennyPilot',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+                color: Theme.of(context).colorScheme.primary,
+              ),
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: 40),
             Text(
               '把日常收支记清楚。',
               style: Theme.of(context).textTheme.headlineMedium,

@@ -54,6 +54,65 @@ class ContentWidth extends StatelessWidget {
   );
 }
 
+class PageHeading extends StatelessWidget {
+  const PageHeading({
+    super.key,
+    required this.title,
+    this.subtitle,
+    this.trailing,
+  });
+  final String title;
+  final String? subtitle;
+  final Widget? trailing;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 8, bottom: 24),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.headlineMedium),
+              if (subtitle != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  subtitle!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        ?trailing,
+      ],
+    ),
+  );
+}
+
+class SectionSurface extends StatelessWidget {
+  const SectionSurface({
+    super.key,
+    required this.child,
+    this.padding = const EdgeInsets.all(16),
+  });
+  final Widget child;
+  final EdgeInsetsGeometry padding;
+  @override
+  Widget build(BuildContext context) => Material(
+    color: Theme.of(context).colorScheme.surfaceContainerLow,
+    borderRadius: BorderRadius.circular(14),
+    clipBehavior: Clip.antiAlias,
+    child: SizedBox(
+      width: double.infinity,
+      child: Padding(padding: padding, child: child),
+    ),
+  );
+}
+
 class EmptyState extends StatelessWidget {
   const EmptyState({
     super.key,
@@ -71,7 +130,11 @@ class EmptyState extends StatelessWidget {
     child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 40, color: Theme.of(context).colorScheme.primary),
+        Icon(
+          icon,
+          size: 32,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
         const SizedBox(height: 20),
         Text(
           title,
@@ -142,20 +205,62 @@ class CategoryMark extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = Theme.of(context).colorScheme;
+    final color = categoryTone(context, category?.name ?? '');
     return Container(
-      width: 42,
-      height: 42,
+      width: 40,
+      height: 40,
       decoration: BoxDecoration(
-        color: c.surfaceContainerHighest.withValues(alpha: .6),
-        borderRadius: BorderRadius.circular(12),
+        color: Color.alphaBlend(color.withValues(alpha: .12), c.surface),
+        shape: BoxShape.circle,
       ),
-      child: Icon(
-        categoryIcon(category?.name ?? ''),
-        size: 21,
-        color: c.onSurfaceVariant,
-      ),
+      child: Icon(ledgerCategoryIcon(category), size: 20, color: color),
     );
   }
+}
+
+const categorySymbols = <String, (String, IconData)>{
+  'dining': ('餐饮', Icons.restaurant_outlined),
+  'shopping': ('购物', Icons.shopping_bag_outlined),
+  'transport': ('交通', Icons.directions_bus_outlined),
+  'home': ('居家', Icons.home_outlined),
+  'health': ('健康', Icons.health_and_safety_outlined),
+  'entertainment': ('娱乐', Icons.movie_outlined),
+  'education': ('学习', Icons.school_outlined),
+  'salary': ('收入', Icons.payments_outlined),
+  'gift': ('礼物', Icons.redeem_outlined),
+  'other': ('其他', Icons.category_outlined),
+};
+
+IconData ledgerCategoryIcon(LedgerCategory? category) =>
+    categorySymbols[category?.icon]?.$2 ?? categoryIcon(category?.name ?? '');
+
+Color categoryTone(BuildContext context, String name) {
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  final index = switch (categoryIcon(name)) {
+    Icons.restaurant_outlined || Icons.local_cafe_outlined => 0,
+    Icons.directions_bus_outlined => 1,
+    Icons.shopping_bag_outlined => 2,
+    Icons.home_outlined => 3,
+    Icons.work_outline => 4,
+    _ => 5,
+  };
+  return (dark
+      ? const [
+          Color(0xFFDEB293),
+          Color(0xFFA8C4DA),
+          Color(0xFFD4AFC0),
+          Color(0xFFB6C7A5),
+          Color(0xFFA4CDB9),
+          Color(0xFFBDB8D6),
+        ]
+      : const [
+          Color(0xFF946644),
+          Color(0xFF527B9A),
+          Color(0xFF9A647B),
+          Color(0xFF6E8058),
+          Color(0xFF517D65),
+          Color(0xFF7C7299),
+        ])[index];
 }
 
 class AmountLabel extends StatelessWidget {
@@ -181,34 +286,48 @@ class MonthSelector extends StatelessWidget {
   final DateTime month;
   final ValueChanged<DateTime> onChanged;
   @override
-  Widget build(BuildContext context) => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      IconButton(
-        tooltip: '上个月',
-        onPressed: () => onChanged(DateTime(month.year, month.month - 1)),
-        icon: const Icon(Icons.chevron_left),
-      ),
-      Flexible(
-        child: TextButton(
-          onPressed: () async {
-            final chosen = await showDatePicker(
-              context: context,
-              initialDate: month,
-              firstDate: DateTime(2000),
-              lastDate: DateTime(2100),
-              helpText: '选择要查看的月份',
-            );
-            if (chosen != null) onChanged(DateTime(chosen.year, chosen.month));
-          },
-          child: Text(monthLabel(month)),
-        ),
-      ),
-      IconButton(
-        tooltip: '下个月',
-        onPressed: () => onChanged(DateTime(month.year, month.month + 1)),
-        icon: const Icon(Icons.chevron_right),
-      ),
-    ],
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final compact =
+          constraints.maxWidth < 300 &&
+          MediaQuery.textScalerOf(context).scale(14) > 18;
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: '上个月',
+            onPressed: () => onChanged(DateTime(month.year, month.month - 1)),
+            icon: const Icon(Icons.chevron_left),
+          ),
+          Flexible(
+            child: TextButton(
+              onPressed: () async {
+                final chosen = await showDatePicker(
+                  context: context,
+                  initialDate: month,
+                  firstDate: DateTime(2000),
+                  lastDate: DateTime(2100),
+                  helpText: '选择要查看的月份',
+                );
+                if (chosen != null) {
+                  onChanged(DateTime(chosen.year, chosen.month));
+                }
+              },
+              child: Text(
+                compact
+                    ? '${month.year}.${month.month.toString().padLeft(2, '0')}'
+                    : monthLabel(month),
+                semanticsLabel: monthLabel(month),
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: '下个月',
+            onPressed: () => onChanged(DateTime(month.year, month.month + 1)),
+            icon: const Icon(Icons.chevron_right),
+          ),
+        ],
+      );
+    },
   );
 }

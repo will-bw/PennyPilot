@@ -158,217 +158,330 @@ class _EntryScreenState extends State<EntryScreen> {
           ],
         ),
         body: ContentWidth(
-          child: Column(
-            children: [
-              if (widget.transaction == null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-                  child: SegmentedButton<bool>(
-                    segments: const [
-                      ButtonSegment(
-                        value: false,
-                        label: Text('手动'),
-                        icon: Icon(Icons.edit_outlined),
-                      ),
-                      ButtonSegment(
-                        value: true,
-                        label: Text('一句话'),
-                        icon: Icon(Icons.short_text),
-                      ),
-                    ],
-                    selected: {ai},
-                    onSelectionChanged: saving
-                        ? null
-                        : (v) => setState(() => ai = v.first),
-                  ),
-                ),
-              Expanded(
-                child: ai
-                    ? _AiEntry(controller: c)
-                    : Form(
-                        key: form,
-                        child: ListView(
-                          padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
-                          children: [
-                            SegmentedButton<TxType>(
-                              segments: TxType.values
-                                  .map(
-                                    (t) => ButtonSegment(
-                                      value: t,
-                                      label: Text(t.label),
-                                    ),
-                                  )
-                                  .toList(),
-                              selected: {type},
-                              onSelectionChanged: saving
-                                  ? null
-                                  : (v) => setState(() {
-                                      type = v.first;
-                                      categoryId = null;
-                                    }),
-                            ),
-                            const SizedBox(height: 24),
-                            TextFormField(
-                              controller: amount,
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                    decimal: true,
-                                  ),
-                              inputFormatters: [
-                                FilteringTextInputFormatter.allow(
-                                  RegExp(r'[0-9.]'),
-                                ),
-                              ],
-                              style: TextStyle(
-                                fontSize: 36,
-                                fontWeight: FontWeight.w600,
-                                fontFeatures: moneyFigures,
-                              ),
-                              decoration: const InputDecoration(
-                                labelText: '金额',
-                                floatingLabelBehavior:
-                                    FloatingLabelBehavior.always,
-                                prefixText: '¥ ',
-                                hintText: '0.00',
-                              ),
-                              validator: (v) => parseMoney(v ?? '') == null
-                                  ? '请输入 0.01 至 9,999,999.99 元，最多两位小数'
-                                  : null,
-                            ),
-                            const SectionTitle('分类'),
-                            if (cats.isEmpty)
-                              const Text('没有可用分类，请先到设置中添加。')
-                            else
-                              Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                children: cats
-                                    .map(
-                                      (cat) => ChoiceChip(
-                                        avatar: Icon(
-                                          categoryIcon(cat.name),
-                                          size: 18,
-                                        ),
-                                        label: Text(cat.name),
-                                        selected: cat.id == categoryId,
-                                        onSelected: (_) =>
-                                            setState(() => categoryId = cat.id),
-                                      ),
-                                    )
-                                    .toList(),
-                              ),
-                            const SizedBox(height: 24),
-                            TextFormField(
-                              controller: merchant,
-                              maxLength: 100,
-                              decoration: const InputDecoration(
-                                labelText: '商户',
-                                hintText: '例如：楼下便利店',
-                                counterText: '',
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            TextFormField(
-                              controller: note,
-                              maxLength: 500,
-                              maxLines: 2,
-                              decoration: const InputDecoration(
-                                labelText: '备注',
-                                hintText: '为这笔账留点线索',
-                                counterText: '',
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            TextFormField(
-                              controller: account,
-                              maxLength: 100,
-                              decoration: const InputDecoration(
-                                labelText: '账户标签（选填）',
-                                hintText: '例如：微信、支付宝、现金',
-                                counterText: '',
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: const Icon(
-                                Icons.calendar_today_outlined,
-                              ),
-                              title: const Text('交易时间'),
-                              subtitle: Text(
-                                '${occurredAt.year}年${dateLabel(occurredAt)} ${timeLabel(occurredAt)}',
-                              ),
-                              trailing: const Icon(Icons.chevron_right),
-                              onTap: () async {
-                                final date = await showDatePicker(
-                                  context: context,
-                                  initialDate: occurredAt,
-                                  firstDate: DateTime(2000),
-                                  lastDate: DateTime(2100),
-                                );
-                                if (date == null || !context.mounted) return;
-                                final time = await showTimePicker(
-                                  context: context,
-                                  initialTime: TimeOfDay.fromDateTime(
-                                    occurredAt,
-                                  ),
-                                );
-                                if (time != null && mounted) {
-                                  setState(
-                                    () => occurredAt = DateTime(
-                                      date.year,
-                                      date.month,
-                                      date.day,
-                                      time.hour,
-                                      time.minute,
-                                    ),
-                                  );
-                                }
-                              },
-                            ),
-                            if (widget.transaction != null)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 12,
-                                ),
-                                child: Text(
-                                  '${widget.transaction!.source.label} · ${widget.transaction!.status.label}',
-                                  style: TextStyle(
-                                    color: colors.onSurfaceVariant,
-                                  ),
-                                ),
-                              ),
-                            const SizedBox(height: 24),
-                            FilledButton.icon(
-                              onPressed: saving || cats.isEmpty ? null : save,
-                              icon: saving
-                                  ? const SizedBox.square(
-                                      dimension: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.check),
-                              label: Text(
-                                saving
-                                    ? '正在保存…'
-                                    : widget.onDraftSaved != null
-                                    ? '完成核对'
-                                    : widget.transaction == null
-                                    ? '保存这笔账'
-                                    : '保存修改',
-                              ),
-                            ),
-                          ],
+          child: SizedBox(
+            width: 720,
+            child: Column(
+              children: [
+                if (widget.transaction == null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+                    child: SegmentedButton<bool>(
+                      showSelectedIcon: false,
+                      segments: const [
+                        ButtonSegment(
+                          value: false,
+                          label: Text('手动'),
+                          icon: Icon(Icons.edit_outlined),
                         ),
-                      ),
-              ),
-            ],
+                        ButtonSegment(
+                          value: true,
+                          label: Text('一句话'),
+                          icon: Icon(Icons.short_text),
+                        ),
+                      ],
+                      selected: {ai},
+                      onSelectionChanged: saving
+                          ? null
+                          : (v) => setState(() => ai = v.first),
+                    ),
+                  ),
+                Expanded(
+                  child: ai
+                      ? _AiEntry(controller: c)
+                      : _manualForm(cats, colors),
+                ),
+              ],
+            ),
           ),
         ),
       );
     },
   );
+
+  Widget _manualForm(
+    List<LedgerCategory> categories,
+    ColorScheme colors,
+  ) => Form(
+    key: form,
+    child: Column(
+      children: [
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: SegmentedButton<TxType>(
+                  showSelectedIcon: false,
+                  segments: TxType.values
+                      .map((t) => ButtonSegment(value: t, label: Text(t.label)))
+                      .toList(),
+                  selected: {type},
+                  onSelectionChanged: saving
+                      ? null
+                      : (value) => setState(() {
+                          type = value.first;
+                          categoryId = null;
+                        }),
+                ),
+              ),
+              const SizedBox(height: 24),
+              TextFormField(
+                controller: amount,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+                ],
+                style: TextStyle(
+                  fontSize: 44,
+                  height: 1.2,
+                  fontWeight: FontWeight.w500,
+                  color: colors.onSurface,
+                  fontFeatures: moneyFigures,
+                ),
+                decoration: InputDecoration(
+                  labelText: '金额',
+                  floatingLabelBehavior: FloatingLabelBehavior.always,
+                  prefixText: '¥ ',
+                  prefixStyle: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.w400,
+                    color: colors.onSurfaceVariant,
+                  ),
+                  hintText: '0.00',
+                  hintStyle: TextStyle(color: colors.onSurfaceVariant),
+                  filled: false,
+                  contentPadding: const EdgeInsets.only(top: 12, bottom: 16),
+                  border: UnderlineInputBorder(
+                    borderSide: BorderSide(color: colors.outlineVariant),
+                  ),
+                  enabledBorder: UnderlineInputBorder(
+                    borderSide: BorderSide(color: colors.outlineVariant),
+                  ),
+                  focusedBorder: UnderlineInputBorder(
+                    borderSide: BorderSide(color: colors.primary, width: 2),
+                  ),
+                ),
+                validator: (value) => parseMoney(value ?? '') == null
+                    ? '请输入 0.01 至 9,999,999.99 元，最多两位小数'
+                    : null,
+              ),
+              const SectionTitle('分类'),
+              if (categories.isEmpty)
+                const Text('没有可用分类，请先到设置中添加。')
+              else
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final columns = constraints.maxWidth >= 560 ? 6 : 4;
+                    final width =
+                        (constraints.maxWidth - (columns - 1) * 8) / columns;
+                    return Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final category in categories)
+                          SizedBox(
+                            width: width,
+                            child: _CategoryOption(
+                              category: category,
+                              selected: category.id == categoryId,
+                              onSelected: saving
+                                  ? null
+                                  : () => setState(
+                                      () => categoryId = category.id,
+                                    ),
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
+              const SectionTitle('补充信息'),
+              SectionSurface(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 4,
+                ),
+                child: Column(
+                  children: [
+                    TextFormField(
+                      controller: merchant,
+                      maxLength: 100,
+                      decoration: _detailDecoration('商户', '例如：楼下便利店'),
+                    ),
+                    TextFormField(
+                      controller: account,
+                      maxLength: 100,
+                      decoration: _detailDecoration('账户标签（选填）', '例如：微信、支付宝、现金'),
+                    ),
+                    TextFormField(
+                      controller: note,
+                      maxLength: 500,
+                      minLines: 1,
+                      maxLines: 3,
+                      decoration: _detailDecoration('备注', '为这笔账留点线索'),
+                    ),
+                    ListTile(
+                      contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                      title: const Text('交易时间'),
+                      subtitle: Text(
+                        '${occurredAt.year}年${dateLabel(occurredAt)} ${timeLabel(occurredAt)}',
+                      ),
+                      trailing: Icon(
+                        Icons.calendar_today_outlined,
+                        size: 20,
+                        color: colors.onSurfaceVariant,
+                      ),
+                      onTap: saving
+                          ? null
+                          : () async {
+                              final date = await showDatePicker(
+                                context: context,
+                                initialDate: occurredAt,
+                                firstDate: DateTime(2000),
+                                lastDate: DateTime(2100),
+                              );
+                              if (date == null || !mounted) return;
+                              final time = await showTimePicker(
+                                context: context,
+                                initialTime: TimeOfDay.fromDateTime(occurredAt),
+                              );
+                              if (time != null && mounted) {
+                                setState(
+                                  () => occurredAt = DateTime(
+                                    date.year,
+                                    date.month,
+                                    date.day,
+                                    time.hour,
+                                    time.minute,
+                                  ),
+                                );
+                              }
+                            },
+                    ),
+                  ],
+                ),
+              ),
+              if (widget.transaction != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 16),
+                  child: Text(
+                    '${widget.transaction!.source.label} · ${widget.transaction!.status.label}',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: saving || categories.isEmpty ? null : save,
+                icon: saving
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.check, size: 20),
+                label: Text(
+                  saving
+                      ? '正在保存…'
+                      : widget.onDraftSaved != null
+                      ? '完成核对'
+                      : widget.transaction == null
+                      ? '保存这笔账'
+                      : '保存修改',
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  InputDecoration _detailDecoration(String label, String hint) {
+    final colors = Theme.of(context).colorScheme;
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      counterText: '',
+      filled: false,
+      contentPadding: const EdgeInsets.symmetric(vertical: 14),
+      border: UnderlineInputBorder(
+        borderSide: BorderSide(color: colors.outlineVariant),
+      ),
+      enabledBorder: UnderlineInputBorder(
+        borderSide: BorderSide(color: colors.outlineVariant),
+      ),
+      focusedBorder: UnderlineInputBorder(
+        borderSide: BorderSide(color: colors.primary),
+      ),
+    );
+  }
+}
+
+class _CategoryOption extends StatelessWidget {
+  const _CategoryOption({
+    required this.category,
+    required this.selected,
+    required this.onSelected,
+  });
+  final LedgerCategory category;
+  final bool selected;
+  final VoidCallback? onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: Material(
+        color: selected ? colors.primaryContainer : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          onTap: onSelected,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+            child: Column(
+              children: [
+                Icon(
+                  ledgerCategoryIcon(category),
+                  size: 24,
+                  color: selected
+                      ? colors.onPrimaryContainer
+                      : colors.onSurfaceVariant,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  category.name,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    color: selected
+                        ? colors.onPrimaryContainer
+                        : colors.onSurface,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _AiEntry extends StatefulWidget {
@@ -396,24 +509,19 @@ class _AiEntryState extends State<_AiEntry> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
       children: [
-        Text('描述你的收支。', style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 8),
-        Text(
-          '可以一次说多笔。识别后先核对，再保存到账本。',
-          style: TextStyle(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 20),
+        const PageHeading(title: '说说这笔收支', subtitle: '可以一次说多笔。识别后先核对，再保存到账本。'),
+        const SizedBox(height: 24),
         TextField(
           controller: input,
           onChanged: (_) => voice = false,
           minLines: 4,
           maxLines: 8,
           maxLength: 4000,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             labelText: '这笔钱怎么花的',
             hintText: '例如：今天午饭 28 元，地铁 4 元',
+            fillColor: Theme.of(context).colorScheme.secondaryContainer,
+            alignLabelWithHint: true,
           ),
         ),
         const SizedBox(height: 8),
@@ -484,7 +592,22 @@ class _AiEntryState extends State<_AiEntry> {
         ),
         if (c.isRecording) ...[
           const SizedBox(height: 12),
-          Text(c.speechText.isEmpty ? '正在听，请说出金额和用途…' : c.speechText),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                Icons.mic,
+                size: 18,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  c.speechText.isEmpty ? '正在听，请说出金额和用途…' : c.speechText,
+                ),
+              ),
+            ],
+          ),
         ],
         if (c.drafts.isNotEmpty) ...[
           SectionTitle(
@@ -538,15 +661,13 @@ class _DraftRow extends StatelessWidget {
     return Column(
       children: [
         ListTile(
-          contentPadding: EdgeInsets.zero,
+          contentPadding: const EdgeInsets.only(top: 8),
+          leading: CategoryMark(category: cats.isEmpty ? null : cats.first),
           title: Text(tx.merchant?.isNotEmpty == true ? tx.merchant! : name),
           subtitle: Text(
             '${tx.type.label} · $name · ${dateLabel(tx.occurredAt)}${tx.note?.isNotEmpty == true ? ' · ${tx.note}' : ''}',
           ),
-          trailing: Text(
-            money(tx.amountFen),
-            style: const TextStyle(fontWeight: FontWeight.w600),
-          ),
+          trailing: AmountLabel(tx.amountFen),
           onTap: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => EntryScreen(

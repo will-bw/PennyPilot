@@ -1,31 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
 import 'package:pennypilot/core/models.dart';
+import '../../ui/common.dart';
 
 import 'settings_widgets.dart';
-
-const _categoryIcons = <String, (String, IconData)>{
-  'dining': ('餐饮', Icons.restaurant_outlined),
-  'shopping': ('购物', Icons.shopping_bag_outlined),
-  'transport': ('交通', Icons.directions_bus_outlined),
-  'home': ('居家', Icons.home_outlined),
-  'health': ('健康', Icons.health_and_safety_outlined),
-  'entertainment': ('娱乐', Icons.movie_outlined),
-  'education': ('学习', Icons.school_outlined),
-  'salary': ('收入', Icons.payments_outlined),
-  'gift': ('礼物', Icons.redeem_outlined),
-  'other': ('其他', Icons.category_outlined),
-};
-
-IconData _iconForCategory(LedgerCategory category) {
-  if (_categoryIcons.containsKey(category.icon)) {
-    return _categoryIcons[category.icon]!.$2;
-  }
-  final match = _categoryIcons.values.where(
-    (entry) => category.name.contains(entry.$1),
-  );
-  return match.isEmpty ? Icons.category_outlined : match.first.$2;
-}
 
 class CategoriesScreen extends StatefulWidget {
   const CategoriesScreen({super.key, required this.controller});
@@ -85,11 +63,11 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         ),
         body: SafeArea(
           top: false,
-          child: ListView(
+          child: SettingsList(
             padding: const EdgeInsets.only(bottom: 100),
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                 child: SegmentedButton<TxType>(
                   segments: const [
                     ButtonSegment(value: TxType.expense, label: Text('支出')),
@@ -107,33 +85,54 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                   padding: EdgeInsets.all(32),
                   child: Text('暂无此类型分类，点击“新增分类”创建。'),
                 ),
-              for (final category in categories)
-                ListTile(
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 6,
-                  ),
-                  leading: Icon(
-                    _iconForCategory(category),
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                  title: Text(category.name),
-                  subtitle: Text(
-                    '${category.isPreset ? '预设分类' : '自定义分类'}${category.enabled ? '' : ' · 已停用'}',
-                  ),
-                  onTap: _busyId == null ? () => _edit(category) : null,
-                  trailing: _busyId == category.id
-                      ? const SettingsBusy()
-                      : Semantics(
-                          label:
-                              '${category.enabled ? '停用' : '启用'}${category.name}',
-                          child: Switch(
-                            value: category.enabled,
-                            onChanged: _busyId == null
-                                ? (value) => _toggle(category, value)
-                                : null,
+              if (categories.isNotEmpty)
+                SettingsSection(
+                  title: '${_type.label}分类',
+                  description:
+                      '${categories.where((category) => category.enabled).length} 个启用 · 点击分类修改名称和图标',
+                  children: [
+                    for (var index = 0; index < categories.length; index++) ...[
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 7,
+                        ),
+                        horizontalTitleGap: 14,
+                        leading: CategoryMark(category: categories[index]),
+                        title: Text(categories[index].name),
+                        subtitle: Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text(
+                            '${categories[index].isPreset ? '预设分类' : '自定义分类'}${categories[index].enabled ? '' : ' · 已停用'}',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurfaceVariant,
+                                ),
                           ),
                         ),
+                        onTap: _busyId == null
+                            ? () => _edit(categories[index])
+                            : null,
+                        trailing: _busyId == categories[index].id
+                            ? const SettingsBusy()
+                            : Semantics(
+                                label:
+                                    '${categories[index].enabled ? '停用' : '启用'}${categories[index].name}',
+                                child: Switch(
+                                  value: categories[index].enabled,
+                                  onChanged: _busyId == null
+                                      ? (value) =>
+                                            _toggle(categories[index], value)
+                                      : null,
+                                ),
+                              ),
+                      ),
+                      if (index < categories.length - 1)
+                        const Divider(indent: 72, endIndent: 16),
+                    ],
+                  ],
                 ),
             ],
           ),
@@ -309,8 +308,8 @@ class _CategoryEditorState extends State<_CategoryEditor> {
       ),
       body: SafeArea(
         top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        child: SettingsList(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
           children: [
             TextField(
               controller: _name,
@@ -349,7 +348,7 @@ class _CategoryEditorState extends State<_CategoryEditor> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final entry in _categoryIcons.entries)
+                for (final entry in categorySymbols.entries)
                   ChoiceChip(
                     avatar: Icon(entry.value.$2, size: 18),
                     label: Text(entry.value.$1),

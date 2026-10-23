@@ -136,7 +136,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         appBar: AppBar(title: const Text('设置')),
         body: SafeArea(
           top: false,
-          child: ListView(
+          child: SettingsList(
             padding: const EdgeInsets.only(bottom: 32),
             children: [
               SettingsSection(
@@ -165,7 +165,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
-              const Divider(indent: 24, endIndent: 24, height: 24),
               SettingsSection(
                 title: '记账方式',
                 children: [
@@ -204,7 +203,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                 ],
               ),
-              const Divider(indent: 24, endIndent: 24, height: 24),
               SettingsSection(
                 title: '数据与应用',
                 children: [
