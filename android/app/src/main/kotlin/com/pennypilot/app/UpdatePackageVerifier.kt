@@ -53,7 +53,7 @@ internal object UpdatePackageVerifier {
             fail("OLD_VERSION", "该更新包不比当前版本新，请重新检查更新。")
         }
         if (installedSigners.isEmpty() || installedSigners != archiveSigners) {
-            fail("SIGNATURE_MISMATCH", "更新包与当前应用签名不同，无法覆盖安装。请先导出并妥善保存账本备份，再按版本页面说明迁移到正式版；不要直接卸载当前应用。")
+            fail("SIGNATURE_MISMATCH", "更新包签名校验失败，无法安装。请从 PennyPilot 官方发布页面下载签名一致的更新包。")
         }
     }
 

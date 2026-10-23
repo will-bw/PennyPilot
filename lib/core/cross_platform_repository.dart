@@ -256,9 +256,6 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
         }
         await _store.invoke('restoreBackupData', {...arguments, 'data': data});
         return {'cancelled': false};
-      case 'restoreLegacyBackup':
-        if (_android) return _store.invoke('restoreBackup', arguments);
-        throw const LedgerException('请先在 Android 中把旧数据库备份导出为跨平台备份。');
       case 'signIn':
         _settingsGeneration++;
         if (_android) return _store.invoke(method, arguments);

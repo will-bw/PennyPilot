@@ -418,9 +418,7 @@ class LedgerController extends ChangeNotifier {
       if (ledger) 'revision': revision,
       ...arguments,
     });
-    if (ledger &&
-        method != 'restoreBackup' &&
-        method != 'restoreLegacyBackup') {
+    if (ledger && method != 'restoreBackup') {
       _requireCurrent(generation);
     }
     if (refreshAfter) await refresh();

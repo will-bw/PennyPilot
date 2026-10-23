@@ -81,12 +81,12 @@ class UpdatePackageVerifierTest {
         assertEquals("INVALID_APK", assertThrows(UpdateFailure::class.java) { identity(archiveCode = 5) }.code)
     }
 
-    @Test fun rejectsDifferentMissingOrAdditionalSignersWithBackupAdvice() {
+    @Test fun rejectsDifferentMissingOrAdditionalSignersWithDownloadAdvice() {
         for (signers in listOf(setOf("debug-certificate"), emptySet(), setOf("release-certificate", "extra-certificate"))) {
             val error = assertThrows(UpdateFailure::class.java) { identity(archiveSigners = signers) }
             assertEquals("SIGNATURE_MISMATCH", error.code)
-            assertTrue(error.message!!.contains("备份"))
-            assertTrue(error.message!!.contains("不要直接卸载"))
+            assertTrue(error.message!!.contains("签名校验失败"))
+            assertTrue(error.message!!.contains("官方发布页面"))
         }
         assertEquals("SIGNATURE_MISMATCH", assertThrows(UpdateFailure::class.java) { identity(installedSigners = emptySet(), archiveSigners = emptySet()) }.code)
     }

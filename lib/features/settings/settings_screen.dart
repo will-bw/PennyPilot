@@ -59,7 +59,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Future<void> _backup({required bool restore, bool legacy = false}) async {
+  Future<void> _backup({required bool restore}) async {
     if (restore) {
       final proceed = await confirmSettingsAction(
         context,
@@ -72,9 +72,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final confirmed = await confirmSettingsAction(
         context,
         title: '确认替换当前账本？',
-        message: legacy
-            ? '此操作会覆盖当前账本，无法在应用内撤销。选择旧版数据库备份，如有同名 -wal 文件，请一并选择。'
-            : '此操作会覆盖当前账本，无法在应用内撤销。请选择 PennyPilot 导出的 JSON 跨平台备份。',
+        message: '此操作会覆盖当前账本，无法在应用内撤销。请选择 PennyPilot 导出的 JSON 跨平台备份。',
         confirmLabel: '选择备份并替换',
         destructive: true,
       );
@@ -82,15 +80,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     setState(() => _backupBusy = true);
     try {
-      final completed = legacy
-          ? stringMap(
-                  await widget.controller.command(
-                    'restoreLegacyBackup',
-                    ledger: true,
-                  ),
-                )['cancelled'] !=
-                true
-          : restore
+      final completed = restore
           ? await widget.controller.restoreBackup()
           : await widget.controller.exportBackup();
       if (mounted) {
@@ -258,14 +248,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     enabled: !_backupBusy,
                     onTap: () => _backup(restore: true),
                   ),
-                  if (android)
-                    SettingsRow(
-                      title: '导入旧版数据库备份',
-                      subtitle: '兼容原有 .db 及同名日志文件',
-                      icon: Icons.history,
-                      enabled: !_backupBusy,
-                      onTap: () => _backup(restore: true, legacy: true),
-                    ),
                   SettingsRow(
                     title: '检查更新',
                     subtitle: '查看新版本与更新说明',

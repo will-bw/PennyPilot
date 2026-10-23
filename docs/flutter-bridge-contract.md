@@ -71,7 +71,7 @@ never be logged, returned to UI state, exported, or exposed to AI tools.
 - `exportBackupData {}` returns `{format:"pennypilot",version:1,categories,transactions,rules,reports,captureEvents}`. Rows use the same camelCase wire fields. Backup transactions additionally retain `rawPayload` and `captureEventKey`.
 - `restoreBackupData {revision,data}` validates all rows before atomically replacing the ledger and advancing revision. Invalid data leaves the original ledger unchanged.
 - `saveGeneratedReport {revision,id?:0,yearMonth,totalExpense,totalIncome,byCategoryJson,llmSummary,generatedAt}` persists a completed-month report. Same month replaces the previous report.
-- At the shared repository layer, `exportBackup` / `restoreBackup` use system JSON file pickers (20 MiB maximum). Android-only `restoreLegacyBackup` routes to the previous native `.db` picker; the native bridge's original `restoreBackup` keeps its historical meaning.
+- At the shared repository layer, `exportBackup` / `restoreBackup` use system JSON file pickers (20 MiB maximum) on both Android and iOS.
 - iOS returns `platform:"ios"`, `automaticCaptureSupported:false`, `speechRecognitionGranted` and real microphone permission state. It does not offer Android capture/system-permission commands.
 - iOS ChatGPT uses the system in-app browser, loopback callback, PKCE, state, nonce and signed ID-token verification; Android continues its established system-browser flow. Signing credentials and OAuth are not part of backups.
 
