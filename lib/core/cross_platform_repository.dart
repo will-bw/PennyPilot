@@ -7,6 +7,8 @@ import 'ai/shared_ai_service.dart';
 import 'ledger_repository.dart';
 import 'models.dart';
 import 'platform/mobile_platform_services.dart';
+import 'speech/voice_configuration.dart';
+import 'speech/voice_transcription_service.dart';
 import 'storage/portable_ledger_store.dart';
 
 /// Shared application services with platform-specific persistence adapters.
@@ -18,16 +20,25 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
     MobilePlatformServices? platformServices,
     SharedCredentials? credentials,
     SharedAiService? ai,
+    VoiceTranscriptionService? voice,
     bool? android,
   }) : _android =
            android ??
            (!kIsWeb && defaultTargetPlatform == TargetPlatform.android),
        _store = store ?? _defaultStore(),
-       _platform = platformServices ?? MobilePlatformServices() {
+       _platform = platformServices ?? MobilePlatformServices(),
+       _voice =
+           voice ??
+           VoiceTranscriptionService(
+             configuration: VoiceConfigurationStore(credentials: credentials),
+           ) {
     _credentials =
         credentials ??
         (_android ? _AndroidCredentials(_store) : SecureSharedCredentials());
     _ai = ai ?? SharedAiService(credentials: _credentials);
+    _voiceEvents = _voice.states.listen(
+      (state) => _emit('speechState', {'state': state}),
+    );
     _storeEvents = _store.events.listen(
       (event) {
         _revision = event.revision;
@@ -68,6 +79,8 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
   final bool _android;
   final LedgerRepository _store;
   final MobilePlatformServices _platform;
+  final VoiceTranscriptionService _voice;
+  late final StreamSubscription<String> _voiceEvents;
   late final SharedCredentials _credentials;
   late final SharedAiService _ai;
   final _events = StreamController<LedgerEvent>.broadcast();
@@ -92,7 +105,24 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
     if (_closed) throw const LedgerException('账本已关闭。');
     final base = await _store.snapshot();
     _revision = base.revision;
-    if (_android) return base;
+    final voiceSettings = await _voice.settings();
+    if (_android) {
+      return LedgerSnapshot(
+        revision: base.revision,
+        transactions: base.transactions,
+        categories: base.categories,
+        rules: base.rules,
+        reports: base.reports,
+        settings: {...base.settings, ...voiceSettings},
+        capabilities: {
+          ...base.capabilities,
+          'speechAvailable': voiceSettings['hasSpeechKey'] == true,
+          'speechUsesCloud': true,
+        },
+        auth: base.auth,
+        launch: base.launch,
+      );
+    }
     var keys = <String?>[null, null];
     var needsReconfiguration = false;
     try {
@@ -123,6 +153,7 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
       reports: base.reports,
       settings: {
         ...base.settings,
+        ...voiceSettings,
         'hasDeepSeekKey': keys[0]?.isNotEmpty == true,
         'hasQwenKey': keys[1]?.isNotEmpty == true,
         'needsReconfiguration': needsReconfiguration,
@@ -130,6 +161,8 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
       },
       capabilities: {
         ...await _platform.capabilities(),
+        'speechAvailable': voiceSettings['hasSpeechKey'] == true,
+        'speechUsesCloud': true,
         'chatGptSupported': true,
       },
       auth: auth,
@@ -286,15 +319,20 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
         if (_android) return _store.invoke(method, arguments);
         return _ai.auth.listModels();
       case 'startSpeech':
-        if (_android) return _store.invoke(method, arguments);
-        return {'text': await _platform.startSpeech()};
+        return {'text': await _voice.start()};
       case 'stopSpeech':
-        if (_android) return _store.invoke(method, arguments);
-        await _platform.stopSpeech();
+        await _voice.stop();
         return null;
       case 'cancelSpeech':
-        if (_android) return _store.invoke(method, arguments);
-        await _platform.cancelSpeech();
+        await _voice.cancel();
+        return null;
+      case 'saveSpeechSettings':
+        await _voice.saveSettings(arguments);
+        _emit('changed');
+        return null;
+      case 'removeSpeechKey':
+        await _voice.removeKey();
+        _emit('changed');
         return null;
       case 'openSystemSettings':
         if (_android) return _store.invoke(method, arguments);
@@ -358,6 +396,8 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
     _closed = true;
     await _storeEvents.cancel();
     await _speechEvents?.cancel();
+    await _voiceEvents.cancel();
+    await _voice.dispose();
     await _authEvents?.cancel();
     await _ai.dispose();
     await _platform.dispose();

@@ -58,11 +58,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -100,6 +102,7 @@ class NativeLedgerBridge @Inject constructor(
     private var launchJob: Job? = null
     private val reportJobs = mutableMapOf<String, Job>()
 
+    @OptIn(FlowPreview::class)
     fun attach(activity: MainActivity, messenger: BinaryMessenger) {
         this.activity = activity
         scope.cancel()
@@ -110,7 +113,9 @@ class NativeLedgerBridge @Inject constructor(
             override fun onInvalidated(tables: Set<String>) { scope.launch { emit("changed") } }
         }.also(database.invalidationTracker::addObserver)
         scope.launch { auth.state.collect { emit("changed") } }
-        scope.launch { monitor.health.collect { emit("changed") } }
+        // A payment page can redraw rapidly. Coalesce diagnostic updates rather
+        // than reloading the entire ledger for every accessibility event.
+        scope.launch { monitor.health.debounce(300).collect { emit("changed") } }
         scope.launch { preferences.onboardingDone.collect { emit("changed") } }
         scope.launch { preferences.notificationCaptureEnabled.collect { emit("changed") } }
         scope.launch { preferences.screenCaptureEnabled.collect { emit("changed") } }
@@ -363,6 +368,10 @@ class NativeLedgerBridge @Inject constructor(
             "speechAvailable" to runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false),
             "notificationServiceConnected" to health.isBound,
             "accessibilityServiceConnected" to health.isAccessibilityBound,
+            "lastScreenEventTime" to health.lastScreenEventTime,
+            "lastScreenReadTime" to health.lastScreenReadTime,
+            "lastScreenPackage" to health.lastScreenPackage,
+            "screenCaptureStatus" to health.screenCaptureStatus,
             "todayCaptureCount" to health.todayCaptureCount, "duplicateCount" to health.duplicateCount,
             "lastCaptureAt" to health.lastNotificationTime, "lastError" to health.lastError
         )

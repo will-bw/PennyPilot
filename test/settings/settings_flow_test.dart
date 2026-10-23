@@ -125,6 +125,7 @@ void main() {
       final controller = await _controller(repository);
       addTearDown(controller.dispose);
       await _show(tester, CaptureSettingsScreen(controller: controller));
+      await tester.ensureVisible(find.widgetWithText(SwitchListTile, '通知云端解析'));
       await tester.tap(find.widgetWithText(SwitchListTile, '通知云端解析'));
       await tester.pumpAndSettle();
       expect(find.text('开启通知云端解析？'), findsOneWidget);
@@ -143,6 +144,9 @@ void main() {
       final controller = await _controller(repository);
       addTearDown(controller.dispose);
       await _show(tester, CaptureSettingsScreen(controller: controller));
+      await tester.ensureVisible(
+        find.widgetWithText(SwitchListTile, '读取可见支付结果'),
+      );
       await tester.tap(find.widgetWithText(SwitchListTile, '读取可见支付结果'));
       await tester.pumpAndSettle();
       expect(find.text('开启支付页面读取？'), findsOneWidget);

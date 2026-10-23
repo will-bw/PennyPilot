@@ -22,13 +22,16 @@ object PaymentTextParser {
         """验证码|领取优惠券|领券|立即领取|限时福利|最高可|支付立减|消费立减|(?:优惠券|优惠红包|优惠金)(?:已)?到账|(?:支付|付款|消费)成功(?:后|可|即可|有机会)|(?:支付|付款)可享|待领取"""
     )
     private val foreignCurrency = Regex("""美元|美金|港币|港元|日元|欧元|英镑|澳元|新加坡元|韩元|\b(?:USD|HKD|JPY|EUR|GBP|AUD|SGD|KRW)\b|US\$|HK\$""", RegexOption.IGNORE_CASE)
-    private val expenseCompleted = Regex("""(?:支付|付款|消费|交易|转账|扣款)(?:已)?成功|(?:已|完成|成功)(?:支付|付款|扣款)|(?:支付|付款)(?:已)?完成""")
+    private val expenseCompleted = Regex("""(?:支付|付款|消费|交易|转账|扣款)(?:已)?成功|(?:已|完成|成功)(?:支付|付款|转账|扣款)|(?:支付|付款|转账)(?:已)?完成""")
     private val incomeCompleted = Regex("""(?:收款|收钱)(?:已)?(?:到账|成功)|(?:转账|款项|资金)(?:已)?到账|(?:到账|入账)成功|(?:已收到|收到)[^\n，。；]{0,40}(?:转账|付款|红包)|已收款""")
     private val refundCompleted = Regex("""(?:退款|退回)(?:已)?(?:成功|到账|完成)|(?:已|成功)退款|(?:款项|资金)(?:已)?(?:原路)?退回|已原路退回""")
     private val incomeAction = Regex("""收款(?!方|商户|账户|人|码)|收钱(?!码)|到账|入账|收入|收到(?:转账|红包)""")
     private val paymentAction = Regex("""付款|支付|消费|转账|扣款""")
     private val historyScreen = Regex("""(?<!查看)(?:账单详情|交易详情|订单详情|退款详情)|历史订单|我的订单|全部订单|订单列表|交易记录|账单列表|收支明细|支付记录|交易账单""")
-    private val screenTitle = Regex("""^(?:支付成功|付款成功|消费成功|交易成功|转账成功|扣款成功|支付完成|付款完成|支付已完成|付款已完成|已支付|已付款|收款成功|收钱成功|收款到账|收钱到账|收款已到账|到账成功|入账成功|退款成功|退款到账|退款已到账|退款完成|退款已完成|已退款|款项已退回|已原路退回)[!！。]?$""")
+    private val screenTitle = Regex("""^(?:支付成功|付款成功|消费成功|交易成功|转账成功|转账已成功|已转账|转账完成|转账已完成|扣款成功|支付完成|付款完成|支付已完成|付款已完成|已支付|已付款|收款成功|收钱成功|收款到账|收钱到账|收款已到账|到账成功|入账成功|退款成功|退款到账|退款已到账|退款完成|退款已完成|已退款|款项已退回|已原路退回)[!！。]?$""")
+    private val completedTransferTitle = Regex("""^(?:转账(?:已)?成功|已转账|转账(?:已)?完成)[!！。]?$""")
+    private val recipientStatus = Regex("""(?:待|等待)对方(?:确认)?收款|对方(?:待|尚未|未|已)(?:确认)?收款""")
+    private val inlineTransferStatus = Regex("""^(转账(?:已)?成功|已转账|转账(?:已)?完成)[，,：:]\s*((?:待|等待)对方(?:确认)?收款|对方(?:待|尚未|未)(?:确认)?收款)(?=\s|[。！!]|$)""")
     private val nonReceiptScreen = Regex("""聊天记录|群聊|按住说话|发送消息|发消息|说点什么|写评论|发布评论|全部评论|视频评论|直播间|条评论|条未读|朋友圈|(?:^|\n)\s*(?:评论|推荐|关注|朋友|消息)\s*(?:\n|$)""")
     private val actualLabels = setOf("实际支付", "实际付款", "实付款", "实付金额", "实付", "实扣金额", "实扣")
     private val screenAmountLabels = actualLabels + setOf("支付金额", "付款金额", "消费金额", "交易金额", "扣款金额", "转账金额", "退款金额", "退回金额", "到账金额", "收款金额", "收钱金额", "入账金额", "收入金额")
@@ -61,10 +64,14 @@ object PaymentTextParser {
     /** 无障碍入口仅接受当前支付结果页，不将页面文字发送到云端。 */
     fun parseScreen(packageName: String, text: String): NotificationParseResult? {
         if (packageName !in PaymentAppRegistry.packages) return null
-        val normalized = normalize(text)
-        if (normalized.length > 16_000 || rejects(normalized) || historyScreen.containsMatchIn(normalized) || nonReceiptScreen.containsMatchIn(normalized)) return null
+        val normalized = normalize(text).replace(inlineTransferStatus, "$1\n$2")
+        // 付款方已完成转账后，收款方可能尚未确认；这不代表付款仍待完成。
+        // 必须同时存在独立完成标题，不能仅凭“待对方收款”或转账输入页判断已支出。
+        val completedTransfer = normalized.lines().any { completedTransferTitle.matches(it.trim()) }
+        val validationText = if (completedTransfer) normalized.replace(recipientStatus, "") else normalized
+        if (normalized.length > 16_000 || rejects(validationText) || historyScreen.containsMatchIn(normalized) || nonReceiptScreen.containsMatchIn(normalized)) return null
         if (!hasScreenReceiptStructure(normalized)) return null
-        return parseReceipt(packageName, normalized)
+        return parseReceipt(packageName, validationText)
     }
 
     internal fun isNotificationCandidate(packageName: String, title: String, content: String): Boolean {

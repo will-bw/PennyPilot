@@ -104,11 +104,16 @@ class CaptureProcessor @Inject constructor(
             CaptureEvidence(packageName = packageName, eventKey = eventKey, observedAt = occurredAt,
                 notificationKey = notificationKey, text = text, orderId = parsed.orderId))
         when (result) {
-            is CaptureResult.Duplicate -> { monitor.onDuplicate(); return true }
+            is CaptureResult.Duplicate -> {
+                monitor.onDuplicate()
+                if (source == TxSource.ACCESSIBILITY) monitor.onScreenStatus("duplicate")
+                return true
+            }
             CaptureResult.StaleRevision -> return false
             is CaptureResult.Inserted -> {
                 if (LedgerRevision.current != revision) return false
                 monitor.onNotificationCaptured()
+                if (source == TxSource.ACCESSIBILITY) monitor.onScreenStatus("saved")
                 try { refreshTodayCount() }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { monitor.onError("账目已保存，今日统计暂时不可用") }

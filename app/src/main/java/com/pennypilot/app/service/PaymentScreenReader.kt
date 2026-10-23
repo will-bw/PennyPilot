@@ -7,8 +7,12 @@ object PaymentScreenReader {
     private const val MAX_NODES = 250
     private const val MAX_CHARS = 12_000
 
+    data class Snapshot(val text: String?, val hasInput: Boolean)
+
+    fun read(root: AccessibilityNodeInfo, packageName: String): String? = inspect(root, packageName).text
+
     @Suppress("DEPRECATION")
-    fun read(root: AccessibilityNodeInfo, packageName: String): String? {
+    fun inspect(root: AccessibilityNodeInfo, packageName: String): Snapshot {
         var visited = 0
         var length = 0
         var incomplete = false
@@ -22,21 +26,24 @@ object PaymentScreenReader {
             if (node.isPassword || node.isEditable) { hasInput = true; return }
             val owner = node.packageName?.toString()
             if (owner != null && owner != packageName) return
-            val text = node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-                ?: node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-            if (text != null) {
+            // 部分支付页把状态放 text、金额放 contentDescription；两者都需要读取。
+            val nodeTexts = listOfNotNull(node.text?.toString(), node.contentDescription?.toString())
+                .map(String::trim).filter(String::isNotEmpty).distinct()
+            for (text in nodeTexts) {
                 length += text.length
                 if (length > MAX_CHARS) { incomplete = true; return }
                 lines.add(text)
             }
             for (i in 0 until node.childCount) {
-                val child = node.getChild(i) ?: continue
+                val child = node.getChild(i)
+                if (child == null) { incomplete = true; break }
                 try { visit(child, depth + 1) } finally { child.recycle() }
                 if (incomplete) break
             }
         }
         visit(root, 0)
         // 完整性不足时不能丢弃尾部“未支付/退款中”等上下文再入账。
-        return if (incomplete || hasInput) null else lines.joinToString("\n").takeIf { it.isNotBlank() }
+        val text = if (incomplete || hasInput) null else lines.joinToString("\n").takeIf { it.isNotBlank() }
+        return Snapshot(text, hasInput)
     }
 }

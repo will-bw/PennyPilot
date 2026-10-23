@@ -11,7 +11,7 @@
 android, ios
 
 ## Stack
-Flutter / Dart 共用界面、账务业务、AI 解析与问账；Android 保留 Room、支付采集和原有 ChatGPT 账号适配器以兼容现有数据。iOS 使用 SQLite、Keychain、系统语音和系统内嵌浏览器登录。保留 com.pennypilot.app 应用 ID；两端使用同一 JSON 备份格式。
+Flutter / Dart 共用界面、账务业务、AI 解析、问账与录音转写；Android 保留 Room、支付采集和原有 ChatGPT 账号适配器以兼容现有数据。iOS 使用 SQLite、Keychain 和系统内嵌浏览器登录。两端语音转写使用独立配置的云端语音模型。保留 com.pennypilot.app 应用 ID；两端使用同一 JSON 备份格式。
 
 ## Scope
 尽量完整支持 Android 与 iOS：账单录入与编辑、文字/语音解析、AI 问账、分类、搜索筛选、月份切换、预算、待确认、月报、备份恢复与权限引导。Android 的跨应用通知/页面采集属于平台扩展，iOS 不显示其授权入口。当前不包含桌面/Web 发布和云端自动同步；以实际构建与设备测试记录描述验收状态。

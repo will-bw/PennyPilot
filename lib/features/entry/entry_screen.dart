@@ -4,6 +4,7 @@ import '../../core/ledger_controller.dart';
 import '../../core/models.dart';
 import '../../ui/common.dart';
 import '../../ui/theme.dart';
+import '../settings/voice_settings_screen.dart';
 
 class EntryScreen extends StatefulWidget {
   const EntryScreen({
@@ -491,11 +492,25 @@ class _AiEntry extends StatefulWidget {
   State<_AiEntry> createState() => _AiEntryState();
 }
 
-class _AiEntryState extends State<_AiEntry> {
+class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
   final input = TextEditingController();
   bool voice = false;
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused && widget.controller.isRecording) {
+      widget.controller.cancelSpeech().catchError((Object _) {});
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     input.dispose();
     if (widget.controller.isRecording) {
       widget.controller.cancelSpeech().catchError((Object _) {});
@@ -530,11 +545,22 @@ class _AiEntryState extends State<_AiEntry> {
           runSpacing: 8,
           children: [
             OutlinedButton.icon(
-              onPressed: c.isParsing
+              onPressed:
+                  c.isParsing ||
+                      c.isTranscribing ||
+                      (c.isRecording && c.speechState == 'preparing')
                   ? null
                   : () async {
                       if (c.isRecording) {
                         await runUi(context, c.stopSpeech);
+                        return;
+                      }
+                      if (c.settings['hasSpeechKey'] != true) {
+                        await Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => VoiceSettingsScreen(controller: c),
+                          ),
+                        );
                         return;
                       }
                       await runUi(context, () async {
@@ -546,8 +572,30 @@ class _AiEntryState extends State<_AiEntry> {
                       });
                     },
               icon: Icon(c.isRecording ? Icons.stop : Icons.mic_none),
-              label: Text(c.isRecording ? '结束录音' : '语音输入'),
+              label: Text(
+                c.isTranscribing
+                    ? '正在转写…'
+                    : c.isRecording
+                    ? '结束录音'
+                    : '语音输入',
+              ),
             ),
+            if (!c.isRecording)
+              TextButton(
+                onPressed: c.isParsing
+                    ? null
+                    : () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => VoiceSettingsScreen(controller: c),
+                        ),
+                      ),
+                child: const Text('语音模型'),
+              ),
+            if (c.isRecording)
+              TextButton(
+                onPressed: () => runUi(context, c.cancelSpeech),
+                child: const Text('取消'),
+              ),
             FilledButton.icon(
               onPressed: c.isParsing || c.isRecording
                   ? null
@@ -603,7 +651,11 @@ class _AiEntryState extends State<_AiEntry> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  c.speechText.isEmpty ? '正在听，请说出金额和用途…' : c.speechText,
+                  c.isTranscribing
+                      ? '录音已结束，正在转写成文字…'
+                      : c.speechState == 'preparing'
+                      ? '正在准备麦克风…'
+                      : '正在录音，请说出金额和用途，最长 60 秒。',
                 ),
               ),
             ],
@@ -637,7 +689,7 @@ class _AiEntryState extends State<_AiEntry> {
         ],
         const SizedBox(height: 24),
         Text(
-          '文字与语音识别内容会发送至你配置的 AI 服务。请勿输入与记账无关的敏感信息。',
+          '录音发送至语音模型，转写文字在点击“识别账单”后发送至 AI 服务。请勿输入与记账无关的敏感信息。',
           style: TextStyle(
             fontSize: 12,
             height: 1.6,

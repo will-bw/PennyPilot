@@ -191,4 +191,38 @@ class PaymentTextParserTest {
     fun `oversized screen is rejected`() {
         assertNull(PaymentTextParser.parseScreen(wechat, "支付成功\n¥18.00\n" + "长页面".repeat(6000)))
     }
+
+    @Test
+    fun `completed sender transfer is expense while recipient has not accepted`() {
+        val titles = listOf("转账成功", "转账已成功", "已转账", "转账完成", "转账已完成")
+        val statuses = listOf("待对方收款", "等待对方确认收款", "对方待收款", "对方未收款", "对方尚未收款", "对方已收款", "对方已确认收款")
+        titles.forEach { title -> statuses.forEach { status ->
+            val text = "$title\n￥18.00\n收款方\n小明\n$status\n完成"
+            val parsed = PaymentTextParser.parseScreen(wechat, text)
+            assertEquals(text, 1800L, parsed?.amountCents)
+            assertEquals(text, "EXPENSE", parsed?.direction)
+            assertEquals(text, "小明", parsed?.merchant)
+        } }
+        assertEquals("EXPENSE", PaymentTextParser.parseScreen(wechat,
+            "已转账，待对方确认收款\n￥18.00\n完成")?.direction)
+    }
+
+    @Test
+    fun `recipient waiting alone and unconfirmed transfer are never expenses`() {
+        listOf("待对方收款", "对方待收款", "转账给小明", "确认转账", "转账中", "转账失败",
+            "转账已取消", "等待收款", "转账成功\n待付款", "已转账\n转账失败").forEach { title ->
+            assertNull(title, PaymentTextParser.parseScreen(wechat, "$title\n￥18.00\n完成"))
+        }
+        assertNull(PaymentTextParser.parseScreen(wechat, "聊天记录\n已转账\n￥18.00\n待对方收款"))
+        assertNull(PaymentTextParser.parseScreen(wechat, "账单详情\n已转账\n￥18.00\n待对方收款"))
+    }
+
+    @Test
+    fun `all registered app packages parse complete receipts without notification evidence`() {
+        PaymentAppRegistry.packages.forEach { packageName ->
+            assertEquals(packageName, 1850L, PaymentTextParser.parseScreen(packageName,
+                "支付成功\n￥18.50\n收款方\n便利店\n完成")?.amountCents)
+        }
+    }
+
 }

@@ -36,6 +36,9 @@ class LedgerController extends ChangeNotifier {
   bool get isParsing => busyFor('parseText');
   bool get isAsking => busyFor('ask');
   bool get isRecording => busyFor('startSpeech');
+  String _speechState = 'idle';
+  String get speechState => _speechState;
+  bool get isTranscribing => _speechState == 'transcribing';
   List<LedgerTransaction> get transactions =>
       _snapshot?.transactions ?? const [];
   List<LedgerCategory> get categories => _snapshot?.categories ?? const [];
@@ -164,6 +167,9 @@ class LedgerController extends ChangeNotifier {
         _notify();
       case 'speech':
         _speechText = event.data['text'] as String? ?? '';
+        _notify();
+      case 'speechState':
+        _speechState = event.data['state'] as String? ?? 'idle';
         _notify();
       case 'report':
         final month = event.data['yearMonth'] as String?;
@@ -697,6 +703,14 @@ class LedgerController extends ChangeNotifier {
     await command('updateSettings', arguments: values);
   }
 
+  Future<void> saveSpeechSettings(Map<String, dynamic> values) async {
+    await command('saveSpeechSettings', arguments: values);
+  }
+
+  Future<void> removeSpeechKey() async {
+    await command('removeSpeechKey');
+  }
+
   Future<void> setBudget(int fen) async {
     if (fen < 0 || fen > maxTransactionFen) {
       throw const LedgerException('预算应在 0 至 9,999,999.99 元之间。');
@@ -717,10 +731,18 @@ class LedgerController extends ChangeNotifier {
   Future<String> startSpeech() => _operation('startSpeech', () async {
     final generation = _generation;
     _speechText = '';
-    final result = stringMap(await _repository.invoke('startSpeech', const {}));
-    _requireCurrent(generation);
-    _speechText = result['text'] as String? ?? '';
-    return _speechText;
+    _speechState = 'preparing';
+    _notify();
+    try {
+      final result = stringMap(
+        await _repository.invoke('startSpeech', const {}),
+      );
+      _requireCurrent(generation);
+      _speechText = result['text'] as String? ?? '';
+      return _speechText;
+    } finally {
+      _speechState = 'idle';
+    }
   });
   Future<void> stopSpeech() async {
     await command('stopSpeech', refreshAfter: false);
@@ -729,6 +751,7 @@ class LedgerController extends ChangeNotifier {
   Future<void> cancelSpeech() async {
     await command('cancelSpeech', refreshAfter: false);
     _speechText = '';
+    _speechState = 'idle';
     _notify();
   }
 

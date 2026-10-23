@@ -38,4 +38,15 @@ class PaymentScreenSessionTest {
         assertNull(session.observe(pkg, 1, payment.copy(orderId = "20261023000001"), 2100))
         assertNotEquals(key, session.observe(pkg, 1, payment.copy(orderId = "20261023000002"), 2200))
     }
+
+    @Test fun `late merchant and order details do not create a second payment`() {
+        val session = PaymentScreenSession()
+        val key = session.observe(pkg, 1, payment.copy(merchant = null), 1000)!!
+        session.markHandled(key)
+        assertNull(session.observe(pkg, 1, payment, 1500))
+        assertNull(session.observe(pkg, 1, payment.copy(orderId = "202610240001"), 2000))
+        assertNull(session.observe(pkg, 1, payment.copy(merchant = null), 3000))
+        assertNotEquals(key, session.observe(pkg, 1, payment.copy(orderId = "202610240002"), 4000))
+    }
+
 }

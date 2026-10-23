@@ -122,6 +122,56 @@ void main() {
     expect(credentials.values, isEmpty);
   });
 
+  test('voice credentials stay outside ledger settings and backup', () async {
+    await repository.invoke('saveSpeechSettings', {
+      'provider': 'qwen',
+      'baseUrl': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'model': 'qwen3-asr-flash',
+      'apiKey': 'private-asr-test-key',
+    });
+    expect(store.calls, isEmpty);
+    expect(
+      credentials.values['voiceConfiguration'],
+      contains('private-asr-test-key'),
+    );
+    final state = await repository.snapshot();
+    expect(state.settings['hasSpeechKey'], isTrue);
+    expect(state.settings['speechModel'], 'qwen3-asr-flash');
+    expect(jsonEncode(state.settings), isNot(contains('private-asr-test-key')));
+    expect(state.capabilities['speechUsesCloud'], isTrue);
+    final backup = await repository.invoke('exportBackupData', {});
+    expect(jsonEncode(backup), isNot(contains('private-asr-test-key')));
+    await repository.invoke('removeSpeechKey', {});
+    expect((await repository.snapshot()).settings['hasSpeechKey'], isFalse);
+  });
+
+  test(
+    'Android voice routes through shared transcription instead of native recognizer',
+    () async {
+      await repository.close();
+      repository = CrossPlatformLedgerRepository(
+        store: store,
+        credentials: credentials,
+        platformServices: platform,
+        android: true,
+      );
+      await expectLater(
+        repository.invoke('startSpeech', {}),
+        throwsA(
+          isA<LedgerException>().having(
+            (e) => e.code,
+            'code',
+            'SPEECH_NOT_CONFIGURED',
+          ),
+        ),
+      );
+      expect(
+        store.calls.where((call) => call.method == 'startSpeech'),
+        isEmpty,
+      );
+    },
+  );
+
   test(
     'unavailable Keychain does not hide the local ledger or erase secrets',
     () async {

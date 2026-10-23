@@ -15,7 +15,12 @@ data class ServiceHealth(
     val todayCaptureCount: Int = 0,
     val duplicateCount: Int = 0,
     val lastError: String? = null,
-    val countDate: LocalDate = LocalDate.now()
+    val countDate: LocalDate = LocalDate.now(),
+    // 仅记录诊断状态，不保存屏幕文本、聊天或输入内容。
+    val lastScreenEventTime: Long = 0L,
+    val lastScreenReadTime: Long = 0L,
+    val lastScreenPackage: String? = null,
+    val screenCaptureStatus: String = "waiting"
 )
 
 @Singleton
@@ -35,8 +40,16 @@ class CaptureServiceMonitor @Inject constructor() {
         _health.update { it.copy(lastNotificationTime = System.currentTimeMillis(), lastError = null) }
     }
 
-    fun onAccessibilityConnected() { _health.update { it.copy(isAccessibilityBound = true) } }
-    fun onAccessibilityDisconnected() { _health.update { it.copy(isAccessibilityBound = false) } }
+    fun onAccessibilityConnected() { _health.update { it.copy(isAccessibilityBound = true, screenCaptureStatus = "waiting") } }
+    fun onAccessibilityDisconnected() { _health.update { it.copy(isAccessibilityBound = false, screenCaptureStatus = "disconnected") } }
+    fun onScreenEvent(packageName: String) {
+        _health.update { it.copy(lastScreenEventTime = System.currentTimeMillis(), lastScreenPackage = packageName,
+            screenCaptureStatus = "event_received") }
+    }
+    fun onScreenRead(status: String) {
+        _health.update { it.copy(lastScreenReadTime = System.currentTimeMillis(), screenCaptureStatus = status) }
+    }
+    fun onScreenStatus(status: String) { _health.update { it.copy(screenCaptureStatus = status) } }
     fun onDuplicate() { _health.update { it.copy(duplicateCount = it.duplicateCount + 1) } }
     fun onError(message: String) { _health.update { it.copy(lastError = message) } }
 

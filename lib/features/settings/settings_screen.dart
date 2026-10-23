@@ -10,6 +10,7 @@ import 'categories_screen.dart';
 import 'rules_screen.dart';
 import 'settings_widgets.dart';
 import 'update_settings_screen.dart';
+import 'voice_settings_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.controller});
@@ -217,6 +218,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     icon: Icons.tune_outlined,
                     onTap: () =>
                         _open(AiSettingsScreen(controller: widget.controller)),
+                  ),
+                  SettingsRow(
+                    title: '语音模型',
+                    subtitle: settings['hasSpeechKey'] == true
+                        ? '${settings['speechModel']} · 可录音测试'
+                        : '配置语音转写服务与模型',
+                    icon: Icons.mic_none,
+                    onTap: () => _open(
+                      VoiceSettingsScreen(controller: widget.controller),
+                    ),
                   ),
                   if (!android)
                     SettingsRow(

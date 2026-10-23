@@ -22,7 +22,7 @@ Errors use `PlatformException(code, message)` with a user-facing Chinese message
 - `rules`: `{id,appPackage,regexAmount,regexMerchant,directionHint,enabled,priority}`
 - `reports`: `{id,yearMonth,totalExpense,totalIncome,byCategoryJson,llmSummary,generatedAt}`; report totals are positive cents.
 - `settings`: `{onboardingDone,notificationCaptureEnabled,screenCaptureEnabled,notificationCloudParsingEnabled,lastBackupAt,budgetCents,themeMode,activeProvider,deepSeekModel,qwenModel,qwenBaseUrl,hasDeepSeekKey,hasQwenKey,needsReconfiguration,chatGptModel}`. themeMode = system/light/dark; budgetCents=0 disables budget. Secret keys are never returned.
-- `capabilities`: `{platform:"android",notificationListenerGranted,accessibilityGranted,remindersEnabled,microphoneGranted,batteryExempt,speechAvailable,notificationServiceConnected,accessibilityServiceConnected,todayCaptureCount,duplicateCount,lastCaptureAt,lastError}`
+- `capabilities`: `{platform:"android",notificationListenerGranted,accessibilityGranted,remindersEnabled,microphoneGranted,batteryExempt,speechAvailable,notificationServiceConnected,accessibilityServiceConnected,todayCaptureCount,duplicateCount,lastCaptureAt,lastError,lastScreenEventTime,lastScreenReadTime,lastScreenPackage,screenCaptureStatus}`. Page diagnostics contain timestamps, a supported package name, and a status only; never page text. Status codes: `waiting`, `disabled`, `disconnected`, `event_received`, `unreadable`, `protected`, `not_receipt`, `parsed`, `saved`, `duplicate`, `error`. Connection/authorization alone does not imply `screenCaptureEnabled`.
 - `auth`: `{accounts:[{id,email,canUsePlan,isSignedIn}],activeAccountId,isAuthorizing,loginUrl,error,showWelcome}`. No tokens cross the bridge.
 - `launch`: nullable `{transactionId,route}`; consumed once. Notification IDs are validated against capture identity.
 
@@ -57,6 +57,7 @@ Every event is a map with `type` and `revision`.
 - `{type:"restored",revision}`: clear drafts, navigation, pending AI results; reload.
 - `{type:"launch",revision,transactionId?,route?}`: validated notification navigation.
 - `{type:"speech",revision,text}`: live partial transcription.
+- `{type:"speechState",revision,state:preparing|recording|transcribing|idle}`: shared cloud transcription lifecycle. A completed transcript is returned by `startSpeech`, not automatically parsed or saved.
 - `{type:"report",revision,yearMonth,state}`: ENQUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED/BLOCKED.
 
 Android owns its Room persistence and capture services. Dart never directly opens
@@ -65,6 +66,21 @@ Android encrypted preferences or iOS Keychain. Only `has…Key` flags enter snap
 `readAiCredential {key:deepSeekKey|qwenKey}` is an app-internal Android adapter call:
 it reads the selected API key into transient Dart memory for a request. It must
 never be logged, returned to UI state, exported, or exposed to AI tools.
+
+## Shared voice configuration and transcription
+
+The Flutter application routes `startSpeech`, `stopSpeech` and `cancelSpeech` to
+`VoiceTranscriptionService` on both Android and iOS. The old native recognizer
+commands remain internal legacy interfaces; the current UI does not depend on
+an installed system recognition service. Direct microphone PCM is wrapped as
+16 kHz mono WAV in memory; recording is bounded to 60 seconds and requests to
+45 seconds. Cancellation drops the session and late results.
+
+- `saveSpeechSettings {provider:qwen|compatible,baseUrl,model,apiKey?:""}` saves one encrypted configuration; an empty key retains the previous key. Changing the endpoint origin requires a replacement key.
+- `removeSpeechKey {}` removes the saved key while retaining model and endpoint.
+- Shared snapshots add `speechProvider`, `speechBaseUrl`, `speechModel`, `hasSpeechKey` and optionally `speechConfigurationError` to settings. Keys and audio never enter snapshots or ledger backups.
+- Capabilities add `speechUsesCloud:true`; `speechAvailable` reflects whether a key is configured, not proof that a remote endpoint or account is working. The user can perform a real recording test in settings.
+- The Qwen adapter posts input-audio data URLs to `/chat/completions`; compatible services receive a multipart WAV at `/audio/transcriptions`. HTTPS is required, redirects are refused, and responses are bounded and sanitized.
 
 ## Portable backup and report adapter commands (0.3.0)
 

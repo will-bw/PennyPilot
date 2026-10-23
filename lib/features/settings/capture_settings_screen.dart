@@ -3,6 +3,44 @@ import 'package:pennypilot/core/ledger_controller.dart';
 
 import 'settings_widgets.dart';
 
+String screenCaptureStatusLabel(String? status) => switch (status) {
+  'disabled' => '页面读取已暂停',
+  'disconnected' => '页面读取服务已断开',
+  'event_received' => '已收到页面变化',
+  'unreadable' => '页面暂时无法读取',
+  'protected' => '已跳过输入或受保护页面',
+  'not_receipt' => '未识别到完整支付凭证',
+  'parsed' => '已识别，正在保存',
+  'saved' => '已生成待确认账单',
+  'duplicate' => '重复页面已拦截',
+  'error' => '页面处理未完成',
+  _ => '等待支付页面事件',
+};
+
+String screenCaptureStatusDetail(String? status) => switch (status) {
+  'disabled' => '开启“读取可见支付结果”后再进行页面识别。',
+  'disconnected' => '检查系统无障碍设置，重新开启服务后返回刷新。',
+  'event_received' => '正在等待页面内容稳定。',
+  'unreadable' => '支付应用未提供可读取的页面文字，或结果页已离开；请核对流水，必要时补记。',
+  'protected' => '输入框、密码或不完整页面不会用于记账，避免误读聊天或待支付内容。',
+  'not_receipt' => '没有同时找到明确完成状态和有效金额。失败、待支付、聊天和历史页面也会被跳过。',
+  'parsed' => '正在将识别出的交易字段保存到待确认列表。',
+  'saved' => '请回到流水核对；即使关闭记账提醒，也可在待确认列表中查看。',
+  'duplicate' => '同一页面不会反复生成账单，请查看已有待确认记录。',
+  'error' => '请查看下方运行记录，检查权限并核对最近交易。',
+  _ => '完成支付后在结果页稍作停留。若时间一直不更新，请核对应用内开关、系统授权和服务连接。',
+};
+
+String captureAppLabel(String packageName) => switch (packageName) {
+  'com.tencent.mm' => '微信',
+  'com.eg.android.AlipayGphone' => '支付宝',
+  'com.sankuai.meituan' => '美团',
+  'com.sankuai.meituan.takeoutnew' => '美团外卖',
+  'com.ss.android.ugc.aweme' => '抖音',
+  'com.ss.android.ugc.aweme.lite' => '抖音极速版',
+  _ => '支付应用',
+};
+
 class CaptureSettingsScreen extends StatefulWidget {
   const CaptureSettingsScreen({super.key, required this.controller});
   final LedgerController controller;
@@ -154,11 +192,9 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                 ),
                 const SizedBox(height: 24),
                 _permission(
-                  title: '麦克风与语音识别',
-                  detail: '首次点击语音录入时请求授权。识别结果会交给你选择的 AI 服务解析，经你核对后保存。',
-                  granted:
-                      capabilities['microphoneGranted'] == true &&
-                      capabilities['speechRecognitionGranted'] == true,
+                  title: '麦克风',
+                  detail: '在“语音模型”中配置转写服务。首次录音时请求麦克风授权，转写文字经 AI 解析、由你核对后保存。',
+                  granted: capabilities['microphoneGranted'] == true,
                   target: 'microphone',
                   button: '打开应用设置',
                 ),
@@ -197,6 +233,48 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
             children: [
               if (_busy) const LinearProgressIndicator(),
               if (_error != null) SettingsNotice(_error!, error: true),
+              SettingsSection(
+                title: '无通知转账',
+                description: '微信没有发出支付通知时，需要通过无障碍服务读取当前转账结果页。',
+                children: [
+                  SettingsRow(
+                    title: !screen
+                        ? '页面采集尚未开启'
+                        : !accessibilityGranted
+                        ? '等待无障碍授权'
+                        : !accessibilityConnected
+                        ? '已授权，服务尚未连接'
+                        : '页面采集已就绪',
+                    subtitle: !screen
+                        ? (accessibilityGranted
+                              ? '系统已授权，但应用内开关仍关闭。开启页面读取后才能识别没有通知的转账。'
+                              : '开启页面读取并授予无障碍权限，才能识别没有通知的转账。')
+                        : !accessibilityGranted
+                        ? '应用内已开启，请在系统中允许 PennyPilot 无障碍服务。'
+                        : !accessibilityConnected
+                        ? '请在系统无障碍设置中关闭后重新开启 PennyPilot，再返回刷新。'
+                        : '完成支付后，在结果页稍作停留，再回到流水查看待确认账单。',
+                    icon:
+                        screen && accessibilityGranted && accessibilityConnected
+                        ? Icons.check_circle_outline
+                        : Icons.info_outline,
+                    onTap: _busy
+                        ? null
+                        : !screen
+                        ? () => _setScreen(true)
+                        : !accessibilityGranted || !accessibilityConnected
+                        ? () => _run(
+                            () => widget.controller.openSystemSettings(
+                              'accessibility',
+                            ),
+                          )
+                        : null,
+                  ),
+                  const SettingsNotice(
+                    '仅识别可读取的支付结果，不会点击或执行转账。聊天中的转账卡片、历史账单和未完成付款不会自动入账；无法读取的页面请手动或语音补记。',
+                  ),
+                ],
+              ),
               SettingsSection(
                 title: '支付通知',
                 description: '识别结果先进入待确认账单，核对后再计入收支。',
@@ -267,7 +345,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                       vertical: 10,
                     ),
                     title: const Text('读取可见支付结果'),
-                    subtitle: const Text('通过无障碍服务补充识别支付结果页面。默认关闭。'),
+                    subtitle: const Text('识别没有通知的支付或转账结果。应用内开关与系统无障碍授权需要同时开启。'),
                     value: screen,
                     onChanged: _busy ? null : _setScreen,
                   ),
@@ -341,11 +419,46 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                     title: '麦克风',
                     granted: capabilities['microphoneGranted'] == true,
                     target: 'microphone',
-                    detail: capabilities['speechAvailable'] == true
-                        ? '语音录入使用设备提供的语音识别服务。'
-                        : '当前设备未发现可用的语音识别服务，仍可使用文字记账。',
+                    detail: '在“语音模型”中配置转写服务并测试录音。云端转写无需安装系统语音识别服务。',
                     button: '查看麦克风权限',
                   ),
+                ],
+              ),
+              SettingsSection(
+                title: '页面识别诊断',
+                description: '转账后返回本页可查看处理停在哪一步。仅记录状态和时间，不保存页面全文。',
+                children: [
+                  SettingsRow(
+                    title: screenCaptureStatusLabel(
+                      capabilities['screenCaptureStatus'] as String?,
+                    ),
+                    subtitle: screenCaptureStatusDetail(
+                      capabilities['screenCaptureStatus'] as String?,
+                    ),
+                  ),
+                  SettingsRow(
+                    title: '最近收到页面事件',
+                    subtitle: settingsTimestamp(
+                      (capabilities['lastScreenEventTime'] as num?)?.toInt() ??
+                          0,
+                    ),
+                  ),
+                  SettingsRow(
+                    title: '最近读取页面',
+                    subtitle: settingsTimestamp(
+                      (capabilities['lastScreenReadTime'] as num?)?.toInt() ??
+                          0,
+                    ),
+                  ),
+                  if ((capabilities['lastScreenPackage'] as String?)
+                          ?.isNotEmpty ==
+                      true)
+                    SettingsRow(
+                      title: '最近事件应用',
+                      subtitle: captureAppLabel(
+                        capabilities['lastScreenPackage'] as String,
+                      ),
+                    ),
                 ],
               ),
               SettingsSection(
