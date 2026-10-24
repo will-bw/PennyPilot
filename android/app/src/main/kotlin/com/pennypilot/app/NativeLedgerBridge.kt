@@ -1,7 +1,6 @@
 package com.pennypilot.app
 
 import android.Manifest
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -12,7 +11,6 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.speech.SpeechRecognizer
-import android.view.accessibility.AccessibilityManager
 import androidx.core.content.ContextCompat
 import androidx.room.InvalidationTracker
 import androidx.room.withTransaction
@@ -46,7 +44,7 @@ import com.pennypilot.app.service.CaptureProcessor
 import com.pennypilot.app.service.CaptureServiceMonitor
 import com.pennypilot.app.service.NotificationCaptorService
 import com.pennypilot.app.service.NotificationHelper
-import com.pennypilot.app.service.PaymentAccessibilityService
+import com.pennypilot.app.service.PaymentAccessibilityPermission
 import com.pennypilot.app.util.MoneyUtil
 import com.pennypilot.app.worker.MonthlyReportWorker
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -384,14 +382,7 @@ class NativeLedgerBridge @Inject constructor(
             Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
                 ?.split(':')?.any { ComponentName.unflattenFromString(it) == component } == true
         }.getOrDefault(false)
-        val accessibilityComponent = ComponentName(context, PaymentAccessibilityService::class.java)
-        val accessibilityGranted = runCatching {
-            context.getSystemService(AccessibilityManager::class.java)
-                ?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)?.any {
-                    val service = it.resolveInfo.serviceInfo
-                    ComponentName(service.packageName, service.name) == accessibilityComponent
-                } == true
-        }.getOrDefault(false)
+        val accessibilityGranted = PaymentAccessibilityPermission.isGranted(context)
         val health = monitor.health.value
         return mapOf(
             "platform" to "android", "notificationListenerGranted" to listenerGranted,

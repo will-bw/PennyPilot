@@ -93,6 +93,15 @@ an installed system recognition service. Direct microphone PCM is wrapped as
 
 ## Android source boundary
 
+`accessibilityGranted` reflects the current system-saved authorization for the
+exact PennyPilot service component, independently of `accessibilityServiceConnected`.
+The latter reflects this process's service connection callback. After background
+cleanup or process restart, authorization can remain true while connection is
+false. An empty system authorization list revokes the grant; it is never inferred
+from a cached app preference. The manager service list is a fallback only when
+the system setting cannot be read. A battery exemption does not establish OEM
+autostart or protection from one-tap cleanup.
+
 `android/app` hosts the new `MainActivity` and `NativeLedgerBridge`. Its
 `prepareNativeCore` Gradle Sync task tracks and copies the existing Kotlin backend
 into a generated build directory, excluding the previous Compose UI, previous

@@ -3,6 +3,7 @@ import 'package:pennypilot/core/ledger_controller.dart';
 
 import 'settings_widgets.dart';
 import 'capture_diagnostic_screen.dart';
+import 'capture_background_guidance.dart';
 
 String screenCaptureStatusLabel(String? status) => switch (status) {
   'disabled' => '页面读取已暂停',
@@ -36,7 +37,7 @@ String screenCaptureStatusLabel(String? status) => switch (status) {
 
 String screenCaptureStatusDetail(String? status) => switch (status) {
   'disabled' => '开启“读取可见支付结果”后再进行页面识别。',
-  'disconnected' => '检查系统无障碍设置，重新开启服务后返回刷新。',
+  'disconnected' => '先刷新状态，并检查自启动与后台限制；持续未连接时，再到系统无障碍设置中关闭后重新开启服务。',
   'event_received' => '正在等待页面内容稳定。',
   'unreadable' => '支付应用未提供可读取的页面文字，或结果页已离开；请核对流水，必要时补记。',
   'protected' => '输入框、密码或不完整页面不会用于记账，避免误读聊天或待支付内容。',
@@ -393,7 +394,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                         : !accessibilityGranted
                         ? '应用内已开启，请在系统中允许 PennyPilot 无障碍服务。'
                         : !accessibilityConnected
-                        ? '请在系统无障碍设置中关闭后重新开启 PennyPilot，再返回刷新。'
+                        ? '系统授权仍保留。清理后台后可能尚未恢复，点此刷新；持续未连接时检查自启动与后台限制。'
                         : '完成支付后，在结果页稍作停留，再回到流水查看待确认账单。',
                     icon:
                         screen && accessibilityGranted && accessibilityConnected
@@ -403,14 +404,27 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                         ? null
                         : !screen
                         ? () => _setScreen(true)
-                        : !accessibilityGranted || !accessibilityConnected
+                        : !accessibilityGranted
                         ? () => _run(
                             () => widget.controller.openSystemSettings(
                               'accessibility',
                             ),
                           )
+                        : !accessibilityConnected
+                        ? () => _run(widget.controller.refresh)
                         : null,
                   ),
+                  if (screen && !accessibilityConnected)
+                    SettingsRow(
+                      title: '检查自启动与后台限制',
+                      subtitle: '允许自启动、放开省电限制，并锁定后台任务。详细方法见下方“提醒与后台”。',
+                      icon: Icons.battery_saver_outlined,
+                      onTap: _busy
+                          ? null
+                          : () => _run(
+                              () => widget.controller.openSystemSettings('app'),
+                            ),
+                    ),
                   const SettingsNotice(
                     '仅识别可读取的支付结果，不会点击或执行转账。聊天中的转账卡片、历史账单和未完成付款不会自动入账；无法读取的页面请手动或语音补记。',
                   ),
@@ -556,6 +570,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                             () => widget.controller.openSystemSettings('app'),
                           ),
                   ),
+                  const SettingsNotice(captureBackgroundGuidance),
                   _permission(
                     title: '麦克风',
                     granted: capabilities['microphoneGranted'] == true,

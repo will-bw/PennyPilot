@@ -1,12 +1,10 @@
 package com.pennypilot.app.ui.settings
 
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
-import android.view.accessibility.AccessibilityManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.*
@@ -31,7 +29,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennypilot.app.service.NotificationCaptorService
 import com.pennypilot.app.service.NotificationHelper
-import com.pennypilot.app.service.PaymentAccessibilityService
+import com.pennypilot.app.service.PaymentAccessibilityPermission
 import com.pennypilot.app.ui.theme.PennyMotion
 import com.pennypilot.app.ui.theme.pendingAmberColor
 import java.time.Instant
@@ -246,12 +244,7 @@ internal fun isNotificationListenerGranted(context: Context): Boolean {
 }
 
 private fun isPaymentAccessibilityGranted(context: Context): Boolean {
-    val component = ComponentName(context, PaymentAccessibilityService::class.java)
-    val manager = context.getSystemService(AccessibilityManager::class.java) ?: return false
-    return manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any {
-        val service = it.resolveInfo.serviceInfo
-        ComponentName(service.packageName, service.name) == component
-    }
+    return PaymentAccessibilityPermission.isGranted(context)
 }
 
 private fun openCaptureSystemSettings(context: Context, intent: Intent, failure: String): String? = try {

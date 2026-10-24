@@ -1,11 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
+import 'package:pennypilot/core/models.dart';
 import 'package:pennypilot/features/settings/capture_settings_screen.dart';
 import 'package:pennypilot/features/settings/settings_widgets.dart';
 import 'package:pennypilot/ui/theme.dart';
 
 import '../ui/test_ledger_repository.dart';
+
+class _CaptureRepository extends TestLedgerRepository {
+  @override
+  Future<Object?> invoke(String method, Map<String, dynamic> arguments) async {
+    if (method == 'openSystemSettings') {
+      calls.add((method: method, arguments: arguments));
+      return null;
+    }
+    return super.invoke(method, arguments);
+  }
+}
 
 Future<TestLedgerRepository> showCapture(
   WidgetTester tester, {
@@ -27,7 +39,7 @@ Future<TestLedgerRepository> showCapture(
     tester.view.resetDevicePixelRatio();
     tester.platformDispatcher.clearTextScaleFactorTestValue();
   });
-  final repository = TestLedgerRepository();
+  final repository = _CaptureRepository();
   (repository.data['settings'] as Map)['screenCaptureEnabled'] = enabled;
   (repository.data['capabilities'] as Map<String, dynamic>).addAll({
     'accessibilityGranted': granted,
@@ -90,11 +102,42 @@ void main() {
   testWidgets(
     'granted permission with disconnected service requires recovery',
     (tester) async {
-      await showCapture(tester, enabled: true, connected: false);
+      final repository = await showCapture(
+        tester,
+        enabled: true,
+        connected: false,
+      );
       expect(find.text('已授权，服务尚未连接'), findsOneWidget);
+      expect(find.textContaining('系统授权仍保留'), findsOneWidget);
+      expect(find.text('等待无障碍授权'), findsNothing);
       expect(find.text('页面采集已就绪'), findsNothing);
+      await tester.tap(find.text('已授权，服务尚未连接'));
+      await tester.pumpAndSettle();
+      expect(repository.calls, isEmpty);
+      await tester.tap(find.text('检查自启动与后台限制'));
+      await tester.pumpAndSettle();
+      expect(repository.calls.single.method, 'openSystemSettings');
+      expect(repository.calls.single.arguments, {'target': 'app'});
     },
   );
+
+  testWidgets('service reconnect updates readiness without another grant', (
+    tester,
+  ) async {
+    final repository = await showCapture(
+      tester,
+      enabled: true,
+      connected: false,
+    );
+    (repository.data['capabilities'] as Map)['accessibilityServiceConnected'] =
+        true;
+    repository.updates.add(const LedgerEvent('changed', 0));
+    await tester.pumpAndSettle();
+    expect(find.text('页面采集已就绪'), findsOneWidget);
+    expect(find.text('已授权，服务尚未连接'), findsNothing);
+    expect(find.text('检查自启动与后台限制'), findsNothing);
+    expect(repository.calls, isEmpty);
+  });
 
   testWidgets('app switch without system permission is not ready', (
     tester,
