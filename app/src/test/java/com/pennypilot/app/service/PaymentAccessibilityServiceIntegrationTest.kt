@@ -46,6 +46,9 @@ import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowAccessibilityService
 import org.robolectric.util.ReflectionHelpers
 import java.util.concurrent.Executor
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
  * Android framework simulation: real service events, node reader, parser, processor and Room.
@@ -591,6 +594,299 @@ class PaymentAccessibilityServiceIntegrationTest {
         service.visualCapture = { Bitmap.createBitmap(1264, 2780, Bitmap.Config.ARGB_8888) }
         service.opaqueVisualOcr = { opaqueLines() }
         window.root = { screen("", visible = false) }
+    }
+
+    private fun receivedLines(at: Long = startedAt - 20_000) : List<PaymentImageReader.OcrLine> {
+        val format = DateTimeFormatter.ofPattern("uuuu年M月d日HH:mm:ss").withZone(ZoneId.systemDefault())
+        return listOf(
+            PaymentImageReader.OcrLine("你已收款，资金已存入零钱", Rect(326, 752, 941, 799)),
+            PaymentImageReader.OcrLine("5.00", Rect(438, 882, 820, 998)),
+            PaymentImageReader.OcrLine("零钱余额", Rect(544, 1089, 719, 1137)),
+            PaymentImageReader.OcrLine("转账时间", Rect(100, 1295, 280, 1333)),
+            PaymentImageReader.OcrLine(format.format(Instant.ofEpochMilli(at - 10_000)), Rect(645, 1295, 1164, 1333)),
+            PaymentImageReader.OcrLine("收款时间", Rect(100, 1371, 280, 1411)),
+            PaymentImageReader.OcrLine(format.format(Instant.ofEpochMilli(at)), Rect(645, 1371, 1164, 1411)),
+            PaymentImageReader.OcrLine("账单详情", Rect(545, 2657, 720, 2703)))
+    }
+
+    private fun redPacketPaymentLines() = listOf(
+        PaymentImageReader.OcrLine("支付成功", Rect(520,250,740,310)),
+        PaymentImageReader.OcrLine("微信红包", Rect(500,520,760,580)),
+        PaymentImageReader.OcrLine("¥3.00", Rect(440,900,825,1030)),
+        PaymentImageReader.OcrLine("完成", Rect(580,2390,700,2440)))
+    private fun redPacketDetailLines() = listOf(
+        PaymentImageReader.OcrLine("测试发件人的红包",Rect(480,495,855,550)),
+        PaymentImageReader.OcrLine("恭喜发财，大吉大利",Rect(440,595,840,645)),
+        PaymentImageReader.OcrLine("红包金额3.00元，等待对方领取",Rect(50,825,680,865)),
+        PaymentImageReader.OcrLine("未领取的红包，将于24小时后发起退款",Rect(250,2650,1015,2705)))
+    private fun receivedRedPacketLines() = listOf(
+        PaymentImageReader.OcrLine("测试发送方的红包",Rect(480,495,855,550)),
+        PaymentImageReader.OcrLine("3.00元",Rect(450,850,800,960)),
+        PaymentImageReader.OcrLine("已存入零钱，可直接使用",Rect(500,1050,950,1090)),
+        PaymentImageReader.OcrLine("红包总额100.00元",Rect(100,1400,650,1450)),
+        PaymentImageReader.OcrLine("¥10.00",Rect(900,1500,1150,1550)))
+
+    private fun openRedPacket() {
+        val event=AccessibilityEvent.obtain(AccessibilityEvent.TYPE_VIEW_CLICKED).apply {
+            packageName="com.tencent.mm"
+            className="android.widget.Button"
+            text.add("开")
+        }
+        shadowOf(event).setWindowId(7)
+        service.onAccessibilityEvent(event)
+        event.recycle()
+    }
+
+    @Test fun `a user open gesture then own credited result captures a red packet and a second same amount claim`() {
+        connect(enabled=true)
+        repeat(2) { index ->
+            window.root = { screen("领取红包\n开") }
+            sendEvent(className=WechatRedPacketReader.RECEIVE_ACTIVITY)
+            awaitStatus("not_receipt")
+            openRedPacket()
+            allowOpaqueCapture()
+            service.opaqueVisualOcr = { receivedRedPacketLines() }
+            sendEvent(className=WechatRedPacketReader.DETAIL_ACTIVITY)
+            awaitCondition("own claimed red packet $index not captured") { rows().size==index+1 }
+            assertTrue(rows().all { it.amount == -300L && it.type==TxType.INCOME && it.status==TxStatus.PENDING })
+        }
+        scheduler.advanceTimeBy(1_000)
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,className="android.view.View")
+        awaitStatus("duplicate")
+        assertEquals(2,rows().size)
+        assertEquals(0,cloudCalls)
+    }
+
+    @Test fun `open text in chat and historical claimed details cannot start a red packet claim`() {
+        connect(enabled=true)
+        window.root = { screen("聊天",editableChild=true) }
+        sendEvent(className="com.tencent.mm.ui.chatting.ChattingUI")
+        awaitStatus("input_page")
+        openRedPacket()
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = { receivedRedPacketLines() }
+        sendEvent(className=WechatRedPacketReader.DETAIL_ACTIVITY)
+        awaitStatus("visual_requires_flow")
+        assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `readable historical red packet details also require a fresh claim rather than bypassing OCR history guard`() {
+        connect(enabled=true)
+        window.root = { screen("微信红包\n已存入零钱\n领取金额3元\n完成") }
+        sendEvent(className=WechatRedPacketReader.DETAIL_ACTIVITY)
+        awaitStatus("visual_requires_flow")
+        assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `red packet payment result and sender detail persist once through a verified fresh flow`() {
+        connect(enabled = true)
+        window.root = { screen("发红包", editableChild = true) }
+        sendEvent(className = WechatRedPacketReader.PREPARE_ACTIVITY)
+        awaitStatus("input_page")
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = { redPacketPaymentLines() }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        val first = rows().single()
+        assertEquals(300L,first.amount)
+        assertEquals("unknown",first.businessKind)
+        assertTrue(first.metadataJson!!.contains("red_packet_sent"))
+        service.opaqueVisualOcr = { redPacketDetailLines() }
+        window.root = { screen("",visible=false,windowId=8) }
+        sendEvent(windowId=8,className=WechatRedPacketReader.DETAIL_ACTIVITY)
+        awaitStatus("duplicate")
+        assertEquals(1,rows().size)
+        // A new entry flow, even with the same amount and reused window, is a separate payment.
+        window.root = { screen("发红包",editableChild=true) }
+        sendEvent(className=WechatRedPacketReader.PREPARE_ACTIVITY)
+        awaitStatus("input_page")
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = { redPacketPaymentLines() }
+        sendEvent(className=WechatOpaqueTransferReader.ACTIVITY)
+        awaitCondition("second same-amount red packet swallowed") { rows().size==2 }
+        assertEquals(0,cloudCalls)
+    }
+
+    @Test fun `opening old red packet detail or cancelling preparation never causes screenshot or insertion`() {
+        connect(enabled=true)
+        allowOpaqueCapture()
+        var screenshots=0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(1264,2780,Bitmap.Config.ARGB_8888) }
+        service.opaqueVisualOcr = { redPacketDetailLines() }
+        sendEvent(className=WechatRedPacketReader.DETAIL_ACTIVITY)
+        awaitStatus("visual_requires_flow")
+        assertEquals(0,screenshots)
+        window.root = { screen("发红包",editableChild=true) }
+        sendEvent(className=WechatRedPacketReader.PREPARE_ACTIVITY)
+        awaitStatus("input_page")
+        window.root = { screen("聊天",editableChild=true) }
+        sendEvent(className="com.tencent.mm.ui.chatting.ChattingUI")
+        awaitStatus("input_page")
+        window.root = { screen("",visible=false) }
+        sendEvent(className=WechatRedPacketReader.DETAIL_ACTIVITY)
+        awaitStatus("visual_requires_flow")
+        assertTrue(rows().isEmpty())
+        assertEquals(0,screenshots)
+    }
+
+    @Test fun `readable wallet scene matrix reaches Room with the intended direction and business purpose`() {
+        connect(enabled=true)
+        val cases=listOf(
+            Triple("com.tencent.mm","微信红包\n已存入零钱\n领取金额3元\n红包总额100元",TxType.INCOME),
+            Triple("com.tencent.mm","红包已退还\n退还金额4元\n完成",TxType.INCOME),
+            Triple("com.tencent.mm","二维码收款\n收款成功\n收款金额5元\n今日收款100元",TxType.INCOME),
+            Triple("com.eg.android.AlipayGphone","交易成功\n实付金额6元\n收款方：便利店\n完成",TxType.EXPENSE),
+            Triple("com.eg.android.AlipayGphone","交易成功\n收款金额7元\n付款方：小明\n完成",TxType.INCOME),
+            Triple("com.eg.android.AlipayGphone","退款已到账\n本次退款金额8元\n原支付金额30元\n退款单号RF202610240008\n完成",TxType.INCOME))
+        for((index,c) in cases.withIndex()) {
+            window.root = { screen(c.second,packageName=c.first) }
+            sendEvent(packageName=c.first)
+            awaitCondition("wallet matrix case $index did not persist") { rows().size==index+1 }
+            assertEquals(c.third,rows().last().type)
+        }
+        val refund=rows().last()
+        assertEquals(-800L,refund.amount)
+        assertEquals("refund",refund.businessKind)
+        assertEquals("alipay:refund",runBlocking { database.backupDao().captureEvents() }.single { it.orderId=="RF202610240008" }.orderDomain)
+        assertEquals(0,cloudCalls)
+    }
+
+    @Test fun `recent identified alipay receipt uses real time and historical or editable receipt stays excluded`() {
+        connect(enabled=true)
+        val format=DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault())
+        val actual=(startedAt-30_000)/1_000*1_000
+        val text="账单详情\n二维码收款\n交易成功\n+18.00\n收支类型\n收入\n交易时间\n${format.format(Instant.ofEpochMilli(actual))}\n交易单号ALI202610240001"
+        window.root = { screen(text,packageName="com.eg.android.AlipayGphone",editableChild=true) }
+        sendEvent(packageName="com.eg.android.AlipayGphone")
+        awaitStatus("input_page")
+        assertTrue(rows().isEmpty())
+        window.root = { screen(text,packageName="com.eg.android.AlipayGphone") }
+        sendEvent(packageName="com.eg.android.AlipayGphone")
+        awaitStatus("saved")
+        assertEquals(actual,rows().single().occurredAt)
+        assertEquals(-1800L,rows().single().amount)
+        val old=text.replace(format.format(Instant.ofEpochMilli(actual)),format.format(Instant.ofEpochMilli(startedAt-31*60_000)))
+            .replace("ALI202610240001","ALI202610240002")
+        window.root = { screen(old,packageName="com.eg.android.AlipayGphone") }
+        sendEvent(packageName="com.eg.android.AlipayGphone")
+        awaitStatus("not_receipt")
+        assertEquals(1,rows().size)
+    }
+
+    @Test fun `confirmed incoming empty root receipt saves pending income with financial time separate from observation`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = { receivedLines() }
+        sendEvent(className = WechatReceivedTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        val row = rows().single()
+        assertEquals(-500L, row.amount)
+        assertEquals(TxType.INCOME, row.type)
+        assertEquals(TxStatus.PENDING, row.status)
+        assertEquals((startedAt - 20_000) / 1_000 * 1_000, row.occurredAt)
+        assertEquals(startedAt, runBlocking { database.backupDao().captureEvents() }.single().observedAt)
+        repeat(2) {
+            scheduler.advanceTimeBy(1_000)
+            sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, className = "android.view.View")
+            awaitStatus("duplicate")
+        }
+        assertEquals(1, rows().size)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `readable confirmed receipt follows the same adapter without screenshots`() {
+        connect(enabled = true)
+        window.root = { screen(receivedLines().joinToString("\n") { it.text }) }
+        sendEvent(className = WechatReceivedTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        assertEquals(TxType.INCOME, rows().single().type)
+        assertTrue(window.screenshotWindows.isEmpty())
+    }
+
+    @Test fun `pending receipt is ignored and own confirmation later captures through the same activity`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        var confirmed = false
+        service.opaqueVisualOcr = { receivedLines().map {
+            if (!confirmed && it.text.startsWith("你已")) it.copy(text = "待确认收款") else it
+        } }
+        sendEvent(className = WechatReceivedTransferReader.ACTIVITY)
+        awaitStatus("visual_not_receipt")
+        assertTrue(rows().isEmpty())
+        scheduler.advanceTimeBy(1_000)
+        confirmed = true
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, className = "android.view.View")
+        awaitStatus("saved")
+        assertEquals(TxType.INCOME, rows().single().type)
+    }
+
+    @Test fun `independent identical received amounts with different receipt times are both captured`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        var time = startedAt - 20_000
+        service.opaqueVisualOcr = { receivedLines(time) }
+        sendEvent(className = WechatReceivedTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        scheduler.advanceTimeBy(1_000)
+        time += 1_000
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, className = "android.view.View")
+        awaitCondition("second same-amount receipt was swallowed") { rows().size == 2 }
+        assertTrue(rows().all { it.type == TxType.INCOME && it.amount == -500L })
+    }
+
+    @Test fun `confirmation after pending OCR budget exhaustion is retried without another event`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        var confirmed = false
+        var calls = 0
+        service.opaqueVisualOcr = {
+            calls++
+            receivedLines().map {
+                if (!confirmed && it.text.startsWith("你已")) it.copy(text = "待确认收款") else it
+            }
+        }
+        sendEvent(className = WechatReceivedTransferReader.ACTIVITY)
+        awaitStatus("visual_not_receipt")
+        // DataStore settles on real executors. Pump bounded virtual steps so a callback counter
+        // cannot make the next advance race ahead of scheduling its following retry.
+        for (i in 0 until 50) {
+            if (calls >= 3) break
+            scheduler.advanceTimeBy(100)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        awaitCondition("third pending screenshot") { calls >= 3 }
+        scheduler.advanceTimeBy(500)
+        confirmed = true
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, className = "android.view.View")
+        // No further events. Wait through the bounded budget refill instead of dropping confirmation.
+        repeat(20) {
+            scheduler.advanceTimeBy(1_000)
+            scheduler.runCurrent()
+            Thread.sleep(10)
+        }
+        awaitCondition("confirmed receipt was lost after pending OCR exhausted its budget") { rows().size == 1 }
+        assertEquals(TxType.INCOME, rows().single().type)
+        assertTrue(calls <= 4)
+    }
+
+    @Test fun `old incoming receipts never create new income`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = { receivedLines(startedAt - 31 * 60_000) }
+        sendEvent(className = WechatReceivedTransferReader.ACTIVITY)
+        awaitStatus("visual_not_receipt")
+        drainRetries()
+        assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `incoming receipt cannot match the outgoing activity template`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = { receivedLines() }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("visual_not_receipt")
+        assertTrue(rows().isEmpty())
     }
 
     @Test fun `real phone empty root result is recovered locally and redraws save only one pending transfer`() {

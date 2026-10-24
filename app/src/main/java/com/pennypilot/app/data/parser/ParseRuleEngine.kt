@@ -12,7 +12,11 @@ data class NotificationParseResult(
     val businessKind: String = "unknown",
     val scene: String? = null,
     val ruleVersion: String? = null,
-    val fieldEvidence: Map<String, String> = emptyMap()
+    val fieldEvidence: Map<String, String> = emptyMap(),
+    // Only a locally validated receipt timestamp; observation time remains separate evidence.
+    val occurredAt: Long? = null,
+    // Refund identities use a separate namespace; the original payment is only related evidence.
+    val orderIdKind: String? = null
 )
 
 object ParseRuleEngine {

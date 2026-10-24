@@ -4,7 +4,7 @@ import android.graphics.Rect
 import com.pennypilot.app.data.parser.NotificationParseResult
 import com.pennypilot.app.util.MoneyUtil
 
-/** The four-anchor outgoing result observed on WeChat 8.0.78; never a generic screenshot parser. */
+/** Versioned WeChat transfer result templates; never a generic screenshot parser. */
 internal object WechatOpaqueTransferReader {
     const val PACKAGE = "com.tencent.mm"
     const val ACTIVITY = "com.tencent.mm.framework.app.UIPageFragmentActivity"
@@ -39,7 +39,7 @@ internal object WechatOpaqueTransferReader {
     }
 
     fun accepts(packageName: String, className: String?, snapshot: PaymentScreenReader.Snapshot): Boolean =
-        packageName == PACKAGE && className == ACTIVITY && snapshot.status == "empty_page" &&
+        packageName == PACKAGE && className in setOf(ACTIVITY, WechatReceivedTransferReader.ACTIVITY) && snapshot.status == "empty_page" &&
             !snapshot.hasInput && snapshot.diagnostics["visitedNodes"] == 1 &&
             snapshot.diagnostics["hiddenNodes"] == 1 && snapshot.diagnostics["textNodes"] == 0 &&
             listOf("editableNodes", "passwordNodes", "missingChildren", "foreignNodes")

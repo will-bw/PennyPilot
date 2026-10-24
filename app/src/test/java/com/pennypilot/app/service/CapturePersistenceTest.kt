@@ -46,6 +46,18 @@ class CapturePersistenceTest {
         evidence: CaptureEvidence = evidence(), transaction: TransactionEntity = tx()
     ): CaptureResult = CapturePersistence.capture(db, LedgerRevision.current, transaction, evidence)
 
+    @Test fun `late refund identity upgrades its namespace and later notification uses the upgraded evidence`() = runTest {
+        val payment=tx(TxSource.ACCESSIBILITY).copy(amount=-500,type=TxType.INCOME)
+        val initial=evidence(event="refund-page",packageName="com.tencent.mm",notificationKey=null)
+        val first=capture(initial,payment) as CaptureResult.Inserted
+        val enriched=initial.copy(orderId="RF202610240001",orderDomain="wechat:refund",observedAt=time+1000)
+        assertEquals(CaptureResult.Duplicate(first.transactionId),capture(enriched,payment))
+        assertEquals("wechat:refund",db.transactionDao().captureEvidenceByKey("refund-page")!!.orderDomain)
+        assertEquals(CaptureResult.Duplicate(first.transactionId),capture(enriched.copy(eventKey="refund-notification"),payment.copy(source=TxSource.NOTIFICATION)))
+        assertEquals(1,db.backupDao().transactions().size)
+        assertEquals(CaptureResult.Conflict(first.transactionId),capture(enriched.copy(orderDomain="wechat"),payment))
+    }
+
     @Test fun `late receipt fields enrich durable identity without overwriting edited bill`() = runTest {
         val first = capture(evidence(event = "screen-session"), tx(TxSource.ACCESSIBILITY, null)) as CaptureResult.Inserted
         val row = db.transactionDao().getById(first.transactionId)!!

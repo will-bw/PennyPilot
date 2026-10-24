@@ -8,7 +8,7 @@ import com.pennypilot.app.util.MoneyUtil
  */
 object PaymentTextParser {
     private const val RAW_AMOUNT = """[+\-−]?[0-9][0-9,.]*(?:[eE][+\-]?[0-9]+)?"""
-    private const val AMOUNT_LABEL = """原支付金额|原付款金额|原交易金额|退款前支付|原支付|原付款|实际支付|实际付款|实付款|实付金额|实付|实扣金额|实扣|退款金额|退回金额|到账金额|收款金额|收钱金额|入账金额|收入金额|支付金额|付款金额|消费金额|交易金额|扣款金额|转账金额|商品总价|商品金额|订单金额|应付金额|优惠金额|优惠券抵扣|红包抵扣|账户余额|可用余额|余额|已优惠|优惠|立减|折扣|原价|总价|应付|运费|配送费|补贴|手续费|退款|退回|收款|收钱|到账|入账|收入|付款|支付|消费|转账|扣款"""
+    private const val AMOUNT_LABEL = """原支付金额|原付款金额|原交易金额|退款前支付|原支付|原付款|实际支付|实际付款|实付款|实付金额|实付|实扣金额|实扣|本次退款金额|实际退款金额|退款到账金额|本次退款|实际退款|本次退回金额|退还金额|退款金额|退回金额|本人领取金额|领取金额|收到红包金额|红包金额|红包总额|累计收款金额|累计退款金额|今日收款|今日收入|实际到账金额|到账金额|收款金额|收钱金额|入账金额|收入金额|支付金额|付款金额|消费金额|交易金额|扣款金额|转账金额|商品总价|商品金额|订单金额|应付金额|优惠金额|优惠券抵扣|红包抵扣|账户余额|可用余额|余额|已优惠|优惠|立减|折扣|原价|总价|应付|运费|配送费|补贴|手续费|退款|退回|退还|收款|收钱|到账|入账|收入|付款|支付|消费|转账|扣款"""
     private val labelledAmount = Regex(
         """($AMOUNT_LABEL)(?:\s*(?:已)?成功)?\s*[:：]?\s*(?:人民币|RMB|CNY)?\s*[¥￥]?\s*($RAW_AMOUNT)(?:\s*元)?""",
         RegexOption.IGNORE_CASE
@@ -16,28 +16,31 @@ object PaymentTextParser {
     private val currencyAmount = Regex("""[¥￥]\s*($RAW_AMOUNT)|($RAW_AMOUNT)\s*元""")
     private val precedingLabel = Regex("""($AMOUNT_LABEL)(?:\s*(?:已)?成功)?\s*[:：]?\s*(?:人民币|RMB|CNY)?\s*$""", RegexOption.IGNORE_CASE)
     private val failedOrPending = Regex(
-        """(?:付款|支付|消费|收款|收钱|转账|交易|退款|退回|到账|入账)(?:已)?(?:失败|取消|关闭|超时|处理中|处理失败|申请中|审核中)|(?:支付|付款|退款|转账)中|(?:未|待|尚未)(?:付款|支付|到账|收款)|(?:订单|交易)(?:已)?(?:取消|关闭)|(?:退款|退回)(?:申请|审核|处理中)|申请退款|(?:等待|等待买家|请|请先|继续|立即|去|需要|需)(?:完成)?(?:支付|付款)|支付尚未完成|付款尚未完成|余额不足"""
+        """(?:付款|支付|消费|收款|收钱|转账|交易|退款|退回|退还|到账|入账)(?:已)?(?:失败|取消|关闭|超时|处理中|处理失败|申请中|审核中|受理|受理中)|(?:支付|付款|退款|转账)中|(?:未|待|尚未)(?:付款|支付|到账|收款|收钱)|(?:订单|交易)(?:已)?(?:取消|关闭)|(?:退款|退回)(?:申请|审核|处理中)|申请退款|退款(?:申请)?(?:已)?(?:提交|受理)|(?:等待|等待买家|请|请先|继续|立即|去|需要|需)(?:完成)?(?:支付|付款)|支付尚未完成|付款尚未完成|余额不足|(?:预计|将于|将在)[^\n，。；]{0,30}(?:到账|退回|退还|退款)|(?:确认收款|请收钱|待确认收款)|(?:^|\n)(?:示例|教程|截图示意)(?:[：:\n]|$)"""
     )
     private val promotion = Regex(
         """验证码|领取优惠券|领券|立即领取|限时福利|最高可|支付立减|消费立减|(?:优惠券|优惠红包|优惠金)(?:已)?到账|(?:支付|付款|消费)成功(?:后|可|即可|有机会)|(?:支付|付款)可享|待领取"""
     )
     private val foreignCurrency = Regex("""美元|美金|港币|港元|日元|欧元|英镑|澳元|新加坡元|韩元|\b(?:USD|HKD|JPY|EUR|GBP|AUD|SGD|KRW)\b|US\$|HK\$""", RegexOption.IGNORE_CASE)
-    private val expenseCompleted = Regex("""(?:支付|付款|消费|交易|转账|扣款)(?:已)?成功|(?:已|完成|成功)(?:支付|付款|转账|扣款)|(?:支付|付款|转账)(?:已)?完成|红包(?:发送成功|已发出)|已发红包""")
-    private val incomeCompleted = Regex("""(?:收款|收钱)(?:已)?(?:到账|成功)|(?:转账|款项|资金)(?:已)?到账|(?:到账|入账)成功|(?:已收到|收到)[^\n，。；]{0,40}(?:转账|付款|红包)|(?<!对方)已收款|(?<!对方)已收钱|已领取红包|红包已存入零钱""")
-    private val refundCompleted = Regex("""(?:退款|退回)(?:已)?(?:成功|到账|完成)|(?:已|成功)退款|(?:款项|资金)(?:已)?(?:原路)?退回|已原路退回""")
+    private val expenseCompleted = Regex("""(?:支付|付款|消费|转账|扣款)(?:已)?成功|(?:已|完成|成功)(?:支付|付款|转账|扣款)|(?:支付|付款|转账)(?:已)?完成|红包(?:发送成功|已发出)|已发红包""")
+    private val neutralCompleted = Regex("""交易(?:已)?成功""")
+    private val incomeCompleted = Regex("""(?:收款|收钱)(?:已)?(?:到账|成功)|成功(?:收款|收钱)|(?:转账|款项|资金)(?:已)?到账|(?:到账|入账)成功|(?:已收到|收到)[^\n，。；]{0,40}(?:转账|付款|红包)|(?<!对方)已收款|(?<!对方)已收钱|已领取红包|红包已存入零钱|(?:^|\n)已存入零钱(?:\n|$)""")
+    private val refundCompleted = Regex("""(?:退款|退回|退还)(?:已)?(?:成功|到账|完成)|(?:已|成功)退款|(?:款项|资金|红包)(?:已)?(?:原路)?(?:退回|退还)|已原路退回|红包已退还""")
     private val incomeAction = Regex("""收款(?!方|商户|账户|人|码)|收钱(?!码)|到账|入账|收入|收到(?:转账|红包)""")
     private val paymentAction = Regex("""付款|支付|消费|转账|扣款""")
     private val historyScreen = Regex("""(?<!查看)(?:账单详情|交易详情|订单详情|退款详情|转账详情|收款详情|红包详情)|历史订单|我的订单|全部订单|订单列表|交易记录|账单列表|收支明细|支付记录|交易账单|红包记录""")
-    private val screenTitle = Regex("""^(?:支付成功|付款成功|消费成功|交易成功|转账成功|转账已成功|已转账|转账完成|转账已完成|扣款成功|支付完成|付款完成|支付已完成|付款已完成|已支付|已付款|收款成功|收钱成功|已收钱|已收款|收款到账|收钱到账|收款已到账|到账成功|入账成功|退款成功|退款到账|退款已到账|退款完成|退款已完成|已退款|款项已退回|已原路退回|红包发送成功|红包已发出|已发红包|已领取红包|红包已存入零钱)[!！。]?$""")
+    private val screenTitle = Regex("""^(?:支付成功|付款成功|消费成功|交易成功|转账成功|转账已成功|已转账|转账完成|转账已完成|扣款成功|支付完成|付款完成|支付已完成|付款已完成|已支付|已付款|收款成功|收钱成功|成功收款|成功收钱|已收钱|已收款|收款到账|收钱到账|收款已到账|到账成功|入账成功|退款成功|退款到账|退款已到账|退款完成|退款已完成|已退款|退还成功|款项已退回|已原路退回|红包已退还|红包退回成功|红包发送成功|红包已发出|已发红包|已领取红包|红包已存入零钱|已存入零钱)[!！。]?$""")
     private val completedTransferTitle = Regex("""^(?:转账(?:已)?成功|已转账|转账(?:已)?完成)[!！。]?$""")
     private val recipientStatus = Regex("""(?:待|等待)对方(?:确认)?(?:收款|收钱)|对方(?:待|尚未|未|已)(?:确认)?(?:收款|收钱)""")
     private val inlineTransferStatus = Regex("""^(转账(?:已)?成功|已转账|转账(?:已)?完成)[，,：:]\s*((?:待|等待)对方(?:确认)?收款|对方(?:待|尚未|未)(?:确认)?收款)(?=\s|[。！!]|$)""")
     private val nonReceiptScreen = Regex("""聊天记录|群聊|按住说话|发送消息|发消息|说点什么|写评论|发布评论|全部评论|视频评论|直播间|条评论|条未读|朋友圈|(?:^|\n)\s*(?:评论|推荐|关注|朋友|消息)\s*(?:\n|$)""")
+    private val counterpartyCollection = Regex("""对方(?:已|成功|已确认)(?:收款|收钱|领取红包)|红包(?:已)?被[^\n，。；]{0,40}领取|你发出的红包[^\n，。；]{0,40}被领取""")
     private val actualLabels = setOf("实际支付", "实际付款", "实付款", "实付金额", "实付", "实扣金额", "实扣")
-    private val screenAmountLabels = actualLabels + setOf("支付金额", "付款金额", "消费金额", "交易金额", "扣款金额", "转账金额", "退款金额", "退回金额", "到账金额", "收款金额", "收钱金额", "入账金额", "收入金额")
-    private val refundLabels = setOf("退款金额", "退回金额", "退款", "退回")
-    private val incomeLabels = setOf("到账金额", "收款金额", "收钱金额", "入账金额", "收入金额", "收款", "收钱", "到账", "入账", "收入")
-    private val ignoredLabels = setOf("原支付金额", "原付款金额", "原交易金额", "退款前支付", "原支付", "原付款", "商品总价", "商品金额", "订单金额", "应付金额", "优惠金额", "优惠券抵扣", "红包抵扣", "账户余额", "可用余额", "余额", "已优惠", "优惠", "立减", "折扣", "原价", "总价", "应付", "运费", "配送费", "补贴", "手续费")
+    private val screenAmountLabels = actualLabels + setOf("支付金额", "付款金额", "消费金额", "交易金额", "扣款金额", "转账金额", "退款金额", "退回金额", "退还金额", "本次退款金额", "实际退款金额", "退款到账金额", "本次退款", "实际退款", "本次退回金额", "到账金额", "实际到账金额", "收款金额", "收钱金额", "入账金额", "收入金额", "本人领取金额", "领取金额", "收到红包金额", "红包金额")
+    private val actualRefundLabels = setOf("本次退款金额", "实际退款金额", "退款到账金额", "本次退款", "实际退款", "本次退回金额")
+    private val refundLabels = setOf("退款金额", "退回金额", "退还金额", "退款", "退回", "退还") + actualRefundLabels
+    private val incomeLabels = setOf("实际到账金额", "到账金额", "收款金额", "收钱金额", "入账金额", "收入金额", "收款", "收钱", "到账", "入账", "收入", "本人领取金额", "领取金额", "收到红包金额")
+    private val ignoredLabels = setOf("原支付金额", "原付款金额", "原交易金额", "退款前支付", "原支付", "原付款", "商品总价", "商品金额", "订单金额", "应付金额", "优惠金额", "优惠券抵扣", "红包抵扣", "账户余额", "可用余额", "余额", "已优惠", "优惠", "立减", "折扣", "原价", "总价", "应付", "运费", "配送费", "补贴", "手续费", "红包总额", "累计收款金额", "累计退款金额", "今日收款", "今日收入")
     private val trustedTitles = mapOf(
         "com.tencent.mm" to setOf("微信支付", "微信收款助手", "收款助手"),
         "com.eg.android.AlipayGphone" to setOf("支付宝", "支付宝通知", "支付助手", "收钱码", "收款到账"),
@@ -49,6 +52,7 @@ object PaymentTextParser {
     private val receiptTitle = Regex("""^(?:订单)?(?:支付|付款|退款|收款)(?:成功|到账)(?:通知)?$""")
     private val orderToken = Regex("""(商户订单号|商家订单号|商户单号|支付订单号|交易订单号|订单编号|订单号|交易单号|交易号|流水号)\s*[:：]?\s*([^\s:：，,；;]+)""")
     private val validOrderId = Regex("""[A-Za-z0-9]{10,64}""")
+    private val refundToken = Regex("""(商户退款单号|商家退款单号|退款交易单号|退款交易号|退款订单号|退款流水号|退款单号|退款编号)\s*[:：]?\s*([^\s:：，,；;]+)""")
     private val paymentMethod = Regex("""(?:支付方式|付款方式)\s*[:：]?\s*(微信支付|微信|支付宝|抖音支付|抖音月付|美团支付|美团月付|银行卡|零钱通|零钱|余额宝|余额|花呗|信用卡|储蓄卡|云闪付)""")
     private val merchantField = Regex("""(?:^|[\s，,；;])(?:商户名称|商户全称|收款商户|商家名称|店铺名称|收款方|商户|商家|店铺|付款对象|付款给)\s*[:：]\s*([^\n\r，,；;]{1,60})""")
     private val merchantLines = Regex("""(?:^|\n)(?:商户名称|商户全称|收款商户|商家名称|店铺名称|收款方|商户|商家|店铺|付款对象)\s*\n\s*([^\n\r]{1,60})""")
@@ -57,7 +61,7 @@ object PaymentTextParser {
     private val transferMerchant = Regex("""(?:^|\n)转账给\s*([^\n，。；]{1,40})""")
     private val payerMerchant = Regex("""(?:^|\n)(?:付款方|付款人|转账方)\s*[:：\n]\s*([^\n，。；]{1,40})""")
 
-    private enum class Role { ACTUAL, REFUND, INCOME, PAYMENT, UNKNOWN, IGNORED }
+    private enum class Role { ACTUAL, ACTUAL_REFUND, REFUND, INCOME, PAYMENT, UNKNOWN, IGNORED }
     private data class Amount(val raw: String, val range: IntRange, val role: Role) {
         val cents: Long? get() = MoneyUtil.parsePositiveYuanToCents(raw)
     }
@@ -72,6 +76,7 @@ object PaymentTextParser {
         val completedTransfer = normalized.lines().any { completedTransferTitle.matches(it.trim()) }
         val validationText = if (completedTransfer) normalized.replace(recipientStatus, "") else normalized
         if (normalized.length > 16_000 || rejects(validationText) || historyScreen.containsMatchIn(normalized) || nonReceiptScreen.containsMatchIn(normalized)) return null
+        if (conflictingDirections(validationText)) return null
         if (!hasScreenReceiptStructure(normalized)) return null
         // Opposite-party status is removed above only after an explicit outgoing-transfer title.
         // Otherwise competing completed directions are contradictory, never an income-first guess.
@@ -83,12 +88,12 @@ object PaymentTextParser {
     /** Unknown layouts may be sent for opt-in inference only after these local safety gates. */
     fun isScreenModelCandidate(packageName: String, text: String): Boolean {
         if (!isScreenVisualCandidate(packageName, text)) return false
-        val amount = chooseAmount(normalize(text))
+        val amount = chooseAmount(receiptFacts(normalize(text)))
         return !amount.unsafe && amount.cents != null
     }
 
     fun screenCandidateAmount(packageName: String, text: String): Long? =
-        if (isScreenModelCandidate(packageName, text)) chooseAmount(normalize(text)).cents else null
+        if (isScreenModelCandidate(packageName, text)) chooseAmount(receiptFacts(normalize(text))).cents else null
 
     /** Missing text amounts can be recovered visually, but only on a standalone result screen. */
     fun isScreenVisualCandidate(packageName: String, text: String): Boolean {
@@ -96,15 +101,14 @@ object PaymentTextParser {
         val normalized = normalize(text)
         if (normalized.length !in 1..12_000 || rejects(normalized) ||
             historyScreen.containsMatchIn(normalized) || nonReceiptScreen.containsMatchIn(normalized)) return false
-        if (!refundCompleted.containsMatchIn(normalized) && expenseCompleted.containsMatchIn(normalized) &&
-            incomeCompleted.containsMatchIn(normalized)) return false
+        if (conflictingDirections(normalized)) return false
         if (Regex("""明天|准备|打算|计划|预计|假如|如果|示例|教程|截图示意|确认收款|请收钱|待确认""").containsMatchIn(normalized)) return false
-        val completedLine = normalized.lines().any { line ->
+        val completedLine = receiptFacts(normalized).lines().any { line ->
             val value = line.trim()
             value.length <= 50 && hasCompletion(value) &&
                 !Regex("""说|告诉|消息|描述|备注|留言|提醒|通知设置|后|即可""").containsMatchIn(value)
         }
-        return completedLine && (normalized.lines().any { screenTitle.matches(it.trim()) } ||
+        return completedLine && (receiptFacts(normalized).lines().any { screenTitle.matches(it.trim()) } ||
             Regex("""(?:^|\n)(?:完成|返回|关闭|支付方式|付款方式|收款方)(?:[：:\n]|$)""").containsMatchIn(normalized))
     }
 
@@ -115,27 +119,39 @@ object PaymentTextParser {
         val labelled = structure?.labelledAmounts().orEmpty()
         val evidenceText = if (labelled.isEmpty()) text else text + "\n" + labelled.joinToString("\n")
         val parsed = parseScreen(packageName, evidenceText)
-        val scene = when {
+        return ScreenRecognition(parsed?.let { decorate(evidenceText, it, structure, evidenceSource) },
+            parsed?.let { scene(receiptFacts(evidenceText), it) } ?: "unknown",
+            isScreenModelCandidate(packageName, evidenceText), evidenceText,
+            visualCandidate = isScreenVisualCandidate(packageName, evidenceText))
+    }
+
+    private fun scene(text: String, parsed: NotificationParseResult): String = when {
+            isRedPacket(text) && refundCompleted.containsMatchIn(text) -> "red_packet_returned"
             refundCompleted.containsMatchIn(text) -> "refund_received"
-            "红包" in text && parsed?.direction == "EXPENSE" -> "red_packet_sent"
-            "红包" in text && parsed?.direction == "INCOME" -> "red_packet_received"
-            ("转账" in text || "收钱" in text) && parsed?.direction == "EXPENSE" -> "transfer_sent"
-            ("转账" in text || "收钱" in text) && parsed?.direction == "INCOME" -> "transfer_received"
-            parsed?.direction == "EXPENSE" -> "merchant_payment"
-            parsed?.direction == "INCOME" -> "payment_received"
+            isRedPacket(text) && parsed.direction == "EXPENSE" -> "red_packet_sent"
+            isRedPacket(text) && parsed.direction == "INCOME" -> "red_packet_received"
+            Regex("收款码|收钱码|二维码收款|扫码收款|微信收款助手|收款助手").containsMatchIn(text) && parsed.direction == "INCOME" -> "qr_payment_received"
+            "转账" in text && parsed.direction == "EXPENSE" -> "transfer_sent"
+            "转账" in text && parsed.direction == "INCOME" -> "transfer_received"
+            Regex("账户互转|充值|提现|还款|零钱通转入|余额宝转入").containsMatchIn(text) -> "account_transfer"
+            parsed.direction == "EXPENSE" -> "merchant_payment"
+            parsed.direction == "INCOME" -> "payment_received"
             else -> "unknown"
         }
+    private fun isRedPacket(text: String): Boolean = Regex("""(?:^|\n)微信红包(?:\n|$)|红包(?:发送成功|已发出|已退还|退回成功|已存入零钱)|已发红包|已领取红包|本人领取金额|收到红包金额|(?:^|\n).{1,40}的红包(?:\n|$)|(?:^|\n)红包金额[：:\s0-9]""").containsMatchIn(text)
+
+    private fun decorate(text: String, parsed: NotificationParseResult,
+        structure: PaymentScreenStructure? = null, source: String = "通知"): NotificationParseResult {
+        val scene = scene(receiptFacts(text), parsed)
         val businessKind = when (scene) {
             "merchant_payment" -> "expense"
             "payment_received" -> "income"
             "refund_received" -> "refund"
             else -> "unknown"
         }
-        return ScreenRecognition(parsed?.copy(businessKind = businessKind, scene = scene,
-            ruleVersion = "payment-scenes-2026-10-24.1",
-            fieldEvidence = fieldEvidence(parsed, evidenceText, structure, evidenceSource)), scene,
-            isScreenModelCandidate(packageName, evidenceText), evidenceText,
-            visualCandidate = isScreenVisualCandidate(packageName, evidenceText))
+        return parsed.copy(businessKind = businessKind, scene = scene,
+            ruleVersion = "payment-scenes-2026-10-24.2",
+            fieldEvidence = fieldEvidence(parsed, text, structure, source))
     }
 
     data class ScreenRecognition(
@@ -143,13 +159,13 @@ object PaymentTextParser {
         val scene: String,
         val modelCandidate: Boolean,
         val evidenceText: String,
-        val ruleVersion: String = "payment-scenes-2026-10-24.1",
+        val ruleVersion: String = "payment-scenes-2026-10-24.2",
         val visualCandidate: Boolean = false
     )
 
     private fun fieldEvidence(result: NotificationParseResult, text: String,
         structure: PaymentScreenStructure?, source: String): Map<String, String> {
-        val normalized = normalize(text)
+        val normalized = receiptFacts(normalize(text))
         fun reference(quote: String): String {
             val node = structure?.nodes?.firstOrNull { it.labels.any { label -> normalize(label).contains(quote) } }
             return "$source·直接读取${node?.let { "·节点${it.id}" }.orEmpty()}：${quote.take(180)}"
@@ -157,10 +173,21 @@ object PaymentTextParser {
         val amount = amounts(normalized).firstOrNull { it.cents == result.amountCents && it.role != Role.IGNORED }
         val status = (if (refundCompleted.containsMatchIn(normalized)) refundCompleted
             else if (result.direction == "EXPENSE") expenseCompleted else incomeCompleted).find(normalized)?.value
+            ?: neutralCompleted.find(normalized)?.value
+        val labelledDirection = labelledAmount.findAll(normalized).firstOrNull { match ->
+            (if (result.direction == "INCOME") role(match.groupValues[1]) == Role.INCOME
+            else role(match.groupValues[1]) in setOf(Role.ACTUAL, Role.PAYMENT)) &&
+                MoneyUtil.parsePositiveYuanToCents(match.groupValues[2]) == result.amountCents
+        }?.value
         return buildMap {
             amount?.let { put("amount", reference(it.raw)) }
-            status?.let { put("direction", reference(it)); put("paymentStatus", reference(it)) }
+            (labelledDirection ?: status)?.let { put("direction", reference(it)) }
+            status?.let { put("paymentStatus", reference(it)) }
             result.merchant?.takeIf(normalized::contains)?.let { put("merchant", reference(it)) }
+            result.orderId?.let { put(if (result.orderIdKind != null) "refundId" else "orderId", reference(it)) }
+            if (refundCompleted.containsMatchIn(normalized)) extractPaymentOrderId(normalized)?.let {
+                put("originalOrderId", reference(it))
+            }
         }
     }
 
@@ -173,11 +200,13 @@ object PaymentTextParser {
         if (!trusted) return false
         val body = normalize(content)
         val text = "$normalizedTitle\n$body"
-        if (text.length > 16_000 || rejects(text)) return false
-        if (hasCompletion(text)) return true
+        if (text.length > 16_000 || rejects(text) || conflictingDirections(text) || ambiguousRefundIds(text)) return false
+        val facts = receiptFacts(text)
+        if (hasCompletion(facts)) return true
         // 钱包的支付通知允许“向商户付款 18 元”“到账 100 元”等已发生动作。
         if (packageName == "com.tencent.mm" || packageName == "com.eg.android.AlipayGphone") {
-            if (labelledAmount.containsMatchIn(body) && (paymentAction.containsMatchIn(body) || incomeAction.containsMatchIn(body))) return true
+            val bodyFacts = receiptFacts(body)
+            if (labelledAmount.containsMatchIn(bodyFacts) && (paymentAction.containsMatchIn(bodyFacts) || incomeAction.containsMatchIn(bodyFacts))) return true
             if (normalizedTitle == "微信支付" && Regex("""^\s*[¥￥]\s*$RAW_AMOUNT\s*(?:元)?\s*$""").matches(body)) return true
         }
         return false
@@ -185,13 +214,14 @@ object PaymentTextParser {
 
     internal fun parseNotification(packageName: String, title: String, content: String): NotificationParseResult? {
         if (!isNotificationCandidate(packageName, title, content)) return null
-        return parseReceipt(packageName, normalize("$title\n$content"))
+        val text = normalize("$title\n$content")
+        return parseReceipt(packageName, text)?.let { decorate(text, it) }
     }
 
     internal fun canUseFallback(text: String, requireAmount: Boolean = false): Boolean {
         val normalized = normalize(text)
-        if (rejects(normalized)) return false
-        val decision = chooseAmount(normalized)
+        if (rejects(normalized) || conflictingDirections(normalized) || ambiguousRefundIds(normalized)) return false
+        val decision = chooseAmount(receiptFacts(normalized))
         return !decision.unsafe && (!requireAmount || decision.cents != null)
     }
 
@@ -199,29 +229,46 @@ object PaymentTextParser {
     internal fun isConsistentFallback(text: String, result: NotificationParseResult): Boolean {
         if (!MoneyUtil.isValidAmountCents(result.amountCents) || result.direction !in setOf("EXPENSE", "INCOME")) return false
         val normalized = normalize(text)
-        if (rejects(normalized)) return false
-        val decision = chooseAmount(normalized)
+        if (rejects(normalized) || conflictingDirections(normalized) || ambiguousRefundIds(normalized)) return false
+        val decision = chooseAmount(receiptFacts(normalized))
         if (decision.unsafe || (decision.cents != null && decision.cents != result.amountCents)) return false
-        val knownDirection = direction(normalized)
+        val knownDirection = direction(receiptFacts(normalized))
         return knownDirection == null || knownDirection == result.direction
     }
 
     internal fun withEvidence(packageName: String, text: String, result: NotificationParseResult): NotificationParseResult = result.copy(
-        orderId = extractOrderId(normalize(text)),
-        paymentMethod = extractPaymentMethod(packageName, normalize(text))
+        orderId = extractOrderId(receiptFacts(normalize(text))),
+        orderIdKind = refundIdentity(receiptFacts(normalize(text)))?.second,
+        paymentMethod = extractPaymentMethod(packageName, receiptFacts(normalize(text)))
     )
 
     private fun parseReceipt(packageName: String, text: String): NotificationParseResult? {
-        val direction = direction(text) ?: return null
-        val decision = chooseAmount(text)
-        if (decision.unsafe) return null
+        val facts = receiptFacts(text)
+        val direction = direction(facts) ?: return null
+        val decision = chooseAmount(facts)
+        if (decision.unsafe || ambiguousRefundIds(facts)) return null
         return NotificationParseResult(
             amountCents = decision.cents ?: return null,
-            merchant = extractMerchant(text, direction),
+            merchant = extractMerchant(facts, direction),
             direction = direction,
-            orderId = extractOrderId(text),
-            paymentMethod = extractPaymentMethod(packageName, text)
+            orderId = extractOrderId(facts),
+            orderIdKind = refundIdentity(facts)?.second,
+            paymentMethod = extractPaymentMethod(packageName, facts)
         )
+    }
+
+    /** Free-form remarks cannot provide payment state, amounts, time or identity evidence. */
+    internal fun receiptFacts(text: String): String {
+        val label = Regex("""^(?:备注|转账备注|付款说明|收款说明|留言|商品说明|红包祝福语)\s*(?:[:：].*)?$""")
+        var skipValue = false
+        return text.lines().filter { line ->
+            val value = line.trim()
+            if (skipValue) { skipValue = false; false }
+            else if (label.matches(value)) {
+                skipValue = ':' !in value && '：' !in value
+                false
+            } else true
+        }.joinToString("\n")
     }
 
     private fun normalize(text: String): String = buildString(text.length) {
@@ -236,19 +283,29 @@ object PaymentTextParser {
         }
     }.trim()
 
-    private fun rejects(text: String): Boolean = failedOrPending.containsMatchIn(text) || promotion.containsMatchIn(text) || foreignCurrency.containsMatchIn(text)
+    private fun rejects(text: String): Boolean = failedOrPending.containsMatchIn(text) || promotion.containsMatchIn(text) || foreignCurrency.containsMatchIn(text) ||
+        (counterpartyCollection.containsMatchIn(text) && !expenseCompleted.containsMatchIn(text) && !refundCompleted.containsMatchIn(text)) ||
+        (Regex("""红包(?:已)?(?:过期|失效|领完)|红包已被领取""").containsMatchIn(text) && !refundCompleted.containsMatchIn(text))
 
-    private fun hasCompletion(text: String): Boolean = expenseCompleted.containsMatchIn(text) || incomeCompleted.containsMatchIn(text) || refundCompleted.containsMatchIn(text)
+    private fun hasCompletion(text: String): Boolean = expenseCompleted.containsMatchIn(text) || incomeCompleted.containsMatchIn(text) || refundCompleted.containsMatchIn(text) || neutralCompleted.containsMatchIn(text)
+
+    private fun conflictingDirections(text: String): Boolean {
+        if (refundCompleted.containsMatchIn(text)) return false
+        val incoming = incomeCompleted.containsMatchIn(text) || labelledAmount.findAll(text).any { it.groupValues[1] in incomeLabels }
+        // A generic transaction-success state proves completion, not who received the money.
+        return incoming && expenseCompleted.containsMatchIn(text)
+    }
 
     private fun hasScreenReceiptStructure(text: String): Boolean {
-        val lines = text.lines().map(String::trim).filter(String::isNotEmpty)
+        val lines = receiptFacts(text).lines().map(String::trim).filter(String::isNotEmpty)
         if (lines.none(screenTitle::matches)) return false
         val isolatedMoney = Regex("""^(?:[¥￥]\s*$RAW_AMOUNT\s*(?:元)?|$RAW_AMOUNT\s*元)$""")
         if (lines.any(isolatedMoney::matches)) return true
         if (lines.zipWithNext().any { (first, second) ->
-                first in setOf("¥", "￥") && Regex("""^$RAW_AMOUNT\s*(?:元)?$""").matches(second)
+                first in setOf("¥", "￥") && Regex("""^$RAW_AMOUNT\s*(?:元)?$""").matches(second) ||
+                    second == "元" && Regex("""^$RAW_AMOUNT$""").matches(first)
             }) return true
-        return labelledAmount.findAll(text).any { match ->
+        return labelledAmount.findAll(receiptFacts(text)).any { match ->
             match.groupValues[1] in screenAmountLabels
         }
     }
@@ -259,6 +316,7 @@ object PaymentTextParser {
         expenseCompleted.containsMatchIn(text) -> "EXPENSE"
         labelledAmount.findAll(text).any { role(it.groupValues[1]) == Role.INCOME } -> "INCOME"
         labelledAmount.findAll(text).any { role(it.groupValues[1]) in setOf(Role.ACTUAL, Role.PAYMENT) } -> "EXPENSE"
+        neutralCompleted.containsMatchIn(text) -> null
         incomeAction.containsMatchIn(text) -> "INCOME"
         paymentAction.containsMatchIn(text) -> "EXPENSE"
         else -> null
@@ -267,6 +325,7 @@ object PaymentTextParser {
     private fun role(label: String?): Role = when (label) {
         in ignoredLabels -> Role.IGNORED
         in actualLabels -> Role.ACTUAL
+        in actualRefundLabels -> Role.ACTUAL_REFUND
         in refundLabels -> Role.REFUND
         in incomeLabels -> Role.INCOME
         null -> Role.UNKNOWN
@@ -306,7 +365,8 @@ object PaymentTextParser {
                 }) return AmountDecision(null, true)
         }
         val preferred = when {
-            refundCompleted.containsMatchIn(text) -> relevant.filter { it.role == Role.REFUND }
+            refundCompleted.containsMatchIn(text) -> relevant.filter { it.role == Role.ACTUAL_REFUND }
+                .ifEmpty { relevant.filter { it.role == Role.REFUND } }
             direction(text) == "INCOME" -> relevant.filter { it.role == Role.INCOME }
             else -> relevant.filter { it.role == Role.ACTUAL }
         }
@@ -318,11 +378,29 @@ object PaymentTextParser {
         return AmountDecision(values.single(), false)
     }
 
+    private fun refundIds(text: String): List<Pair<String, String>> = if (!refundCompleted.containsMatchIn(text)) emptyList() else
+        refundToken.findAll(text).mapNotNull { match ->
+            val id = match.groupValues[2]
+            if (validOrderId.matches(id) && id.any(Char::isDigit))
+                id to if (match.groupValues[1].startsWith("商")) "merchant_refund" else "refund"
+            else null
+        }.distinct().toList()
+
+    private fun ambiguousRefundIds(text: String): Boolean = refundIds(text).groupBy { it.second }.values.any { it.size > 1 }
+
+    private fun refundIdentity(text: String): Pair<String, String>? = refundIds(text)
+        .sortedBy { if (it.second == "refund") 0 else 1 }.firstOrNull()
+
     private fun extractOrderId(text: String): String? {
-        // 同一原订单可能分次退回相同金额，原支付单号不能作为退款唯一身份。
-        // 未建模退款单号独立命名空间前，退款仅使用捕获层的弱重复提示。
-        if (refundCompleted.containsMatchIn(text)) return null
-        return orderToken.findAll(text)
+        // 同一原订单可分次退款。只将退款自身身份用于强关联，原支付号保留为展示依据。
+        if (refundCompleted.containsMatchIn(text)) return refundIdentity(text)?.first
+        return extractPaymentOrderId(text)
+    }
+
+    private fun extractPaymentOrderId(text: String): String? {
+        // Refund tokens contain words such as 订单号 as suffixes; never reinterpret them as payment IDs.
+        val paymentText = text.replace(refundToken, "")
+        return orderToken.findAll(paymentText)
             .map { it.groupValues[1] to it.groupValues[2] }
             .filter { (_, id) -> validOrderId.matches(id) && id.any(Char::isDigit) }
             .sortedBy { (label, _) -> if (label in setOf("商户订单号", "商家订单号", "商户单号")) 0 else 1 }
@@ -337,7 +415,8 @@ object PaymentTextParser {
         }
 
     private fun extractMerchant(text: String, direction: String): String? {
-        val raw = merchantField.find(text)?.groupValues?.get(1)
+        val raw = (if (direction == "INCOME") payerMerchant.find(text)?.groupValues?.get(1) else null)
+            ?: merchantField.find(text)?.groupValues?.get(1)
             ?: merchantLines.find(text)?.groupValues?.get(1)
             ?: (if (direction == "EXPENSE") transferMerchant.find(text)?.groupValues?.get(1) else payerMerchant.find(text)?.groupValues?.get(1))
             ?: (if (direction == "INCOME") incomeMerchant.find(text)?.groupValues?.get(1) else null)
