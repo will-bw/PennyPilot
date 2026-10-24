@@ -86,13 +86,15 @@ class PaymentTextParserTest {
     }
 
     @Test
-    fun `partial refund never inherits original merchant order identity`() {
+    fun `partial refunds retain their own refund identities rather than original merchant order`() {
         val first = PaymentTextParser.parseScreen(meituan, "退款成功\n退款金额：5.00元\n商户订单号：MT20261023123456\n退款编号：RF20261023000001")
         val second = PaymentTextParser.parseScreen(meituan, "退款成功\n退款金额：5.00元\n商户订单号：MT20261023123456\n退款编号：RF20261023000002")
         assertEquals(500L, first?.amountCents)
         assertEquals(500L, second?.amountCents)
-        assertNull(first?.orderId)
-        assertNull(second?.orderId)
+        assertEquals("RF20261023000001", first?.orderId)
+        assertEquals("RF20261023000002", second?.orderId)
+        assertEquals("refund", first?.orderIdKind)
+        assertEquals("refund", second?.orderIdKind)
     }
 
     @Test

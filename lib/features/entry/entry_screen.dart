@@ -965,7 +965,14 @@ class _StoredEvidence extends StatelessWidget {
               const {
                     'amount': '金额',
                     'type': '资金方向',
+                    'direction': '资金方向',
+                    'paymentStatus': '支付状态',
                     'occurredAt': '交易时间',
+                    'transferTime': '转账时间',
+                    'merchant': '交易对方',
+                    'refundId': '退款单号',
+                    'orderId': '交易单号',
+                    'originalOrderId': '原支付单号',
                   }[fact.key] ??
                   fact.key,
             ),

@@ -49,6 +49,8 @@ class PaymentScreenSession {
         val previous = entry.receipt
         val compatible = previous == null || previous.direction == parsed.direction &&
             previous.amountCents == parsed.amountCents &&
+            (previous.occurredAt == null || parsed.occurredAt == null || previous.occurredAt == parsed.occurredAt) &&
+            (previous.orderIdKind == null || parsed.orderIdKind == null || previous.orderIdKind == parsed.orderIdKind) &&
             (previous.orderId == null || parsed.orderId == null || previous.orderId == parsed.orderId) &&
             (previous.merchant.isNullOrBlank() || parsed.merchant.isNullOrBlank() || previous.merchant == parsed.merchant)
         if (entry.key == null || entry.boundary ||
@@ -56,6 +58,7 @@ class PaymentScreenSession {
         entry.absentSince = null
         val known = entry.receipt
         entry.receipt = parsed.copy(orderId = parsed.orderId ?: known?.orderId,
+            orderIdKind = parsed.orderIdKind ?: known?.orderIdKind,
             merchant = parsed.merchant?.takeIf(String::isNotBlank) ?: known?.merchant,
             paymentMethod = parsed.paymentMethod ?: known?.paymentMethod)
         return entry.key?.takeIf { entry.receipt != entry.handledReceipt }

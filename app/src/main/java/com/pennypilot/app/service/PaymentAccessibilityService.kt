@@ -13,6 +13,7 @@ import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.parser.PaymentAppRegistry
 import com.pennypilot.app.data.parser.PaymentTextParser
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.WalletReceiptDetailsParser
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -38,6 +39,8 @@ class PaymentAccessibilityService : AccessibilityService() {
         val eventType: Int = 0, val className: String? = null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val session = PaymentScreenSession()
+    private val redPacketFlow = WechatRedPacketFlow()
+    private val redPacketReceiveFlow = WechatRedPacketFlow()
     // 保留最新窗口；同一窗口重绘不取消已有采样，避免动画密集时一直延后。
     private val requests = Channel<ReadRequest>(Channel.CONFLATED)
     private var readJob: Job? = null
@@ -78,6 +81,8 @@ class PaymentAccessibilityService : AccessibilityService() {
                 synchronized(session) { session.reset() }
                 synchronized(visualAttempts) { visualAttempts.clear(); visualResults.clear() }
                 synchronized(opaqueAttempts) { opaqueAttempts.clear() }
+                redPacketFlow.reset()
+                redPacketReceiveFlow.reset()
                 entryPoint.monitor().onScreenStatus(if (allow) "waiting" else "disabled")
                 if (allow) readJob = scope.launch(readDispatcher) {
                     // 重连/打开开关时页面可能已稳定，不会再发一个内容变化事件。
@@ -85,12 +90,22 @@ class PaymentAccessibilityService : AccessibilityService() {
                     for (request in requests) {
                         var newest = requests.tryReceive().getOrNull() ?: request
                         // 支付结果可能在 window 事件后才加载；短时有界重试不依赖通知或二次事件。
-                        for (pause in longArrayOf(0, 250, 750, 1_500, 2_500)) {
+                        val pauses = longArrayOf(0, 250, 750, 1_500, 2_500, 10_000)
+                        var attempt = 0
+                        while (attempt < pauses.size) {
+                            val pause = pauses[attempt]
                             // 新页面事件应立即唤醒采样，不能被上一页的重试等待挡住。
-                            if (pause > 0) newest = withTimeoutOrNull(pause) {
+                            val update = if (pause > 0) withTimeoutOrNull(pause) {
                                 requests.receiveCatching().getOrNull()
-                            } ?: newest
+                            } else null
+                            if (update != null) {
+                                newest = update
+                                // A confirmation arriving during the last old-page retry still
+                                // needs its own bounded retries, including the OCR budget refill.
+                                attempt = 0
+                            }
                             if (!isCurrent(newest) || readScreen(newest, refreshCache = pause > 0)) break
+                            attempt++
                         }
                     }
                 }
@@ -105,6 +120,17 @@ class PaymentAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            // Only a user-owned open-button event in this exact wallet window can begin a claim.
+            // Never inspect click text from chats, generic pages, input fields or other packages.
+            if (enabled && event.packageName?.toString() == WechatOpaqueTransferReader.PACKAGE &&
+                latestWindow?.className == WechatRedPacketReader.RECEIVE_ACTIVITY &&
+                latestWindow?.windowId == event.windowId && event.text.any { it.toString().trim() in setOf("开", "打开红包", "拆红包") }) {
+                redPacketReceiveFlow.start(elapsedMillis())
+                synchronized(opaqueAttempts) { opaqueAttempts.clear() }
+            }
+            return
+        }
         if (!enabled || event.eventType !in setOf(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, AccessibilityEvent.TYPE_WINDOWS_CHANGED)) return
         visualGeneration.incrementAndGet()
@@ -116,6 +142,17 @@ class PaymentAccessibilityService : AccessibilityService() {
         }
         if (packageName !in PaymentAppRegistry.packages) return
         val eventClass = event.className?.toString()
+        if (packageName == WechatOpaqueTransferReader.PACKAGE && event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            if (eventClass == WechatRedPacketReader.PREPARE_ACTIVITY && latestWindow?.className != eventClass) {
+                redPacketFlow.start(elapsedMillis())
+                redPacketReceiveFlow.reset()
+                synchronized(opaqueAttempts) { opaqueAttempts.clear() }
+            } else if (eventClass == "com.tencent.mm.ui.chatting.ChattingUI") {
+                redPacketFlow.leaveUnpaid()
+                redPacketReceiveFlow.leaveUnpaid()
+            }
+            else if (eventClass == "com.tencent.mm.plugin.remittance.ui.RemittanceUI") redPacketFlow.reset()
+        }
         // Content redraws often name a View instead of the Activity. Retain only the Activity
         // established by a window-state event for this exact window, never across navigation.
         val pageClass = if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
@@ -201,13 +238,18 @@ class PaymentAccessibilityService : AccessibilityService() {
             if (!isCurrent(request)) return true
             val text = snapshot.text
             if (text == null) {
-                if (WechatOpaqueTransferReader.accepts(request.packageName, request.className, snapshot)) {
+                if (acceptsOpaque(request, snapshot)) {
                     CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
                         request.eventType, request.className, false)
                     val parsed = readOpaqueTransfer(request, snapshot, actualWindowId) ?: return false
                     if (!isCurrent(request) || !entryPoint.appPreferences().screenVisualCaptureEnabled.first()) return true
                     entryPoint.monitor().onScreenRead("parsed", snapshot.diagnostics, request.packageName)
-                    return persistScreen(request, actualWindowId, parsed, nowMillis(), elapsedMillis())
+                    val flowKey = when (parsed.scene) {
+                        "red_packet_sent" -> redPacketFlow.keyFor(parsed.amountCents, elapsedMillis()) ?: return false
+                        "red_packet_received" -> redPacketReceiveFlow.keyFor(parsed.amountCents, elapsedMillis()) ?: return false
+                        else -> null
+                    }
+                    return persistScreen(request, actualWindowId, parsed, nowMillis(), elapsedMillis(), flowKey)
                 }
                 // 明确输入页代表离开凭证；节点缺失/树未加载只算暂不可读，不能重置去重身份。
                 if (snapshot.hasInput) synchronized(session) {
@@ -223,7 +265,13 @@ class PaymentAccessibilityService : AccessibilityService() {
                     request.eventType, request.className, false)
                 return false
             }
-            var recognition = PaymentTextParser.analyzeScreen(request.packageName, text, snapshot.structure)
+            val received = if (request.packageName == WechatOpaqueTransferReader.PACKAGE &&
+                request.className == WechatReceivedTransferReader.ACTIVITY)
+                WechatReceivedTransferReader.parseText(text, nowMillis()) else null
+            val detailed = received ?: WalletReceiptDetailsParser.parse(request.packageName, text, nowMillis(), snapshot.structure)
+            var recognition = detailed?.let { PaymentTextParser.ScreenRecognition(it, it.scene!!,
+                modelCandidate = false, evidenceText = text) }
+                ?: PaymentTextParser.analyzeScreen(request.packageName, text, snapshot.structure)
             CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
                 request.eventType, request.className, recognition.parsed != null || recognition.visualCandidate)
             val now = nowMillis()
@@ -301,7 +349,27 @@ class PaymentAccessibilityService : AccessibilityService() {
                 } else synchronized(session) { session.observe(request.packageName, actualWindowId, null, elapsed) }
                 return false
             }
-            persistScreen(request, actualWindowId, parsed, now, elapsed)
+            if (request.packageName == WechatOpaqueTransferReader.PACKAGE && request.className == WechatRedPacketReader.DETAIL_ACTIVITY) {
+                // The same history guard applies when a future WeChat version exposes nodes.
+                val key = when (parsed.scene) {
+                    "red_packet_sent" -> redPacketFlow.keyFor(parsed.amountCents, elapsed)
+                    "red_packet_received" -> redPacketReceiveFlow.confirm(parsed.amountCents, elapsed)
+                    else -> null
+                }
+                if (key == null) {
+                    entryPoint.monitor().onScreenStatus("visual_requires_flow", request.packageName)
+                    return false
+                }
+                return persistScreen(request, actualWindowId, parsed, now, elapsed, key)
+            }
+            val flowKey = if (parsed.scene == "red_packet_sent" && request.packageName == WechatOpaqueTransferReader.PACKAGE) {
+                redPacketFlow.keyFor(parsed.amountCents, elapsed)
+                    ?: if (redPacketFlow.isPreparing(elapsed)) redPacketFlow.confirm(parsed.amountCents, elapsed) else null
+            } else if (parsed.scene == "red_packet_received" && request.packageName == WechatOpaqueTransferReader.PACKAGE) {
+                redPacketReceiveFlow.keyFor(parsed.amountCents, elapsed)
+                    ?: if (redPacketReceiveFlow.isPreparing(elapsed)) redPacketReceiveFlow.confirm(parsed.amountCents, elapsed) else null
+            } else null
+            persistScreen(request, actualWindowId, parsed, now, elapsed, flowKey)
             // Keep sampling readable results so late order IDs can enrich existing evidence.
             return false
         } catch (e: CancellationException) { throw e
@@ -313,8 +381,8 @@ class PaymentAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun persistScreen(request: ReadRequest, windowId: Int, parsed: NotificationParseResult,
-        now: Long, elapsed: Long): Boolean {
-        val key = synchronized(session) { session.observe(request.packageName, windowId, parsed, elapsed) }
+        now: Long, elapsed: Long, flowKey: String? = null): Boolean {
+        val key = flowKey ?: synchronized(session) { session.observe(request.packageName, windowId, parsed, elapsed) }
         if (key == null) {
             entryPoint.monitor().onScreenStatus("duplicate", request.packageName)
             return true
@@ -335,6 +403,12 @@ class PaymentAccessibilityService : AccessibilityService() {
         fun status(value: String) = monitor.onScreenRead(value, diagnostics, request.packageName)
         if (!entryPoint.appPreferences().screenVisualCaptureEnabled.first()) {
             status("visual_required")
+            return null
+        }
+        if (request.className == WechatRedPacketReader.DETAIL_ACTIVITY &&
+            !redPacketFlow.hasPaid(elapsedMillis()) && !redPacketReceiveFlow.hasPaid(elapsedMillis()) &&
+            !redPacketReceiveFlow.isPreparing(elapsedMillis())) {
+            status("visual_requires_flow")
             return null
         }
         // Window-specific capture excludes other apps and overlays. Older Android versions retain
@@ -366,12 +440,30 @@ class PaymentAccessibilityService : AccessibilityService() {
         try {
             val lines = opaqueVisualOcr(bitmap)
             diagnostics = diagnostics + WechatOpaqueTransferReader.diagnostics(lines, bitmap.width, bitmap.height)
+            if (request.className == WechatReceivedTransferReader.ACTIVITY) {
+                diagnostics = diagnostics + WechatReceivedTransferReader.diagnostics(lines)
+            }
             if (!matchesOpaqueSnapshot(request, snapshot, generation) ||
                 !entryPoint.appPreferences().screenVisualCaptureEnabled.first()) {
                 synchronized(opaqueAttempts) { opaqueAttempts.remove(windowId) }
                 return null
             }
-            val parsed = WechatOpaqueTransferReader.parse(lines, bitmap.width, bitmap.height)
+            val receivedDiagnostics = mutableMapOf<String, Int>()
+            val parsed = if (request.className == WechatReceivedTransferReader.ACTIVITY)
+                WechatReceivedTransferReader.parse(lines, bitmap.width, bitmap.height, nowMillis(), diagnostics = receivedDiagnostics)
+                else if (request.className == WechatRedPacketReader.DETAIL_ACTIVITY) {
+                    WechatRedPacketReader.parseSentDetail(lines, bitmap.width, bitmap.height)?.takeIf {
+                        redPacketFlow.keyFor(it.amountCents, elapsedMillis()) != null
+                    } ?: WechatRedPacketReader.parseReceivedDetail(lines, bitmap.width, bitmap.height)?.takeIf {
+                        redPacketReceiveFlow.confirm(it.amountCents, elapsedMillis()) != null
+                    }
+                }
+                else WechatOpaqueTransferReader.parse(lines, bitmap.width, bitmap.height)
+                    ?: if (redPacketFlow.isPreparing(elapsedMillis()))
+                        WechatRedPacketReader.parsePaymentResult(lines, bitmap.width, bitmap.height)?.takeIf {
+                            redPacketFlow.confirm(it.amountCents, elapsedMillis()) != null
+                        } else null
+            diagnostics = diagnostics + receivedDiagnostics
             if (parsed == null) {
                 // A readable input/history/failed image is a real non-receipt boundary. An empty
                 // OCR result can be a transient loading frame and must not reset transaction identity.
@@ -396,10 +488,14 @@ class PaymentAccessibilityService : AccessibilityService() {
             root.packageName?.toString() == request.packageName && root.windowId == request.windowId &&
                 PaymentScreenReader.inspect(root, request.packageName).let {
                     it.diagnostics == snapshot.diagnostics &&
-                        WechatOpaqueTransferReader.accepts(request.packageName, request.className, it)
+                        acceptsOpaque(request, it)
                 }
         } finally { root.recycle() }
     }
+
+    private fun acceptsOpaque(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot): Boolean =
+        WechatOpaqueTransferReader.accepts(request.packageName, request.className, snapshot) ||
+            WechatRedPacketReader.accepts(request.packageName, request.className, snapshot)
 
     @Suppress("DEPRECATION")
     private fun matchesSnapshot(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot, generation: Long): Boolean {

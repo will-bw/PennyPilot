@@ -59,12 +59,8 @@ class CaptureProcessor @Inject constructor(
         if (parsed != null) recognitionCommitMutex.withLock {
             if (save(parsed, input.packageName, text, input.postedAt,
                     TxSource.NOTIFICATION, eventKey, input.updateIdentity, revision, verifiedRule = true,
-                    businessKind = when {
-                        Regex("退款|退回").containsMatchIn(text) -> "refund"
-                        Regex("转账|红包|借|还款|提现|充值").containsMatchIn(text) -> "unknown"
-                        parsed.merchant != null && parsed.direction == "EXPENSE" -> "expense"
-                        else -> "unknown"
-                    })) runCatching { taskStore.remove(RecognitionTaskStore.id(eventKey)) }
+                    businessKind = parsed.businessKind,
+                    metadata = captureMetadata(parsed, "notification"))) runCatching { taskStore.remove(RecognitionTaskStore.id(eventKey)) }
         }
         else if (preferences.notificationCloudParsingEnabled.first() &&
             NotificationParser.isCloudCandidate(input.packageName, input.title, input.content)) {
@@ -148,13 +144,16 @@ class CaptureProcessor @Inject constructor(
         return recognitionCommitMutex.withLock {
             save(parsed, packageName, receipt, observedAt, TxSource.ACCESSIBILITY,
                 eventKey, null, revision, verifiedRule = true, businessKind = parsed.businessKind,
-                metadata = buildJsonObject {
-                    put("scene", parsed.scene); put("ruleVersion", parsed.ruleVersion)
-                    put("source", "page"); put("paymentStatus", "COMPLETED"); put("currency", "CNY")
-                    putJsonObject("fieldEvidence") { parsed.fieldEvidence.entries.take(12).forEach { (key, value) -> put(key.take(40), value.take(300)) } }
-                }.toString()).also { saved -> if (saved) runCatching { taskStore.remove(RecognitionTaskStore.id(eventKey)) } }
+                metadata = captureMetadata(parsed, "page")).also { saved -> if (saved) runCatching { taskStore.remove(RecognitionTaskStore.id(eventKey)) } }
         }
     }
+
+    private fun captureMetadata(parsed: NotificationParseResult, source: String): String = buildJsonObject {
+        put("scene", parsed.scene); put("ruleVersion", parsed.ruleVersion)
+        put("source", source); put("paymentStatus", "COMPLETED"); put("currency", "CNY")
+        parsed.orderIdKind?.let { put("transactionIdentityKind", it) }
+        putJsonObject("fieldEvidence") { parsed.fieldEvidence.entries.take(12).forEach { (key, value) -> put(key.take(40), value.take(300)) } }
+    }.toString()
 
     private suspend fun save(
         parsed: NotificationParseResult,
@@ -185,12 +184,14 @@ class CaptureProcessor @Inject constructor(
             source == TxSource.ACCESSIBILITY && !preferences.screenCaptureEnabled.first() ||
             source == TxSource.NOTIFICATION && !preferences.notificationCaptureEnabled.first()) return false
         val tx = TransactionEntity(amount = amount, type = type, categoryId = category.id,
-            merchant = parsed.merchant, accountTag = parsed.paymentMethod, occurredAt = occurredAt,
+            merchant = parsed.merchant, accountTag = parsed.paymentMethod, occurredAt = parsed.occurredAt ?: occurredAt,
             source = source, status = if (verifiedRule && businessKind != "unknown" && preferences.captureAutoRecordEnabled.first()) TxStatus.CONFIRMED else TxStatus.PENDING,
             rawPayload = text, captureEventKey = eventKey, businessKind = businessKind, metadataJson = metadata)
         val result = CapturePersistence.capture(database, revision, tx,
             CaptureEvidence(packageName = packageName, eventKey = eventKey, observedAt = occurredAt,
-                notificationKey = notificationKey, text = text, orderId = parsed.orderId, metadataJson = metadata), isCurrent = isCurrent)
+                notificationKey = notificationKey, text = text, orderId = parsed.orderId,
+                orderDomain = parsed.orderIdKind?.let { "${CaptureEventIdentity.domainFor(packageName)}:$it" },
+                metadataJson = metadata), isCurrent = isCurrent)
         when (result) {
             is CaptureResult.Duplicate -> {
                 monitor.onDuplicate()

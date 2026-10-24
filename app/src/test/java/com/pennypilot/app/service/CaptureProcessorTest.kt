@@ -13,6 +13,7 @@ import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ToolDefinition
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentTextParser
 import com.pennypilot.app.data.settings.AppPreferences
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
@@ -37,6 +38,37 @@ class CaptureProcessorTest {
             error("本地凭证不得调用云端")
         }
         override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("not used")
+    }
+
+    @Test fun `same refund from notification and page merges but a second installment and payment namespace stay separate`() = runBlocking {
+        val database=Room.inMemoryDatabaseBuilder(context,AppDatabase::class.java).build()
+        try {
+            database.categoryDao().insert(CategoryEntity(name="其他",icon="",colorIndex=0,type=TxType.INCOME,sortOrder=0))
+            preferences.setNotificationCaptureEnabled(true)
+            preferences.setNotificationCloudParsingEnabled(false)
+            preferences.setScreenCaptureEnabled(true)
+            preferences.setCaptureAutoRecordEnabled(false)
+            val processor=CaptureProcessor(context,database,preferences,cloud,CaptureServiceMonitor())
+            val now=System.currentTimeMillis()
+            val text="退款已到账\n本次退款金额5元\n原支付金额30元\n交易单号PAY202610240001\n退款单号RF202610240001\n完成"
+            processor.processNotification(CapturedNotification("com.tencent.mm","refund-notice",now,"微信支付",text),LedgerRevision.current)
+            val parsed=PaymentTextParser.analyzeScreen("com.tencent.mm",text).parsed!!
+            processor.processScreen("com.tencent.mm",parsed,"refund-page",now+1000,LedgerRevision.current)
+            assertEquals(1,database.backupDao().transactions().size)
+            assertTrue(database.backupDao().captureEvents().all { it.orderDomain=="wechat:refund" })
+            assertTrue(database.backupDao().transactions().single().metadataJson!!.contains("refundId"))
+            val second=PaymentTextParser.analyzeScreen("com.tencent.mm",text.replace("RF202610240001","RF202610240002")).parsed!!
+            processor.processScreen("com.tencent.mm",second,"refund-second",now+2000,LedgerRevision.current)
+            assertEquals(2,database.backupDao().transactions().size)
+            processor.processScreen("com.tencent.mm",NotificationParseResult(500,null,"INCOME",orderId="RF202610240001"),
+                "different-payment-namespace",now+3000,LedgerRevision.current)
+            assertEquals(3,database.backupDao().transactions().size)
+            assertEquals(0,cloudCalls)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            preferences.setNotificationCaptureEnabled(true)
+            database.close()
+        }
     }
 
     @Test fun `both channels persist once for same order without cloud or notification permission`() = runBlocking {

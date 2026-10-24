@@ -71,7 +71,8 @@ object CapturePersistence {
             }
         }
         dao.captureEvidenceByKey(evidence.eventKey)?.let { previous ->
-            if (!sameFinancials(previous, incoming) || conflictingOrders(previous, incoming)) {
+            if (!sameFinancials(previous, incoming) || conflictingOrders(previous, incoming) ||
+                previous.orderId != null && incoming.orderId != null && previous.orderDomain != incoming.orderDomain) {
                 return@withTransaction CaptureResult.Conflict(previous.transactionId)
             }
             // Late loading enriches source evidence only. Never replace user-edited ledger fields.
@@ -80,6 +81,7 @@ object CapturePersistence {
                 dao.updateCaptureEvidence(previous.copy(
                     observedAt = maxOf(previous.observedAt, incoming.observedAt),
                     orderId = previous.orderId ?: incoming.orderId,
+                    orderDomain = if (previous.orderId == null && incoming.orderId != null) incoming.orderDomain else previous.orderDomain,
                     merchantFingerprint = previous.merchantFingerprint ?: incoming.merchantFingerprint,
                     metadataJson = mergeMetadata(previous.metadataJson, incoming.metadataJson)
                 ))
