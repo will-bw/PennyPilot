@@ -4,10 +4,22 @@ const _maxInt32 = 2147483647;
 const _maxSafeInteger = 9007199254740991;
 const _maxTimestamp = 253402214400000;
 const _types = {'EXPENSE', 'INCOME'};
+const _businessKinds = {
+  'standard',
+  'expense',
+  'income',
+  'transfer',
+  'receivable',
+  'payable',
+  'refund',
+  'unknown',
+};
 const _sources = {
   'MANUAL',
   'AI_TEXT',
   'AI_VOICE',
+  'AI_IMAGE',
+  'BILL_IMPORT',
   'NOTIFICATION',
   'ACCESSIBILITY',
 };
@@ -127,6 +139,17 @@ Map<String, dynamic> _validateTransaction(
     max: maxTransactionFen,
   );
   _require(type == 'EXPENSE' ? amount > 0 : amount < 0, '备份金额符号与收支类型不一致。');
+  final kind = _choice(
+    row,
+    'businessKind',
+    _businessKinds,
+    fallback: 'standard',
+  );
+  _require(kind != 'expense' || type == 'EXPENSE', '备份消费支出与资金方向不一致。');
+  _require(
+    !const {'income', 'refund'}.contains(kind) || type == 'INCOME',
+    '备份收入或退款与资金方向不一致。',
+  );
   final categoryId = _int(row, 'categoryId', min: 1);
   _require(categories[categoryId]?['type'] == type, '备份账目的分类缺失或收支类型不一致。');
   final duplicateOf = row['duplicateOf'] == null
@@ -150,6 +173,12 @@ Map<String, dynamic> _validateTransaction(
     'duplicateOf': duplicateOf,
     'rawPayload': _optionalString(row, 'rawPayload', max: 100000),
     'captureEventKey': _optionalString(row, 'captureEventKey', max: 2000),
+    'businessKind': kind,
+    'metadataJson': _optionalString(row, 'metadataJson', max: 100000),
+    'operationKey': _optionalString(row, 'operationKey', max: 2000),
+    'editVersion': row['editVersion'] == null
+        ? 0
+        : _int(row, 'editVersion', min: 0),
   };
 }
 
@@ -230,7 +259,7 @@ Map<String, dynamic> _validateReport(
   return {
     'id': _int(row, 'id', min: restoring ? 1 : 0),
     'yearMonth': _month(row['yearMonth']),
-    'totalExpense': _int(row, 'totalExpense', min: 0),
+    'totalExpense': _int(row, 'totalExpense'),
     'totalIncome': _int(row, 'totalIncome', min: 0),
     'byCategoryJson': breakdown,
     'llmSummary': _text(row, 'llmSummary', max: 100000, allowEmpty: true),
@@ -272,6 +301,7 @@ Map<String, dynamic> _validateCapture(
     'orderDomain': _text(row, 'orderDomain', max: 300),
     'amount': amount,
     'type': type,
+    'metadataJson': _optionalString(row, 'metadataJson', max: 100000),
     'merchantFingerprint': _optionalString(
       row,
       'merchantFingerprint',
@@ -299,6 +329,7 @@ Map<String, List<Map<String, dynamic>>> _validateBackup(
         'rules',
         'reports',
         'captureEvents',
+        'captureTombstones',
       }.contains,
     ),
     '备份包含未知字段，请升级应用后重试。',
@@ -373,6 +404,15 @@ Map<String, List<Map<String, dynamic>>> _validateBackup(
     'rules': rules,
     'reports': reports,
     'captureEvents': captures,
+    'captureTombstones': _maps(data['captureTombstones'] ?? [], '删除记录')
+        .map(
+          (row) => {
+            'identityKey': _text(row, 'identityKey', max: 2000),
+            'transactionId': _int(row, 'transactionId', min: 1),
+            'deletedAt': _int(row, 'deletedAt', min: 0, max: _maxTimestamp),
+          },
+        )
+        .toList(),
   };
 }
 
@@ -390,6 +430,18 @@ const _defaultSettings = <String, dynamic>{
   'qwenBaseUrl':
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
   'chatGptModel': '',
+  'recognitionTextModel': '',
+  'recognitionTextProvider': '',
+  'recognitionVisionProvider': '',
+  'recognitionReviewProvider': '',
+  'recognitionVisionModel': '',
+  'recognitionReviewModel': '',
+  'recognitionPreferencesJson': '[]',
+  'screenCloudParsingEnabled': false,
+  'screenVisualCaptureEnabled': false,
+  'captureAutoRecordEnabled': false,
+  'activeInputAutoSaveEnabled': false,
+  'cloudImageParsingEnabled': false,
 };
 
 Map<String, dynamic> _validateSettings(Map<String, dynamic> arguments) {
@@ -407,6 +459,25 @@ Map<String, dynamic> _validateSettings(Map<String, dynamic> arguments) {
       case 'notificationCloudParsingEnabled':
         _require(!_bool(arguments, key), '当前平台不支持 Android 支付采集。');
         validated[key] = false;
+      case 'screenVisualCaptureEnabled':
+      case 'screenCloudParsingEnabled':
+      case 'captureAutoRecordEnabled':
+      case 'activeInputAutoSaveEnabled':
+      case 'cloudImageParsingEnabled':
+        validated[key] = _bool(arguments, key);
+      case 'recognitionTextModel':
+      case 'recognitionVisionModel':
+      case 'recognitionReviewModel':
+        validated[key] = _text(
+          arguments,
+          key,
+          max: 256,
+          allowEmpty: true,
+        ).trim();
+      case 'recognitionPreferencesJson':
+        final value = _text(arguments, key, max: 30000);
+        _require(jsonDecode(value) is List, '分类偏好格式无效。');
+        validated[key] = value;
       case 'lastBackupAt':
         validated[key] = _int(arguments, key, min: 0, max: _maxTimestamp);
       case 'budgetCents':
@@ -417,6 +488,9 @@ Map<String, dynamic> _validateSettings(Map<String, dynamic> arguments) {
           'light',
           'dark',
         });
+      case 'recognitionTextProvider':
+      case 'recognitionVisionProvider':
+      case 'recognitionReviewProvider':
       case 'activeProvider':
         validated[key] = _choice(arguments, key, const {
           '',

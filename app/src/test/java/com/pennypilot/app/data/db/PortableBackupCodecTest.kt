@@ -31,11 +31,36 @@ class PortableBackupCodecTest {
         assertFalse(encoded.containsKey("auth"))
     }
 
+    @Test fun `recognition metadata identities and deletion markers survive portable round trip`() {
+        val enriched = snapshot.copy(
+            transactions = snapshot.transactions.map { it.copy(businessKind = "unknown", metadataJson = "{\"source\":\"page\"}", operationKey = "input-1", editVersion = 3) },
+            captureEvents = snapshot.captureEvents.map { it.copy(metadataJson = "{\"scene\":\"wechat_transfer\"}") },
+            captureTombstones = listOf(CaptureTombstoneEntity("operation:deleted-input", 999, 1720000000000))
+        )
+        assertEquals(enriched, PortableBackupCodec.decode(PortableBackupCodec.encode(enriched)))
+        val duplicate = enriched.copy(transactions = enriched.transactions + enriched.transactions.single().copy(id = 42))
+        assertThrows(IllegalArgumentException::class.java) { PortableBackupCodec.decode(PortableBackupCodec.encode(duplicate)) }
+    }
+
+    @Test fun `refund only month preserves negative net expense in report backup`() {
+        val refund = snapshot.copy(
+            categories = snapshot.categories.map { it.copy(type = TxType.INCOME) },
+            transactions = snapshot.transactions.map { it.copy(type = TxType.INCOME, amount = -1234, businessKind = "refund") },
+            captureEvents = snapshot.captureEvents.map { it.copy(type = TxType.INCOME, amount = -1234) },
+            reports = snapshot.reports.map { it.copy(totalExpense = -1234, byCategoryJson = "[{\"name\":\"退款\",\"total\":-1234,\"count\":1}]") }
+        )
+        assertEquals(refund, PortableBackupCodec.decode(PortableBackupCodec.encode(refund)))
+    }
+
     @Test fun `income sign and category reference are validated`() {
         val bad = snapshot.copy(transactions = snapshot.transactions.map { it.copy(amount = -1234) })
         assertThrows(IllegalArgumentException::class.java) { PortableBackupCodec.decode(PortableBackupCodec.encode(bad)) }
         val dangling = snapshot.copy(transactions = snapshot.transactions.map { it.copy(categoryId = 99) })
         assertThrows(IllegalArgumentException::class.java) { PortableBackupCodec.decode(PortableBackupCodec.encode(dangling)) }
+        for (kind in listOf("income", "refund")) {
+            val incompatible = snapshot.copy(transactions = snapshot.transactions.map { it.copy(businessKind = kind) })
+            assertThrows(IllegalArgumentException::class.java) { PortableBackupCodec.decode(PortableBackupCodec.encode(incompatible)) }
+        }
     }
 
     @Test fun `unknown versions and fractional integer values are rejected`() {
@@ -74,7 +99,19 @@ class PortableBackupCodecTest {
             val expected = Json.parseToJsonElement(source.readText())
             @Suppress("UNCHECKED_CAST")
             val decoded = PortableBackupCodec.decode(unwire(expected) as Map<String, Any?>)
-            assertEquals(expected, wire(PortableBackupCodec.encode(decoded)))
+            // Legacy fixtures acquire explicit defaults; existing values from newer SQLite exports must survive.
+            val expectedObject = expected.jsonObject
+            val canonical = JsonObject(expectedObject + mapOf(
+                "transactions" to JsonArray(expectedObject.getValue("transactions").jsonArray.map { item ->
+                    JsonObject(mapOf("businessKind" to JsonPrimitive("standard"), "metadataJson" to JsonNull,
+                        "operationKey" to JsonNull, "editVersion" to JsonPrimitive(0)) + item.jsonObject)
+                }),
+                "captureEvents" to JsonArray(expectedObject.getValue("captureEvents").jsonArray.map { item ->
+                    JsonObject(mapOf("metadataJson" to JsonNull) + item.jsonObject)
+                }),
+                "captureTombstones" to (expectedObject["captureTombstones"] ?: JsonArray(emptyList()))
+            ))
+            assertEquals(canonical, wire(PortableBackupCodec.encode(decoded)))
             assertEquals(-90000L, decoded.transactions.single { it.id == 42L }.amount)
             assertEquals(TxStatus.IGNORED, decoded.transactions.single { it.id == 43L }.status)
             assertEquals(99L, decoded.transactions.single { it.id == 41L }.duplicateOf)

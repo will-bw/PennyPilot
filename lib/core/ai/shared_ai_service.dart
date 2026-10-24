@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import '../ledger_repository.dart';
 import '../models.dart';
+import '../recognition/recognition_protocol.dart';
 import 'ai_transport.dart';
 import 'shared_credentials.dart';
 import 'shared_chatgpt_auth.dart';
@@ -119,6 +120,104 @@ class SharedAiService {
     } catch (_) {
       return {'transactions': <dynamic>[], 'error': '文字解析失败，请检查 AI 设置后重试。'};
     }
+  }
+
+  Future<Map<String, dynamic>> recognizeInput(
+    Map<String, dynamic> arguments,
+    LedgerSnapshot snapshot, {
+    Future<String> Function(List<Map<String, dynamic>>, String)? nativeChat,
+  }) async {
+    final text = arguments['text'] as String? ?? '';
+    final image = arguments['imageBase64'] as String?;
+    final source = image != null
+        ? 'AI_IMAGE'
+        : arguments['source'] as String? ?? 'AI_TEXT';
+    if (image == null) _checkInput(text);
+    if (image != null &&
+        snapshot.settings['cloudImageParsingEnabled'] != true) {
+      aiFailure('请先在识别设置中允许云端图片识别。');
+    }
+    if (image != null &&
+        (image.length > 3 * 1024 * 1024 ||
+            !const {
+              'image/png',
+              'image/jpeg',
+              'image/webp',
+            }.contains(arguments['mimeType']))) {
+      aiFailure('图片格式不支持或超过 2 MB，请选择较小的 PNG、JPEG 或 WebP 图片。');
+    }
+    final role = image == null ? 'text' : 'vision';
+    final now = _now();
+    final messages = <Map<String, dynamic>>[
+      _message('system', RecognitionProtocol.prompt(snapshot, now)),
+      image == null
+          ? _message('user', text)
+          : {
+              'role': 'user',
+              'content': [
+                {
+                  'type': 'text',
+                  'text': '用户主动选择的支付截图。提取其中已完成的交易，时间和本人角色不明确时提问。用户补充：$text',
+                },
+                {
+                  'type': 'image_url',
+                  'image_url': {
+                    'url': 'data:${arguments['mimeType']};base64,$image',
+                  },
+                },
+              ],
+            },
+    ];
+    Future<String> send(
+      List<Map<String, dynamic>> payload,
+      String selectedRole,
+    ) async {
+      await (Zone.current[_requestGuardKey] as Future<void> Function()?)
+          ?.call();
+      final provider = recognitionProvider(snapshot.settings, selectedRole);
+      return nativeChat != null && provider == 'chatgpt'
+          ? nativeChat(payload, selectedRole)
+          : _chat(snapshot, payload, jsonMode: true, modelRole: selectedRole);
+    }
+
+    final response = await send(messages, role);
+    final operationId =
+        arguments['operationId'] as String? ??
+        RecognitionProtocol.identity(
+          '$source:${now.microsecondsSinceEpoch}:$text',
+        );
+    Map<String, dynamic> validate(String raw) => RecognitionProtocol.validate(
+      decodeAiObject(raw),
+      snapshot: snapshot,
+      input: text,
+      source: source,
+      now: now,
+      operationId: operationId,
+    );
+    var result = validate(response);
+    final reviewModel =
+        snapshot.settings['recognitionReviewModel'] as String? ?? '';
+    if ((reviewModel.isNotEmpty ||
+            (snapshot.settings['recognitionReviewProvider'] as String? ?? '')
+                .isNotEmpty) &&
+        (result['questions'] as List).isNotEmpty) {
+      try {
+        final reviewMessages = [
+          ...messages,
+          _message(
+            'user',
+            '请复核同一份输入。前次结果存在以下问题：${jsonEncode(result['questions'])}。仅修复有原文依据的字段；真正缺失或冲突的信息继续提问。重新返回完整协议JSON。',
+          ),
+        ];
+        final reviewed = await send(reviewMessages, 'review');
+        result = validate(reviewed);
+        result['autoSaveEligible'] = false;
+      } on LedgerException catch (error) {
+        if (error.code == 'CANCELLED' || error.code == 'STALE_LEDGER') rethrow;
+        (result['questions'] as List).add('复核服务暂不可用，已保留首次识别结果，请人工核对。');
+      }
+    }
+    return result;
   }
 
   Future<Map<String, dynamic>> ask(
@@ -289,22 +388,49 @@ class SharedAiService {
     };
   }
 
+  static String? recognitionProvider(
+    Map<String, dynamic> settings,
+    String role,
+  ) {
+    final key = switch (role) {
+      'vision' => 'recognitionVisionProvider',
+      'review' => 'recognitionReviewProvider',
+      _ => 'recognitionTextProvider',
+    };
+    final value = settings[key] as String?;
+    return value?.isNotEmpty == true
+        ? value
+        : settings['activeProvider'] as String?;
+  }
+
   Future<String> _chat(
     LedgerSnapshot snapshot,
     List<Map<String, dynamic>> messages, {
     bool jsonMode = false,
     String? expectedKey,
     String? expectedAccount,
+    String? modelRole,
   }) async {
     if (_disposed) aiFailure('AI 服务已关闭。');
     final beforeRequest =
         Zone.current[_requestGuardKey] as Future<void> Function()?;
     await beforeRequest?.call();
     final settings = snapshot.settings;
-    final provider = settings['activeProvider'];
+    final provider = modelRole == null
+        ? settings['activeProvider']
+        : recognitionProvider(settings, modelRole);
+    final roleKey = switch (modelRole) {
+      'text' => 'recognitionTextModel',
+      'vision' => 'recognitionVisionModel',
+      'review' => 'recognitionReviewModel',
+      _ => '',
+    };
+    final roleModel = settings[roleKey] as String?;
     if (provider == 'chatgpt') {
       return auth.chat(
-        checkedModel(settings['chatGptModel']),
+        checkedModel(
+          roleModel?.isNotEmpty == true ? roleModel : settings['chatGptModel'],
+        ),
         messages,
         jsonMode: jsonMode,
         expectedAccountId: expectedAccount,
@@ -321,7 +447,11 @@ class SharedAiService {
       aiFailure('AI 服务凭据已变化，请重新发起查询。');
     }
     final model = checkedModel(
-      settings[provider == 'deepseek' ? 'deepSeekModel' : 'qwenModel'] ??
+      (roleModel?.isNotEmpty == true
+              ? roleModel
+              : settings[provider == 'deepseek'
+                    ? 'deepSeekModel'
+                    : 'qwenModel']) ??
           (provider == 'deepseek' ? 'deepseek-chat' : 'qwen-plus'),
     );
     final base = provider == 'deepseek'
@@ -343,7 +473,7 @@ class SharedAiService {
         'messages': messages,
         if (jsonMode) 'response_format': {'type': 'json_object'},
       });
-    if (request.bodyBytes.length > 4 * 1024 * 1024) aiFailure('请求内容过大，请缩小范围。');
+    if (request.bodyBytes.length > 8 * 1024 * 1024) aiFailure('请求内容过大，请缩小范围。');
     await beforeRequest?.call();
     final response = await aiRequest(_client, request);
     final choices = decodeAiObject(response.body)['choices'];
@@ -386,7 +516,9 @@ class SharedAiService {
     var expense = 0, income = 0;
     final byCategory = <int, Map<String, dynamic>>{};
     for (final tx in matches) {
-      if (tx.type == TxType.expense) {
+      if (tx.isRefund) {
+        expense -= tx.amountFen;
+      } else if (tx.countsAsExpense) {
         expense += tx.amountFen;
         final row = byCategory.putIfAbsent(
           tx.categoryId,
@@ -394,7 +526,7 @@ class SharedAiService {
         );
         row['total'] = (row['total'] as int) + tx.amountFen;
         row['count'] = (row['count'] as int) + 1;
-      } else {
+      } else if (tx.countsAsIncome) {
         income += tx.amountFen;
       }
     }

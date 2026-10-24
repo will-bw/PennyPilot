@@ -13,6 +13,7 @@ import com.pennypilot.app.data.db.dao.MonthlyReportDao
 import com.pennypilot.app.data.db.dao.ParseRuleDao
 import com.pennypilot.app.data.db.dao.TransactionDao
 import com.pennypilot.app.data.db.entity.CategoryEntity
+import com.pennypilot.app.data.db.entity.CaptureTombstoneEntity
 import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
@@ -20,8 +21,8 @@ import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.domain.model.TxType
 
 @Database(
-    entities = [TransactionEntity::class, CategoryEntity::class, ParseRuleEntity::class, MonthlyReportEntity::class, CaptureEvidenceEntity::class],
-    version = 5,
+    entities = [TransactionEntity::class, CategoryEntity::class, ParseRuleEntity::class, MonthlyReportEntity::class, CaptureEvidenceEntity::class, CaptureTombstoneEntity::class],
+    version = 6,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -35,7 +36,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun backupDao(): BackupDao
 
     companion object {
-        const val VERSION = 5
+        const val VERSION = 6
         const val NAME = "pennypilot.db"
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -88,7 +89,18 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_capture_events_package_name_notification_key ON capture_events(package_name, notification_key)")
             }
         }
-        val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN business_kind TEXT NOT NULL DEFAULT 'standard'")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN metadata_json TEXT")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN operation_key TEXT")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN edit_version INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_transactions_operation_key ON transactions(operation_key)")
+                db.execSQL("ALTER TABLE capture_events ADD COLUMN metadata_json TEXT")
+                db.execSQL("CREATE TABLE IF NOT EXISTS capture_tombstones (identity_key TEXT NOT NULL PRIMARY KEY, transaction_id INTEGER NOT NULL, deleted_at INTEGER NOT NULL)")
+            }
+        }
+        val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
 
         fun build(context: Context): AppDatabase = builder(context, NAME)
             .addCallback(object : Callback() {

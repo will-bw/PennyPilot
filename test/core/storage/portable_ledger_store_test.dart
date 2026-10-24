@@ -27,6 +27,33 @@ Map<String, dynamic> _transaction({
 Matcher _error(String code) =>
     isA<LedgerException>().having((error) => error.code, 'code', code);
 
+Map<String, dynamic> canonicalBackup(Map<String, dynamic> original) {
+  final copy = Map<String, dynamic>.from(
+    jsonDecode(jsonEncode(original)) as Map,
+  );
+  copy['transactions'] = (copy['transactions'] as List)
+      .map(
+        (raw) => {
+          'businessKind': 'standard',
+          'metadataJson': null,
+          'operationKey': null,
+          'editVersion': 0,
+          ...Map<String, dynamic>.from(raw as Map),
+        },
+      )
+      .toList();
+  copy['captureEvents'] = (copy['captureEvents'] as List? ?? [])
+      .map(
+        (raw) => {
+          'metadataJson': null,
+          ...Map<String, dynamic>.from(raw as Map),
+        },
+      )
+      .toList();
+  copy.putIfAbsent('captureTombstones', () => []);
+  return copy;
+}
+
 void main() {
   late Directory directory;
   late String databasePath;
@@ -171,6 +198,209 @@ void main() {
   );
 
   test(
+    'recognition operations are idempotent and cannot resurrect after deletion',
+    () async {
+      final row = {
+        ..._transaction(),
+        'businessKind': 'receivable',
+        'metadataJson': jsonEncode({
+          'operationId': 'same-request:0',
+          'fieldEvidence': {
+            'amount': {'quote': '12.50'},
+          },
+        }),
+      };
+      final first =
+          await store.invoke('saveTransaction', {'revision': 0, ...row}) as Map;
+      final again =
+          await store.invoke('saveTransaction', {'revision': 0, ...row}) as Map;
+      expect(again['id'], first['id']);
+      expect((await store.snapshot()).transactions.length, 1);
+      await store.invoke('deleteTransaction', {
+        'revision': 0,
+        'id': first['id'],
+      });
+      await expectLater(
+        store.invoke('saveTransaction', {'revision': 0, ...row}),
+        throwsA(_error('CANCELLED')),
+      );
+      final backup = await export();
+      expect(
+        (backup['captureTombstones'] as List).single['identityKey'],
+        'operation:same-request:0',
+      );
+    },
+  );
+  test(
+    'new recognition metadata and tombstones roundtrip losslessly',
+    () async {
+      final backup = await export();
+      backup['captureTombstones'] = [
+        {
+          'identityKey': 'operation:deleted',
+          'transactionId': 88,
+          'deletedAt': 100,
+        },
+      ];
+      await restore(backup);
+      expect(
+        (await export())['captureTombstones'],
+        backup['captureTombstones'],
+      );
+    },
+  );
+  test(
+    'imported unknown facts remain pending and unknown model drafts cannot bypass review',
+    () async {
+      for (final source in ['AI_TEXT', 'AI_VOICE', 'AI_IMAGE']) {
+        await expectLater(
+          store.invoke('saveTransaction', {
+            'revision': 0,
+            ..._transaction(),
+            'source': source,
+            'businessKind': 'unknown',
+          }),
+          throwsA(_error('INVALID_ARGUMENT')),
+        );
+      }
+      await store.invoke('saveTransaction', {
+        'revision': 0,
+        ..._transaction(),
+        'source': 'BILL_IMPORT',
+        'businessKind': 'unknown',
+      });
+      final row = (await store.snapshot()).transactions.single;
+      expect(row.status, TxStatus.pending);
+      expect(row.source, TxSource.billImport);
+      expect(row.countsAsExpense, false);
+    },
+  );
+
+  test('stale record edit version cannot overwrite newer edit', () async {
+    final result =
+        await store.invoke('saveTransaction', {
+              'revision': 0,
+              ..._transaction(),
+            })
+            as Map;
+    final id = result['id'];
+    await store.invoke('saveTransaction', {
+      'revision': 0,
+      ..._transaction(),
+      'id': id,
+      'editVersion': 0,
+    });
+    await expectLater(
+      store.invoke('saveTransaction', {
+        'revision': 0,
+        ..._transaction(),
+        'id': id,
+        'editVersion': 0,
+      }),
+      throwsA(_error('STALE_TRANSACTION')),
+    );
+  });
+
+  test(
+    'pending unknown transfer requires a purpose and confirms atomically with edit',
+    () async {
+      await store.invoke('saveTransaction', {'revision': 0, ..._transaction()});
+      final data = await export();
+      final row = Map<String, dynamic>.from(
+        (data['transactions'] as List).single as Map,
+      );
+      row['status'] = 'PENDING';
+      row['businessKind'] = 'unknown';
+      await restore({
+        ...data,
+        'transactions': [row],
+      });
+      for (final method in ['setTransactionStatus', 'saveTransaction']) {
+        await expectLater(
+          store.invoke(method, {
+            'revision': 1,
+            'id': row['id'],
+            ..._transaction(),
+            'status': 'CONFIRMED',
+            'businessKind': 'unknown',
+            'confirmPending': true,
+          }),
+          throwsA(_error('INVALID_ARGUMENT')),
+        );
+      }
+      expect(
+        (await store.snapshot()).transactions.single.status,
+        TxStatus.pending,
+      );
+      await store.invoke('saveTransaction', {
+        'revision': 1,
+        ..._transaction(),
+        'id': row['id'],
+        'businessKind': 'transfer',
+        'confirmPending': true,
+        'editVersion': 0,
+      });
+      final saved = (await store.snapshot()).transactions.single;
+      expect(saved.status, TxStatus.confirmed);
+      expect(saved.effectiveKind, 'transfer');
+      expect(saved.countsAsExpense, false);
+      expect(saved.editVersion, 1);
+      await expectLater(
+        store.invoke('saveTransaction', {
+          'revision': 1,
+          ..._transaction(),
+          'id': row['id'],
+          'businessKind': 'expense',
+          'confirmPending': true,
+          'editVersion': 1,
+        }),
+        throwsA(_error('INVALID_ARGUMENT')),
+      );
+    },
+  );
+  test(
+    'business kind contradictions are rejected on write and restore',
+    () async {
+      final state = await store.snapshot();
+      final incomeCategory = state.categories
+          .firstWhere((c) => c.type == TxType.income)
+          .id;
+      for (final entry in [
+        ('expense', 'INCOME', incomeCategory),
+        ('income', 'EXPENSE', 1),
+        ('refund', 'EXPENSE', 1),
+        ('invented', 'EXPENSE', 1),
+      ]) {
+        await expectLater(
+          store.invoke('saveTransaction', {
+            'revision': 0,
+            ..._transaction(type: entry.$2, categoryId: entry.$3),
+            'businessKind': entry.$1,
+          }),
+          throwsA(_error('INVALID_ARGUMENT')),
+        );
+      }
+      await store.invoke('saveTransaction', {'revision': 0, ..._transaction()});
+      final original = await export();
+      final row = Map<String, dynamic>.from(
+        (original['transactions'] as List).single as Map,
+      );
+      for (final kind in ['income', 'refund', 'invented']) {
+        await expectLater(
+          restore({
+            ...original,
+            'transactions': [
+              {...row, 'businessKind': kind},
+            ],
+          }),
+          throwsA(_error('INVALID_ARGUMENT')),
+        );
+        expect(await export(), original);
+      }
+    },
+  );
+
+  test(
     'shared Android/iOS backup fixture survives SQLite without field loss',
     () async {
       final fixture =
@@ -182,7 +412,7 @@ void main() {
               as Map<String, dynamic>;
       await restore(fixture);
       final actual = await export();
-      expect(actual, fixture);
+      expect(actual, canonicalBackup(fixture));
       // The Kotlin contract test can read this actual SQLite export to verify the
       // complete Android -> Dart SQLite -> Android path in a two-command check.
       final destination =
@@ -371,7 +601,7 @@ void main() {
       ];
       await restore(backup);
       // Canonical JSON can move between Android and iOS without SQLite coupling.
-      expect(jsonDecode(jsonEncode(await export())), backup);
+      expect(jsonDecode(jsonEncode(await export())), canonicalBackup(backup));
       final snapshotMap = await store.invoke('snapshot', {}) as Map;
       expect(
         (snapshotMap['transactions'] as List).every(
@@ -404,7 +634,7 @@ void main() {
       expect(row['duplicateOf'], 41);
       expect(row['rawPayload'], '微信支付 ¥12.50');
       expect(row['captureEventKey'], 'event-42');
-      expect(edited['captureEvents'], backup['captureEvents']);
+      expect(edited['captureEvents'], canonicalBackup(backup)['captureEvents']);
 
       final created =
           await store.invoke('saveTransaction', {

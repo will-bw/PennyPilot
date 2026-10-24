@@ -4,7 +4,13 @@ package com.pennypilot.app.data.llm
  * LLM 服务抽象接口。
  * 实现类：DeepSeekClient（主力）、QwenClient（备用）。
  */
+enum class ModelRole { TEXT, VISION, REVIEW }
+
 interface LLMClient {
+    /** 不包含凭据的配置身份；持久任务只允许原配置执行。 */
+    suspend fun operationIdentity(role: ModelRole = ModelRole.TEXT): String = javaClass.name
+    suspend fun forRole(role: ModelRole): LLMClient = forOperation()
+
     /** 多阶段工具查询绑定一次配置；中途切换服务时必须终止，不能转发到新服务。 */
     suspend fun forOperation(): LLMClient = this
 

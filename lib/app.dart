@@ -130,6 +130,16 @@ class _AppHomeState extends State<_AppHome> {
               ),
             );
           }
+        } else if (launch['route'] == 'recognition_image') {
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => EntryScreen(
+                controller: c,
+                initialAi: true,
+                sharedImage: true,
+              ),
+            ),
+          );
         } else if (launch['route'] == 'coloros_guide') {
           setState(() => selected = 3);
           Navigator.of(context).push(

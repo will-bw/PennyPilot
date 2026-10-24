@@ -16,7 +16,8 @@ data class Message(
     @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
     /** Responses 无服务器状态的工具回合需要保留加密 reasoning；不发送给其他协议。 */
     @Transient val responsesItems: JsonArray? = null,
-    @Transient val responsesAccountId: String? = null
+    @Transient val responsesAccountId: String? = null,
+    @Transient val imageDataUrls: List<String> = emptyList()
 )
 
 @Serializable
@@ -50,7 +51,8 @@ data class ParsedTransaction(
     @SerialName("category") val category: String,    // 分类名
     @SerialName("note") val note: String? = null,
     @SerialName("merchant") val merchant: String? = null,
-    @SerialName("occurred_at") val occurredAt: String? = null  // ISO 8601
+    @SerialName("occurred_at") val occurredAt: String? = null,  // ISO 8601
+    @SerialName("business_kind") val businessKind: String = "unknown"
 )
 
 @Serializable

@@ -74,6 +74,27 @@ class SecureKeyStore(context: Context) {
         get() = read("deepseek_model", "deepseek-chat")
         set(value) = write("deepseek_model", value)
 
+    var recognitionTextProvider: String
+        get() = read("recognition_text_provider", "")
+        set(value) = write("recognition_text_provider", value.trim())
+    var recognitionVisionProvider: String
+        get() = read("recognition_vision_provider", "")
+        set(value) = write("recognition_vision_provider", value.trim())
+    var recognitionReviewProvider: String
+        get() = read("recognition_review_provider", "")
+        set(value) = write("recognition_review_provider", value.trim())
+
+    /** 空值复用当前服务的通用模型；每种能力独立固定版本。 */
+    var recognitionTextModel: String
+        get() = read("recognition_text_model", "")
+        set(value) = write("recognition_text_model", value.trim())
+    var recognitionVisionModel: String
+        get() = read("recognition_vision_model", "")
+        set(value) = write("recognition_vision_model", value.trim())
+    var recognitionReviewModel: String
+        get() = read("recognition_review_model", "")
+        set(value) = write("recognition_review_model", value.trim())
+
     /** 不同 ChatGPT 工作空间的模型权限可能不同，因此按注册账号分别保存。 */
     fun chatGptModel(accountId: String): String = read("chatgpt_model_$accountId", "")
 

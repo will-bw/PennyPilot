@@ -122,6 +122,36 @@ class PaymentScreenReaderTest {
         assertEquals("支付成功", inspect(root).text)
     }
 
+    @Test fun `structured snapshot retains hierarchy labels identity and geometry without live nodes`() {
+        val root = node(null).apply { className = "android.widget.LinearLayout" }
+        root.add(node("支付成功").apply {
+            viewIdResourceName = "$packageName:id/payment_state"
+            setBoundsInScreen(android.graphics.Rect(10, 20, 100, 60))
+        })
+        val snapshot = inspect(root)
+        val facts = snapshot.structure!!.nodes
+        assertEquals(2, facts.size)
+        assertEquals(facts.first().id, facts.last().parentId)
+        assertEquals("支付成功", facts.last().text)
+        assertEquals(listOf(10, 20, 100, 60), facts.last().bounds)
+        assertTrue(snapshot.structure.toJson().contains("payment_state"))
+        root.add(node("private").apply { isEditable = true })
+        assertNull(inspect(root).structure)
+    }
+
+    @Test fun `hidden container geometry is retained without hidden text or descriptions`() {
+        val root = node("hidden secret").apply {
+            isVisibleToUser = false
+            contentDescription = "hidden password"
+            add(node(receipt))
+        }
+        val snapshot = inspect(root)
+        assertEquals(receipt, snapshot.text)
+        assertNull(snapshot.structure!!.nodes.first().text)
+        assertNull(snapshot.structure.nodes.first().description)
+        assertFalse(snapshot.structure.toJson().contains("secret"))
+    }
+
     @Test fun `chat with editable child rejects even complete payment text`() {
         val root = node(receipt)
         root.add(node("发送消息").apply { isEditable = true })

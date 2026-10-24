@@ -67,6 +67,52 @@ class MobilePlatformServices {
     };
   }
 
+  Future<Uint8List> _readSelected(PlatformFile file, int limit) async {
+    if ((file.lengthSync() ?? 0) > limit) {
+      throw const LedgerException('文件过大，请选择较小的文件。');
+    }
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in file.readAsByteStream()) {
+      if (bytes.length + chunk.length > limit) {
+        throw const LedgerException('文件过大，请选择较小的文件。');
+      }
+      bytes.add(chunk);
+    }
+    return bytes.takeBytes();
+  }
+
+  Future<Map<String, dynamic>?> pickRecognitionImage() async {
+    final file = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['png', 'jpg', 'jpeg', 'webp'],
+    );
+    if (file == null) return null;
+    final bytes = await _readSelected(file, 2 * 1024 * 1024);
+    final extension = file.extension?.toLowerCase();
+    return {
+      'base64': base64Encode(bytes),
+      'mimeType': extension == 'png'
+          ? 'image/png'
+          : extension == 'webp'
+          ? 'image/webp'
+          : 'image/jpeg',
+    };
+  }
+
+  Future<Map<String, dynamic>?> pickBillFile() async {
+    final file = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+    );
+    if (file == null) return null;
+    final bytes = await _readSelected(file, maximumBackupBytes);
+    try {
+      return {'name': file.name, 'text': utf8.decode(bytes)};
+    } on FormatException {
+      throw const LedgerException('这份账单不是 UTF-8 编码，请转换为 UTF-8 CSV 后重新导入。');
+    }
+  }
+
   Future<String> startSpeech() {
     if (_disposed) {
       return Future.error(const LedgerException('语音服务已关闭。'));

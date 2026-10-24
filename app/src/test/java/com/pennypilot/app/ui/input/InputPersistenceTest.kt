@@ -286,6 +286,11 @@ class InputPersistenceTest {
         override suspend fun captureEvidenceByNotification(packageName: String, notificationKey: String, start: Long, end: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun captureEvidenceNear(start: Long, end: Long, amount: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun nonCapturedTransactionsNear(start: Long, end: Long, amount: Long, type: TxType) = emptyList<TransactionEntity>()
+        override suspend fun updateCaptureEvidence(evidence: com.pennypilot.app.data.db.entity.CaptureEvidenceEntity) {}
+        override suspend fun getByOperationKey(key: String) = saved.firstOrNull { it.operationKey == key }
+        override suspend fun tombstone(key: String): com.pennypilot.app.data.db.entity.CaptureTombstoneEntity? = null
+        override suspend fun insertTombstones(rows: List<com.pennypilot.app.data.db.entity.CaptureTombstoneEntity>) {}
+        override suspend fun evidenceForTransaction(id: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun update(tx: TransactionEntity) { updated = tx }
         override suspend fun updateStatus(id: Long, status: TxStatus) = 0
         override suspend fun updateCapturedStatus(id: Long, eventKey: String, status: TxStatus) = 0

@@ -93,4 +93,50 @@ class CaptureProcessorTest {
             database.close()
         }
     }
+    @Test fun `automatic recording keeps unknown transfers pending without quick confirm`() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+            preferences.setScreenCaptureEnabled(true)
+            preferences.setCaptureAutoRecordEnabled(true)
+            shadowOf(manager).setNotificationsEnabled(true)
+            NotificationHelper.createChannels(context)
+            val processor = CaptureProcessor(context, database, preferences, cloud, CaptureServiceMonitor())
+            val now = System.currentTimeMillis()
+            assertTrue(processor.processScreen("com.tencent.mm", NotificationParseResult(1800, "小林", "EXPENSE", businessKind = "unknown"), "unknown-transfer", now, LedgerRevision.current))
+            assertEquals(TxStatus.PENDING, database.backupDao().transactions().single().status)
+            val notification = manager.activeNotifications.single { it.tag == "unknown-transfer" }.notification
+            assertFalse(notification.actions.orEmpty().any { it.title.toString() == "记入" })
+            assertTrue(notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString().contains("核对用途"))
+            assertTrue(processor.processScreen("com.tencent.mm", NotificationParseResult(2800, "咖啡店", "EXPENSE", businessKind = "expense"), "known-consumption", now, LedgerRevision.current))
+            assertEquals(TxStatus.CONFIRMED, database.backupDao().transactions().single { it.captureEventKey == "known-consumption" }.status)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            preferences.setCaptureAutoRecordEnabled(false)
+            manager.cancelAll()
+            database.close()
+        }
+    }
+
+    @Test fun `conflicting same event reports conflict without replacing financial facts`() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+            preferences.setScreenCaptureEnabled(true)
+            val monitor = CaptureServiceMonitor()
+            val processor = CaptureProcessor(context, database, preferences, cloud, monitor)
+            val now = System.currentTimeMillis()
+            assertTrue(processor.processScreen("com.tencent.mm", NotificationParseResult(1800, "小林", "EXPENSE"), "conflicting-event", now, LedgerRevision.current))
+            assertTrue(processor.processScreen("com.tencent.mm", NotificationParseResult(2800, "小林", "EXPENSE"), "conflicting-event", now, LedgerRevision.current))
+            assertEquals(1800L, database.backupDao().transactions().single().amount)
+            assertTrue(monitor.health.value.lastError.orEmpty().contains("不同金额"))
+            assertEquals("model_rejected", monitor.health.value.screenCaptureStatus)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            context.getSystemService(NotificationManager::class.java).cancelAll()
+            database.close()
+        }
+    }
+
 }

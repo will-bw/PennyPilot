@@ -16,13 +16,16 @@ data class CaptureEvidence(
     // 通知更新身份必须由系统 key + 上游 notification.when 构成；when 缺失时传 null。
     val notificationKey: String? = null,
     val orderId: String? = null,
-    val orderDomain: String? = null
+    val orderDomain: String? = null,
+    val metadataJson: String? = null
 )
 
 sealed interface CaptureResult {
     data class Inserted(val transactionId: Long, val duplicateOf: Long? = null) : CaptureResult
     data class Duplicate(val transactionId: Long) : CaptureResult
+    data class Conflict(val transactionId: Long) : CaptureResult
     data object StaleRevision : CaptureResult
+    data object StaleEvidence : CaptureResult
 }
 
 object CapturePersistence {
@@ -38,13 +41,15 @@ object CapturePersistence {
         database: AppDatabase,
         expectedRevision: Long,
         transaction: TransactionEntity,
-        evidence: CaptureEvidence
+        evidence: CaptureEvidence,
+        isCurrent: () -> Boolean = { true }
     ): CaptureResult = database.withTransaction {
         if (LedgerRevision.current != expectedRevision) return@withTransaction CaptureResult.StaleRevision
+        if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
         require(transaction.id == 0L && evidence.eventKey.isNotBlank() && evidence.packageName.isNotBlank())
         require(transaction.source == TxSource.NOTIFICATION || transaction.source == TxSource.ACCESSIBILITY)
         val dao = database.transactionDao()
-        dao.captureEvidenceByKey(evidence.eventKey)?.let {
+        dao.tombstone(evidence.eventKey)?.let {
             return@withTransaction CaptureResult.Duplicate(it.transactionId)
         }
         val incoming = CaptureEvidenceEntity(
@@ -57,8 +62,40 @@ object CapturePersistence {
             orderDomain = evidence.orderDomain?.takeIf { it.isNotBlank() }
                 ?: CaptureEventIdentity.domainFor(evidence.packageName),
             amount = transaction.amount, type = transaction.type,
-            merchantFingerprint = CaptureEventIdentity.merchantFingerprint(transaction.merchant)
+            merchantFingerprint = CaptureEventIdentity.merchantFingerprint(transaction.merchant),
+            metadataJson = evidence.metadataJson ?: transaction.metadataJson
         )
+        incoming.orderId?.let { order ->
+            dao.tombstone("order:${incoming.orderDomain}:$order:${incoming.type.name}:${incoming.amount}")?.let {
+                return@withTransaction CaptureResult.Duplicate(it.transactionId)
+            }
+        }
+        dao.captureEvidenceByKey(evidence.eventKey)?.let { previous ->
+            if (!sameFinancials(previous, incoming) || conflictingOrders(previous, incoming)) {
+                return@withTransaction CaptureResult.Conflict(previous.transactionId)
+            }
+            // Late loading enriches source evidence only. Never replace user-edited ledger fields.
+            if (sameFinancials(previous, incoming) && !conflictingOrders(previous, incoming)) {
+                if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
+                dao.updateCaptureEvidence(previous.copy(
+                    observedAt = maxOf(previous.observedAt, incoming.observedAt),
+                    orderId = previous.orderId ?: incoming.orderId,
+                    merchantFingerprint = previous.merchantFingerprint ?: incoming.merchantFingerprint,
+                    metadataJson = mergeMetadata(previous.metadataJson, incoming.metadataJson)
+                ))
+                val existing = dao.getById(previous.transactionId)
+                if (existing != null && existing.editVersion == 0L && existing.status == TxStatus.PENDING) {
+                    val enriched = existing.copy(
+                        merchant = existing.merchant ?: transaction.merchant,
+                        accountTag = existing.accountTag ?: transaction.accountTag,
+                        metadataJson = mergeMetadata(existing.metadataJson, transaction.metadataJson),
+                        businessKind = if (existing.businessKind == "unknown") transaction.businessKind else existing.businessKind
+                    )
+                    if (enriched != existing) dao.update(enriched)
+                }
+            }
+            return@withTransaction CaptureResult.Duplicate(previous.transactionId)
+        }
         // v4 的事件没有独立证据行；首次回放补齐元数据但保留账目及状态。
         val legacy = CaptureEventIdentity.legacyNotificationKey(evidence.eventKey)?.let { oldKey ->
             dao.getByCaptureEvent(oldKey)?.takeIf {
@@ -67,14 +104,13 @@ object CapturePersistence {
             }
         }
         (dao.getByCaptureEvent(evidence.eventKey) ?: legacy)?.let {
+            if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
             dao.insertCaptureEvidence(incoming.copy(transactionId = it.id))
             return@withTransaction CaptureResult.Duplicate(it.id)
         }
-        val sameOrder = incoming.orderId?.let { orderId ->
-            dao.captureEvidenceByOrder(incoming.orderDomain, orderId).firstOrNull {
-                sameFinancials(it, incoming)
-            }
-        }
+        val orderEvidence = incoming.orderId?.let { orderId -> dao.captureEvidenceByOrder(incoming.orderDomain, orderId) }.orEmpty()
+        val sameOrder = orderEvidence.firstOrNull { sameFinancials(it, incoming) }
+        val orderConflict = orderEvidence.firstOrNull { it.type == incoming.type && it.amount != incoming.amount }
         val notificationUpdate = if (incoming.source == TxSource.NOTIFICATION && incoming.notificationKey != null) {
             dao.captureEvidenceByNotification(
                 incoming.packageName, incoming.notificationKey,
@@ -84,6 +120,7 @@ object CapturePersistence {
         } else null
         val duplicate = sameOrder ?: notificationUpdate
         if (duplicate != null) {
+            if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
             dao.insertCaptureEvidence(incoming.copy(
                 transactionId = duplicate.transactionId, firstObservedAt = duplicate.firstObservedAt
             ))
@@ -104,14 +141,30 @@ object CapturePersistence {
                 CaptureEventIdentity.merchantFingerprint(it.merchant) == incoming.merchantFingerprint
             }
         } else null
-        val duplicateOf = possibleDuplicate?.transactionId ?: manuallyRecorded?.id
+        val duplicateOf = orderConflict?.transactionId ?: possibleDuplicate?.transactionId ?: manuallyRecorded?.id
+        if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
         val id = dao.insert(transaction.copy(
             captureEventKey = incoming.eventKey, duplicateOf = duplicateOf,
-            // 每次自动捕获均待确认，尤其不能把弱证据候选计入已确认收支。
-            status = TxStatus.PENDING
+            metadataJson = if (orderConflict == null) transaction.metadataJson else kotlinx.serialization.json.buildJsonObject {
+                transaction.metadataJson?.let { raw -> runCatching { kotlinx.serialization.json.Json.parseToJsonElement(raw) as kotlinx.serialization.json.JsonObject }.getOrNull()?.forEach { (key, value) -> put(key, value) } }
+                put("conflictingTransactionId", kotlinx.serialization.json.JsonPrimitive(orderConflict.transactionId))
+                put("questions", kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive("同一订单出现不同金额，请核对原账目后再确认。"))))
+            }.toString(),
+            // Explicit auto-record policy can confirm verified rules; weak duplicate evidence never can.
+            status = if (duplicateOf != null) TxStatus.PENDING else transaction.status
         ))
         dao.insertCaptureEvidence(incoming.copy(transactionId = id))
         CaptureResult.Inserted(id, duplicateOf)
+    }
+
+    private fun mergeMetadata(previous: String?, incoming: String?): String? {
+        if (incoming == null) return previous
+        if (previous == null) return incoming
+        return runCatching {
+            val old = kotlinx.serialization.json.Json.parseToJsonElement(previous) as kotlinx.serialization.json.JsonObject
+            val fresh = kotlinx.serialization.json.Json.parseToJsonElement(incoming) as kotlinx.serialization.json.JsonObject
+            kotlinx.serialization.json.JsonObject(fresh + old).toString()
+        }.getOrDefault(previous)
     }
 
     internal fun isNotificationUpdate(previous: CaptureEvidenceEntity, incoming: CaptureEvidenceEntity): Boolean =

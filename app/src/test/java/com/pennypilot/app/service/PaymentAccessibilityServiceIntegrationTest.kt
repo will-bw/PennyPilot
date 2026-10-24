@@ -5,6 +5,7 @@ import android.app.Application
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -26,6 +27,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.*
@@ -64,6 +66,7 @@ class PaymentAccessibilityServiceIntegrationTest {
     private lateinit var controller: ServiceController<PaymentAccessibilityService>
     private lateinit var service: PaymentAccessibilityService
     private lateinit var window: PaymentAccessibilityWindowShadow
+    private var serviceDestroyed = false
     private var cloudCalls = 0
     private val startedAt = System.currentTimeMillis()
 
@@ -74,6 +77,10 @@ class PaymentAccessibilityServiceIntegrationTest {
         preferences.setNotificationCaptureEnabled(false)
         preferences.setNotificationCloudParsingEnabled(false)
         preferences.setScreenCaptureEnabled(false)
+        preferences.setScreenCloudParsingEnabled(false)
+        preferences.setScreenVisualCaptureEnabled(false)
+        preferences.setCloudImageParsingEnabled(false)
+        CaptureDiagnosticStore.clear()
         val directExecutor = Executor { it.run() }
         database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
@@ -104,6 +111,7 @@ class PaymentAccessibilityServiceIntegrationTest {
             }
             readDispatcher = dispatcher
             nowMillis = { startedAt + scheduler.currentTime }
+            elapsedMillis = { scheduler.currentTime }
         }
         window = Shadow.extract(service)
         controller.create()
@@ -111,11 +119,14 @@ class PaymentAccessibilityServiceIntegrationTest {
     }
 
     @After fun tearDown() {
-        controller.destroy()
+        destroyService()
         scheduler.runCurrent()
         runBlocking {
             preferences.setScreenCaptureEnabled(false)
             preferences.setNotificationCaptureEnabled(true)
+            preferences.setScreenCloudParsingEnabled(false)
+            preferences.setScreenVisualCaptureEnabled(false)
+            preferences.setCloudImageParsingEnabled(false)
         }
         shadowOf(context.getSystemService(NotificationManager::class.java)).setNotificationsEnabled(true)
         database.close()
@@ -244,10 +255,151 @@ class PaymentAccessibilityServiceIntegrationTest {
         sendEvent()
         awaitStatus("duplicate")
         assertEquals(1, rows().size)
+        assertEquals("202610240001", runBlocking { database.backupDao().captureEvents() }.single().orderId)
         window.root = { screen("转账成功\n¥18.00\n收款方\n小明\n订单号 202610240002\n完成") }
         sendEvent()
         awaitStatus("saved")
         assertEquals(2, rows().size)
+    }
+
+    @Test fun `late order without a second event enriches persisted evidence under the original event`() {
+        connect(enabled = true)
+        var detailed = false
+        window.root = { screen(if (detailed) "转账成功\n¥18.00\n收款方\n小明\n订单号202610240001\n完成"
+            else "转账成功\n¥18.00\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        val event = rows().single().captureEventKey
+        detailed = true
+        scheduler.advanceTimeBy(250)
+        awaitStatus("duplicate")
+        val evidence = runBlocking { database.backupDao().captureEvents() }.single()
+        assertEquals(event, evidence.eventKey)
+        assertEquals("202610240001", evidence.orderId)
+        assertEquals(1, rows().size)
+    }
+
+    @Test fun `an explicit input boundary permits a fast second identical transfer`() {
+        connect(enabled = true)
+        window.root = { screen("已转账\n¥18.00\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        val first = rows().single().captureEventKey
+        window.root = { screen("转账", editableChild = true) }
+        sendEvent()
+        awaitStatus("input_page")
+        scheduler.advanceTimeBy(100)
+        window.root = { screen("已转账\n¥18.00\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(2, rows().size)
+        assertEquals(2, rows().map { it.captureEventKey }.distinct().size)
+        assertTrue(rows().any { it.captureEventKey != first })
+    }
+
+    @Test fun `unknown safe result reaches inference once and later known layout reuses logical event`() {
+        val requests = mutableListOf<Pair<String, String>>()
+        service.unknownScreenHandler = { _, text, key, _, _, structure, _ ->
+            assertNotNull(structure)
+            requests += key to text
+            true
+        }
+        connect(enabled = true)
+        window.root = { screen("本次付款已成功\n￥18.00\n完成") }
+        sendEvent()
+        awaitCondition("unknown result was not sent to processor") { requests.size == 1 }
+        drainRetries()
+        assertEquals(1, requests.size)
+        assertTrue(rows().isEmpty())
+        window.root = { screen("付款成功\n￥18.00\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(requests.single().first, rows().single().captureEventKey)
+    }
+
+    @Test fun `unsafe unknown screens never reach inference even with a configured handler`() {
+        var requests = 0
+        service.unknownScreenHandler = { _, _, _, _, _, _, _ -> requests++; true }
+        connect(enabled = true)
+        listOf("账单详情\n本次付款成功\n￥18.00\n完成", "聊天记录\n本次付款成功\n￥18.00\n完成",
+            "本次付款失败\n￥18.00\n完成", "明天准备\n本次付款成功\n￥18.00\n完成").forEach { text ->
+            window.root = { screen(text) }
+            sendEvent()
+            awaitStatus("not_receipt")
+        }
+        window.root = { screen("本次付款成功\n￥18.00\n完成", editableChild = true) }
+        sendEvent()
+        awaitStatus("input_page")
+        assertEquals(0, requests)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `visual recovery requires explicit consent and remains local when ocr proves a transfer`() {
+        var screenshots = 0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "￥18.00" }
+        connect(enabled = true)
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitStatus("not_receipt")
+        drainRetries()
+        assertEquals(0, screenshots)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(1, screenshots)
+        assertEquals(1800L, rows().single().amount)
+        assertEquals(0, cloudCalls)
+        drainRetries()
+        sendEvent()
+        awaitStatus("duplicate")
+        assertEquals(1, screenshots)
+        assertEquals(1, rows().size)
+        assertEquals("duplicate", monitor.health.value.screenCaptureStatus)
+        // A second real transfer with the same image-only amount must not share the cooldown.
+        window.root = { screen("转账", editableChild = true) }
+        sendEvent()
+        awaitStatus("input_page")
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(2, screenshots)
+        assertEquals(2, rows().size)
+    }
+
+    @Test fun `visual recovery refuses a changed window before using OCR output`() {
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            window.root = { screen("聊天记录", editableChild = true) }
+            "转账成功\n￥18.00"
+        }
+        connect(enabled = true)
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        drainRetries()
+        assertTrue(rows().isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `same-window content event invalidates old image even when node text did not change`() {
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var screenshots = 0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            if (screenshots == 1) {
+                // The result amount is image-only; a new frame can leave all node labels identical.
+                sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+                "￥18.00"
+            } else "￥28.00"
+        }
+        connect(enabled = true)
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(2, screenshots)
+        assertEquals(2800L, rows().single().amount)
+        assertEquals(0, cloudCalls)
     }
 
     @Test fun `mismatched window or unsupported app cannot provide payment evidence`() {
@@ -277,6 +429,24 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals("disconnected", monitor.health.value.screenCaptureStatus)
         assertEquals(priorReads, window.reads)
         assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `destroying service during retry wait closes channel without uncaught coroutine failure`() = runTest(dispatcher) {
+        connect(enabled = true)
+        sendEvent()
+        awaitStatus("unreadable")
+        // The read worker is now suspended in its timed receive, rather than the outer channel loop.
+        scheduler.runCurrent()
+        val priorReads = window.reads
+        destroyService()
+        window.root = { screen("转账成功\n¥18.00\n完成") }
+        sendEvent()
+        scheduler.advanceUntilIdle()
+        assertFalse(monitor.health.value.isAccessibilityBound)
+        assertEquals("disconnected", monitor.health.value.screenCaptureStatus)
+        assertEquals(priorReads, window.reads)
+        assertTrue(rows().isEmpty())
+        // runTest also fails if closing the channel escapes as an unhandled exception in the service.
     }
 
     @Test fun `stable wechat result under a hidden container is captured without notification`() {
@@ -450,6 +620,13 @@ class PaymentAccessibilityServiceIntegrationTest {
     }
 
     private fun rows() = runBlocking { database.backupDao().transactions() }
+
+    private fun destroyService() {
+        if (!serviceDestroyed) {
+            serviceDestroyed = true
+            controller.destroy()
+        }
+    }
 
     private fun awaitStatus(status: String) = awaitCondition("expected $status, got ${monitor.health.value}") {
         monitor.health.value.screenCaptureStatus == status

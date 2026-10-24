@@ -54,7 +54,14 @@ class PortableLedgerStore implements LedgerRepository {
     return _factory.openDatabase(
       location,
       options: sqlite.OpenDatabaseOptions(
-        version: 1,
+        version: 2,
+        onUpgrade: (database, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await database.execute(
+              'CREATE TABLE capture_tombstones (identityKey TEXT PRIMARY KEY NOT NULL,payload TEXT NOT NULL)',
+            );
+          }
+        },
         onCreate: (database, _) async {
           // The canonical JSON row preserves all wire fields. Typed validation,
           // relationship checks and writes run inside the same SQLite transaction.
@@ -67,6 +74,9 @@ class PortableLedgerStore implements LedgerRepository {
           await database.execute(
             'CREATE TABLE capture_events (eventKey TEXT PRIMARY KEY NOT NULL, '
             'payload TEXT NOT NULL)',
+          );
+          await database.execute(
+            'CREATE TABLE capture_tombstones (identityKey TEXT PRIMARY KEY NOT NULL,payload TEXT NOT NULL)',
           );
           await database.execute(
             'CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, '
@@ -233,15 +243,37 @@ class PortableLedgerStore implements LedgerRepository {
         return {'ids': ids};
       case 'deleteTransaction':
         final id = _int(arguments, 'id', min: 1);
-        await _existing(database, 'transactions', id, '账目');
+        final deleted = await _existing(database, 'transactions', id, '账目');
+        final identities = <String>{
+          if (deleted['captureEventKey'] is String)
+            deleted['captureEventKey'] as String,
+          if (deleted['operationKey'] is String)
+            'operation:${deleted['operationKey']}',
+        };
         for (final evidence in await _captureRows(database)) {
           if (evidence['transactionId'] == id) {
+            identities.add(evidence['eventKey'] as String);
+            if (evidence['orderId'] is String) {
+              identities.add(
+                'order:${evidence['orderDomain']}:${evidence['orderId']}:${evidence['type']}:${evidence['amount']}',
+              );
+            }
             await database.delete(
               'capture_events',
               where: 'eventKey = ?',
               whereArgs: [evidence['eventKey']],
             );
           }
+        }
+        for (final identity in identities) {
+          await database.insert('capture_tombstones', {
+            'identityKey': identity,
+            'payload': jsonEncode({
+              'identityKey': identity,
+              'transactionId': id,
+              'deletedAt': _clock().millisecondsSinceEpoch,
+            }),
+          }, conflictAlgorithm: sqlite.ConflictAlgorithm.replace);
         }
         await database.delete('transactions', where: 'id = ?', whereArgs: [id]);
         return null;
@@ -253,6 +285,10 @@ class PortableLedgerStore implements LedgerRepository {
           'IGNORED',
         });
         _require(row['status'] == 'PENDING', '账目已处理，请刷新列表。');
+        _require(
+          status != 'CONFIRMED' || row['businessKind'] != 'unknown',
+          '请先选择这笔资金变动的账务用途。',
+        );
         await _writeRow(database, 'transactions', {...row, 'status': status});
         return null;
       case 'saveCategory':
@@ -309,6 +345,35 @@ class PortableLedgerStore implements LedgerRepository {
     final old = id == 0
         ? null
         : await _existing(database, 'transactions', id, '账目');
+    if (old != null &&
+        arguments['editVersion'] != null &&
+        arguments['editVersion'] != (old['editVersion'] ?? 0)) {
+      throw const LedgerException('账目已更新，请重新打开后修改。', code: 'STALE_TRANSACTION');
+    }
+    final metadata = arguments['metadataJson'];
+    if (id == 0 && metadata is String) {
+      final operationId = _map(jsonDecode(metadata), '识别依据')['operationId'];
+      if (operationId is String && operationId.isNotEmpty) {
+        if ((await database.query(
+          'capture_tombstones',
+          where: 'identityKey = ?',
+          whereArgs: ['operation:$operationId'],
+        )).isNotEmpty) {
+          throw const LedgerException('这笔录入已删除，旧请求不会再次入账。', code: 'CANCELLED');
+        }
+        for (final record in await _rows(database, 'transactions')) {
+          try {
+            final previous = record['metadataJson'];
+            if (previous is String &&
+                (jsonDecode(previous) as Map)['operationId'] == operationId) {
+              return record['id'] as int;
+            }
+          } catch (_) {
+            /* Legacy rows have no recognition metadata. */
+          }
+        }
+      }
+    }
     final amount = _int(arguments, 'amount', min: 1, max: maxTransactionFen);
     final type = _choice(arguments, 'type', _types);
     final categoryId = _int(arguments, 'categoryId', min: 1);
@@ -317,6 +382,37 @@ class PortableLedgerStore implements LedgerRepository {
       category['type'] == type &&
           (category['enabled'] == true || old?['categoryId'] == categoryId),
       '请选择相同收支类型的可用分类。',
+    );
+    final kind =
+        _optionalString(arguments, 'businessKind', max: 40) ??
+        old?['businessKind'] ??
+        'standard';
+    _require(_businessKinds.contains(kind), '账务用途无效。');
+    _require(kind != 'expense' || type == 'EXPENSE', '消费支出应为资金转出。');
+    _require(
+      !const {'income', 'refund'}.contains(kind) || type == 'INCOME',
+      '收入和退款应为资金转入。',
+    );
+    final confirm = arguments['confirmPending'] == true;
+    _require(
+      !confirm ||
+          old != null && old['status'] == 'PENDING' && kind != 'unknown',
+      '请先选择待确认账目的账务用途。',
+    );
+    final source =
+        old?['source'] ??
+        _choice(arguments, 'source', const {
+          'MANUAL',
+          'AI_TEXT',
+          'AI_VOICE',
+          'AI_IMAGE',
+          'BILL_IMPORT',
+        }, fallback: 'MANUAL');
+    _require(
+      old != null ||
+          kind != 'unknown' ||
+          !const {'AI_TEXT', 'AI_VOICE', 'AI_IMAGE'}.contains(source),
+      '请先选择识别草稿的账务用途。',
     );
     final row = {
       ...?old,
@@ -339,17 +435,27 @@ class PortableLedgerStore implements LedgerRepository {
         blankToNull: true,
       ),
       'createdAt': old?['createdAt'] ?? _clock().millisecondsSinceEpoch,
-      'source':
-          old?['source'] ??
-          _choice(arguments, 'source', const {
-            'MANUAL',
-            'AI_TEXT',
-            'AI_VOICE',
-          }, fallback: 'MANUAL'),
-      'status': old?['status'] ?? 'CONFIRMED',
+      'source': source,
+      'status': confirm
+          ? 'CONFIRMED'
+          : old?['status'] ??
+                (source == 'BILL_IMPORT' && kind == 'unknown'
+                    ? 'PENDING'
+                    : 'CONFIRMED'),
       'duplicateOf': old?['duplicateOf'],
       'rawPayload': old?['rawPayload'],
       'captureEventKey': old?['captureEventKey'],
+      'businessKind':
+          _optionalString(arguments, 'businessKind', max: 40) ??
+          old?['businessKind'] ??
+          'standard',
+      'metadataJson':
+          _optionalString(arguments, 'metadataJson', max: 100000) ??
+          old?['metadataJson'],
+      'operationKey': metadata is String
+          ? (jsonDecode(metadata) as Map)['operationId']
+          : old?['operationKey'],
+      'editVersion': (old?['editVersion'] as int? ?? 0) + (old == null ? 0 : 1),
     };
     return _writeRow(database, 'transactions', row);
   }
@@ -447,6 +553,9 @@ class PortableLedgerStore implements LedgerRepository {
     'version': 1,
     for (final table in _tables) table: await _rows(database, table),
     'captureEvents': await _captureRows(database),
+    'captureTombstones': (await database.query('capture_tombstones'))
+        .map((row) => _map(jsonDecode(row['payload'] as String), '删除记录'))
+        .toList(),
   };
 
   Future<void> _restore(
@@ -460,6 +569,7 @@ class PortableLedgerStore implements LedgerRepository {
       await database.delete(table);
     }
     await database.delete('capture_events');
+    await database.delete('capture_tombstones');
     for (final table in _tables) {
       for (final row in backup[table]!) {
         await _writeRow(database, table, row);
@@ -468,6 +578,12 @@ class PortableLedgerStore implements LedgerRepository {
     for (final row in backup['captureEvents']!) {
       await database.insert('capture_events', {
         'eventKey': row['eventKey'],
+        'payload': jsonEncode(row),
+      });
+    }
+    for (final row in backup['captureTombstones']!) {
+      await database.insert('capture_tombstones', {
+        'identityKey': row['identityKey'],
         'payload': jsonEncode(row),
       });
     }

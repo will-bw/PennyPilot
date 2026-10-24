@@ -8,7 +8,11 @@ data class NotificationParseResult(
     val merchant: String?,
     val direction: String,  // "EXPENSE" or "INCOME"
     val orderId: String? = null,
-    val paymentMethod: String? = null
+    val paymentMethod: String? = null,
+    val businessKind: String = "unknown",
+    val scene: String? = null,
+    val ruleVersion: String? = null,
+    val fieldEvidence: Map<String, String> = emptyMap()
 )
 
 object ParseRuleEngine {

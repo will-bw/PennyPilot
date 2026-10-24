@@ -5,6 +5,8 @@ import '../../core/models.dart';
 import '../../ui/common.dart';
 import '../../ui/theme.dart';
 import '../settings/voice_settings_screen.dart';
+import '../settings/recognition_settings_screen.dart';
+import 'bill_import_screen.dart';
 
 class EntryScreen extends StatefulWidget {
   const EntryScreen({
@@ -12,10 +14,13 @@ class EntryScreen extends StatefulWidget {
     required this.controller,
     this.transaction,
     this.onDraftSaved,
+    this.initialAi = false,
+    this.sharedImage = false,
   });
   final LedgerController controller;
   final LedgerTransaction? transaction;
   final ValueChanged<LedgerTransaction>? onDraftSaved;
+  final bool initialAi, sharedImage;
   @override
   State<EntryScreen> createState() => _EntryScreenState();
 }
@@ -30,7 +35,9 @@ class _EntryScreenState extends State<EntryScreen> {
   late int? categoryId = widget.transaction?.categoryId;
   late DateTime occurredAt = widget.transaction?.occurredAt ?? DateTime.now();
   late final int openingRevision;
-  bool saving = false, ai = false;
+  late String businessKind = widget.transaction?.effectiveKind ?? 'expense';
+  bool saving = false;
+  late bool ai = widget.initialAi;
   @override
   void initState() {
     super.initState();
@@ -72,6 +79,9 @@ class _EntryScreenState extends State<EntryScreen> {
       accountTag: account.text.trim(),
       source: widget.transaction?.source ?? TxSource.manual,
       status: widget.transaction?.status ?? TxStatus.confirmed,
+      businessKind: businessKind,
+      metadataJson: widget.transaction?.metadataJson,
+      editVersion: widget.transaction?.editVersion ?? 0,
     );
     if (widget.onDraftSaved != null) {
       widget.onDraftSaved!(tx);
@@ -84,6 +94,7 @@ class _EntryScreenState extends State<EntryScreen> {
       () => widget.controller.saveTransaction(
         tx,
         expectedRevision: openingRevision,
+        confirmPending: widget.transaction?.status == TxStatus.pending,
       ),
       success: widget.transaction == null ? '已记下一笔' : '账单已更新',
     );
@@ -188,7 +199,7 @@ class _EntryScreenState extends State<EntryScreen> {
                   ),
                 Expanded(
                   child: ai
-                      ? _AiEntry(controller: c)
+                      ? _AiEntry(controller: c, sharedImage: widget.sharedImage)
                       : _manualForm(cats, colors),
                 ),
               ],
@@ -222,6 +233,14 @@ class _EntryScreenState extends State<EntryScreen> {
                       ? null
                       : (value) => setState(() {
                           type = value.first;
+                          if (businessKind == 'expense' ||
+                              businessKind == 'income' ||
+                              businessKind == 'refund' &&
+                                  type == TxType.expense) {
+                            businessKind = type == TxType.expense
+                                ? 'expense'
+                                : 'income';
+                          }
                           categoryId = null;
                         }),
                 ),
@@ -269,6 +288,56 @@ class _EntryScreenState extends State<EntryScreen> {
                     ? '请输入 0.01 至 9,999,999.99 元，最多两位小数'
                     : null,
               ),
+              const SizedBox(height: 20),
+              DropdownButtonFormField<String>(
+                key: ValueKey('business-kind-$businessKind'),
+                initialValue: businessKind,
+                decoration: const InputDecoration(labelText: '账务用途'),
+                items:
+                    const {
+                          'expense': '消费支出',
+                          'income': '收入',
+                          'transfer': '本人账户转移',
+                          'receivable': '借出／垫付（应收）',
+                          'payable': '借入／偿还（应付）',
+                          'refund': '退款',
+                          'unknown': '待分类资金变动',
+                        }.entries
+                        .map(
+                          (e) => DropdownMenuItem(
+                            value: e.key,
+                            child: Text(e.value),
+                          ),
+                        )
+                        .toList(),
+                validator: (value) =>
+                    (widget.transaction?.status == TxStatus.pending ||
+                            widget.onDraftSaved != null &&
+                                widget.transaction?.source !=
+                                    TxSource.billImport) &&
+                        value == 'unknown'
+                    ? '请先选择这笔转账的用途，再确认入账'
+                    : null,
+                onChanged: saving
+                    ? null
+                    : (value) => setState(() {
+                        businessKind = value!;
+                        final nextType = value == 'expense'
+                            ? TxType.expense
+                            : const {'income', 'refund'}.contains(value)
+                            ? TxType.income
+                            : type;
+                        if (nextType != type) {
+                          type = nextType;
+                          categoryId = null;
+                        }
+                      }),
+              ),
+              if (!const {'expense', 'income', 'refund'}.contains(businessKind))
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Text('这笔资金变动不计入消费或收入统计。'),
+                ),
               const SectionTitle('分类'),
               if (categories.isEmpty)
                 const Text('没有可用分类，请先到设置中添加。')
@@ -365,6 +434,8 @@ class _EntryScreenState extends State<EntryScreen> {
                   ],
                 ),
               ),
+              if (widget.transaction?.recognitionMetadata.isNotEmpty == true)
+                _StoredEvidence(transaction: widget.transaction!),
               if (widget.transaction != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 16),
@@ -400,6 +471,8 @@ class _EntryScreenState extends State<EntryScreen> {
                       ? '完成核对'
                       : widget.transaction == null
                       ? '保存这笔账'
+                      : widget.transaction?.status == TxStatus.pending
+                      ? '保存并确认'
                       : '保存修改',
                 ),
               ),
@@ -486,19 +559,50 @@ class _CategoryOption extends StatelessWidget {
 }
 
 class _AiEntry extends StatefulWidget {
-  const _AiEntry({required this.controller});
+  const _AiEntry({required this.controller, this.sharedImage = false});
   final LedgerController controller;
+  final bool sharedImage;
   @override
   State<_AiEntry> createState() => _AiEntryState();
 }
 
 class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
   final input = TextEditingController();
-  bool voice = false;
+  Map<String, dynamic>? shared;
+  String? recognitionSession;
+  Future<void> recognize(
+    String text, {
+    TxSource source = TxSource.aiText,
+  }) async {
+    recognitionSession ??= DateTime.now().microsecondsSinceEpoch.toString();
+    await widget.controller.recognizeInput(
+      text: text,
+      source: source,
+      sessionId: recognitionSession,
+    );
+    if (mounted && widget.controller.recognitionQuestions.isEmpty) {
+      input.clear();
+      recognitionSession = null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    if (widget.sharedImage) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await runUi(context, () async {
+          final value = await widget.controller.command(
+            'consumeSharedImage',
+            refreshAfter: false,
+          );
+          if (mounted && value != null) {
+            setState(() => shared = stringMap(value));
+          }
+        });
+      });
+    }
   }
 
   @override
@@ -518,23 +622,56 @@ class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  Future<void> image() async {
+    final c = widget.controller;
+    if (c.settings['cloudImageParsingEnabled'] != true) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => RecognitionSettingsScreen(controller: c),
+        ),
+      );
+      return;
+    }
+    if (!mounted) return;
+    await runUi(context, () async {
+      final raw =
+          shared ??
+          await c.command('pickRecognitionImage', refreshAfter: false);
+      if (raw == null) return;
+      final data = stringMap(raw);
+      // Native picker contract uses base64; the model transport names it explicitly.
+      await c.recognizeInput(
+        text: input.text,
+        source: TxSource.aiImage,
+        image: {
+          'imageBase64': data['base64'] ?? data['imageBase64'],
+          'mimeType': data['mimeType'],
+        },
+      );
+      if (mounted) setState(() => shared = null);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = widget.controller;
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
       children: [
-        const PageHeading(title: '说说这笔收支', subtitle: '可以一次说多笔。识别后先核对，再保存到账本。'),
+        const PageHeading(
+          title: '说说这笔收支',
+          subtitle: '文字、语音、图片或账单文件，都可以一次录入多笔。',
+        ),
         const SizedBox(height: 24),
         TextField(
           controller: input,
-          onChanged: (_) => voice = false,
           minLines: 4,
           maxLines: 8,
           maxLength: 4000,
           decoration: InputDecoration(
-            labelText: '这笔钱怎么花的',
-            hintText: '例如：今天午饭 28 元，地铁 4 元',
+            labelText: '记账描述或补充信息',
+            hintText: '例如：昨天午饭 28 元，地铁 4 元；今天借给小王 200 元',
             fillColor: Theme.of(context).colorScheme.secondaryContainer,
             alignLabelWithHint: true,
           ),
@@ -556,18 +693,20 @@ class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
                         return;
                       }
                       if (c.settings['hasSpeechKey'] != true) {
-                        await Navigator.of(context).push(
+                        await Navigator.push(
+                          context,
                           MaterialPageRoute<void>(
                             builder: (_) => VoiceSettingsScreen(controller: c),
                           ),
                         );
                         return;
                       }
+                      if (!context.mounted) return;
                       await runUi(context, () async {
                         final text = await c.startSpeech();
-                        if (mounted) {
+                        if (mounted && text.trim().isNotEmpty) {
                           input.text = text;
-                          voice = true;
+                          await recognize(text, source: TxSource.aiVoice);
                         }
                       });
                     },
@@ -580,17 +719,6 @@ class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
                     : '语音输入',
               ),
             ),
-            if (!c.isRecording)
-              TextButton(
-                onPressed: c.isParsing
-                    ? null
-                    : () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => VoiceSettingsScreen(controller: c),
-                        ),
-                      ),
-                child: const Text('语音模型'),
-              ),
             if (c.isRecording)
               TextButton(
                 onPressed: () => runUi(context, c.cancelSpeech),
@@ -599,35 +727,9 @@ class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
             FilledButton.icon(
               onPressed: c.isParsing || c.isRecording
                   ? null
-                  : () async {
-                      if (input.text.trim().isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('先输入一段记账描述')),
-                        );
-                        return;
-                      }
-                      await runUi(context, () async {
-                        final parsedInput = input.text;
-                        final wasVoice = voice;
-                        final parsed = await c.parseText(parsedInput);
-                        if (wasVoice) {
-                          for (
-                            var i = c.drafts.length - parsed.length;
-                            i < c.drafts.length;
-                            i++
-                          ) {
-                            c.updateDraft(
-                              i,
-                              c.drafts[i].copyWith(source: TxSource.aiVoice),
-                            );
-                          }
-                        }
-                        if (mounted && input.text == parsedInput) {
-                          input.clear();
-                          voice = false;
-                        }
-                      });
-                    },
+                  : () => runUi(context, () async {
+                      await recognize(input.text);
+                    }),
               icon: c.isParsing
                   ? const SizedBox.square(
                       dimension: 18,
@@ -636,30 +738,70 @@ class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
                   : const Icon(Icons.arrow_forward),
               label: Text(c.isParsing ? '正在识别…' : '识别账单'),
             ),
-          ],
-        ),
-        if (c.isRecording) ...[
-          const SizedBox(height: 12),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(
-                Icons.mic,
-                size: 18,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  c.isTranscribing
-                      ? '录音已结束，正在转写成文字…'
-                      : c.speechState == 'preparing'
-                      ? '正在准备麦克风…'
-                      : '正在录音，请说出金额和用途，最长 60 秒。',
+            OutlinedButton.icon(
+              onPressed: c.isBusy ? null : image,
+              icon: const Icon(Icons.image_outlined),
+              label: Text(shared == null ? '图片记账' : '识别分享的图片'),
+            ),
+            OutlinedButton.icon(
+              onPressed: c.isBusy
+                  ? null
+                  : () => Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => BillImportScreen(controller: c),
+                      ),
+                    ),
+              icon: const Icon(Icons.file_open_outlined),
+              label: const Text('导入账单'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => VoiceSettingsScreen(controller: c),
                 ),
               ),
-            ],
+              child: const Text('语音模型'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => RecognitionSettingsScreen(controller: c),
+                ),
+              ),
+              child: const Text('识别设置'),
+            ),
+          ],
+        ),
+        if (c.isRecording)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Text(
+              c.isTranscribing
+                  ? '录音已结束，正在转写成文字…'
+                  : c.speechState == 'preparing'
+                  ? '正在准备麦克风…'
+                  : '正在录音，结束后自动生成账单草稿，最长 60 秒。',
+            ),
           ),
+        if (c.recognitionNotice != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 20),
+            child: Semantics(
+              liveRegion: true,
+              child: Text(c.recognitionNotice!),
+            ),
+          ),
+        if (c.recognitionQuestions.isNotEmpty) ...[
+          const SectionTitle('需要补充'),
+          for (final question in c.recognitionQuestions)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(question),
+            ),
+          const Text('在上面的描述中补充完整，再重新识别。已有草稿可保留或移除。'),
         ],
         if (c.drafts.isNotEmpty) ...[
           SectionTitle(
@@ -671,17 +813,22 @@ class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
           ),
           for (var i = 0; i < c.drafts.length; i++)
             _DraftRow(controller: c, index: i),
+          if (c.drafts.any(
+            (tx) =>
+                tx.source == TxSource.billImport &&
+                tx.effectiveKind == 'unknown',
+          ))
+            const Text('账单文件中用途未知的转账会保存到“待确认”，选择用途后才会确认入账。'),
           const SizedBox(height: 20),
           FilledButton.icon(
             onPressed: c.isBusy
                 ? null
                 : () async {
-                    final ok = await runUi(
+                    await runUi(
                       context,
                       () => c.saveDrafts(),
                       success: '已保存到账本',
                     );
-                    if (ok && context.mounted) Navigator.pop(context);
                   },
             icon: const Icon(Icons.done_all),
             label: const Text('确认并全部保存'),
@@ -689,10 +836,8 @@ class _AiEntryState extends State<_AiEntry> with WidgetsBindingObserver {
         ],
         const SizedBox(height: 24),
         Text(
-          '录音发送至语音模型，转写文字在点击“识别账单”后发送至 AI 服务。请勿输入与记账无关的敏感信息。',
-          style: TextStyle(
-            fontSize: 12,
-            height: 1.6,
+          '录音发送至语音模型，转写后自动进行记账理解；主动输入发送至所选 AI 服务。图片需单独开启云端识别，CSV 在本机解析。',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
         ),
@@ -708,28 +853,66 @@ class _DraftRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tx = controller.drafts[index];
-    final cats = controller.categories.where((cat) => cat.id == tx.categoryId);
-    final name = cats.isEmpty ? '未分类' : cats.first.name;
+    final cat = controller.categoryById(tx.categoryId);
+    final metadata = tx.recognitionMetadata;
+    final evidence = metadata['fieldEvidence'] is Map
+        ? stringMap(metadata['fieldEvidence'])
+        : <String, dynamic>{};
+    void edit() => Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => EntryScreen(
+          controller: controller,
+          transaction: tx,
+          onDraftSaved: (value) => controller.updateDraft(index, value),
+        ),
+      ),
+    );
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         ListTile(
           contentPadding: const EdgeInsets.only(top: 8),
-          leading: CategoryMark(category: cats.isEmpty ? null : cats.first),
-          title: Text(tx.merchant?.isNotEmpty == true ? tx.merchant! : name),
+          leading: CategoryMark(category: cat),
+          title: Text(
+            tx.merchant?.isNotEmpty == true ? tx.merchant! : cat?.name ?? '待分类',
+          ),
           subtitle: Text(
-            '${tx.type.label} · $name · ${dateLabel(tx.occurredAt)}${tx.note?.isNotEmpty == true ? ' · ${tx.note}' : ''}',
+            '${tx.businessLabel} · ${tx.type.label} · ${dateLabel(tx.occurredAt)}${tx.note?.isNotEmpty == true ? ' · ${tx.note}' : ''}',
           ),
           trailing: AmountLabel(tx.amountFen),
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => EntryScreen(
-                controller: controller,
-                transaction: tx,
-                onDraftSaved: (value) => controller.updateDraft(index, value),
-              ),
-            ),
-          ),
+          onTap: edit,
         ),
+        if (evidence.isNotEmpty)
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            title: Text('查看依据 · ${tx.source.label}'),
+            children: [
+              for (final entry in evidence.entries)
+                if (entry.value is Map)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text(
+                      '${const {'amount': '金额', 'type': '方向', 'occurredAt': '时间'}[entry.key] ?? entry.key}：${entry.value['quote'] ?? '未提供原文'}',
+                    ),
+                    subtitle: Text(
+                      const {
+                            'user': '你说的',
+                            'image': '图片中的文字',
+                            'file': '账单文件',
+                            'derived': '根据描述计算，需核对',
+                            'inference': '模型推断，需核对',
+                          }[entry.value['source']] ??
+                          '待核对',
+                    ),
+                  ),
+              if (metadata['timePrecision'] == 'user_entry_time')
+                const ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('未指定日期，按本次录入时间保存，可点“修改”调整。'),
+                ),
+            ],
+          ),
         Row(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
@@ -739,22 +922,64 @@ class _DraftRow extends StatelessWidget {
               label: const Text('移除'),
             ),
             TextButton.icon(
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => EntryScreen(
-                    controller: controller,
-                    transaction: tx,
-                    onDraftSaved: (value) =>
-                        controller.updateDraft(index, value),
-                  ),
-                ),
-              ),
+              onPressed: edit,
               icon: const Icon(Icons.edit_outlined, size: 16),
-              label: const Text('修改'),
+              label: Text(tx.effectiveKind == 'unknown' ? '选择用途' : '修改'),
             ),
           ],
         ),
         const Divider(),
+      ],
+    );
+  }
+}
+
+class _StoredEvidence extends StatelessWidget {
+  const _StoredEvidence({required this.transaction});
+  final LedgerTransaction transaction;
+  @override
+  Widget build(BuildContext context) {
+    final metadata = transaction.recognitionMetadata;
+    final facts = metadata['fieldEvidence'] is Map
+        ? stringMap(metadata['fieldEvidence'])
+        : <String, dynamic>{};
+    final questions = (metadata['questions'] as List? ?? [])
+        .whereType<String>();
+    return ExpansionTile(
+      tilePadding: EdgeInsets.zero,
+      title: const Text('识别依据与待核对信息'),
+      children: [
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(transaction.businessLabel),
+          subtitle: Text(
+            '${transaction.source.label} · ${metadata['paymentStatus'] ?? metadata['payment_status'] ?? '请核对凭证'}',
+          ),
+        ),
+        for (final question in questions)
+          ListTile(contentPadding: EdgeInsets.zero, title: Text(question)),
+        for (final fact in facts.entries)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(
+              const {
+                    'amount': '金额',
+                    'type': '资金方向',
+                    'occurredAt': '交易时间',
+                  }[fact.key] ??
+                  fact.key,
+            ),
+            subtitle: Text(
+              fact.value is Map
+                  ? '${fact.value['quote'] ?? fact.value['value'] ?? '未提供原文'}'
+                  : fact.value.toString(),
+            ),
+          ),
+        if (facts.isEmpty)
+          const ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('该条记录没有逐字段原文，请对照支付凭证核对。'),
+          ),
       ],
     );
   }

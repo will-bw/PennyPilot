@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
@@ -219,6 +220,96 @@ void main() {
         repository.calls.where((call) => call.method == 'saveTransaction'),
         isEmpty,
       );
+    },
+  );
+  test(
+    '101 imported records save in bounded batches without dropping the tail',
+    () async {
+      await controller.init();
+      controller.addImportedDrafts(
+        List.generate(
+          101,
+          (i) => transaction(id: 0).copyWith(
+            source: TxSource.billImport,
+            metadataJson: jsonEncode({'operationId': 'import:$i'}),
+          ),
+        ),
+      );
+      repository.handler = (method, args) async {
+        expect((args['transactions'] as List).length, lessThanOrEqualTo(100));
+        return {'ids': []};
+      };
+      expect(await controller.saveDrafts(), 101);
+      expect(
+        repository.calls
+            .where((c) => c.method == 'saveTransactions')
+            .map((c) => (c.args['transactions'] as List).length),
+        [100, 1],
+      );
+      expect(controller.drafts, isEmpty);
+    },
+  );
+  test(
+    'failed second import batch preserves only the unsaved records for retry',
+    () async {
+      await controller.init();
+      controller.addImportedDrafts(
+        List.generate(
+          101,
+          (i) => transaction(id: 0).copyWith(
+            source: TxSource.billImport,
+            metadataJson: jsonEncode({'operationId': 'import:$i'}),
+          ),
+        ),
+      );
+      var writes = 0;
+      repository.handler = (method, args) async {
+        writes++;
+        if (writes == 2) throw const LedgerException('磁盘空间不足');
+        return {'ids': []};
+      };
+      await expectLater(
+        controller.saveDrafts(),
+        throwsA(
+          isA<LedgerException>().having(
+            (e) => e.message,
+            'message',
+            contains('已保存 100 笔，剩余 1 笔'),
+          ),
+        ),
+      );
+      expect(controller.drafts, hasLength(1));
+      expect(
+        controller.drafts.single.recognitionMetadata['operationId'],
+        'import:100',
+      );
+      expect(await controller.saveDrafts(), 1);
+      expect(controller.drafts, isEmpty);
+      expect(
+        repository.calls
+            .where((c) => c.method == 'saveTransactions')
+            .map((c) => (c.args['transactions'] as List).length),
+        [100, 1, 1],
+      );
+    },
+  );
+  test(
+    'unknown AI draft requires a purpose before writing while imported facts may remain pending',
+    () async {
+      await controller.init();
+      final row = transaction(id: 0).copyWith(
+        businessKind: 'unknown',
+        source: TxSource.aiText,
+        metadataJson: jsonEncode({'operationId': 'unknown'}),
+      );
+      controller.addImportedDrafts([row]);
+      await expectLater(
+        controller.saveDrafts(),
+        throwsA(isA<LedgerException>()),
+      );
+      expect(repository.calls, isEmpty);
+      controller.updateDraft(0, row.copyWith(businessKind: 'transfer'));
+      expect(await controller.saveDrafts(), 1);
     },
   );
 

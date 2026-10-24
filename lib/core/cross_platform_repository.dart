@@ -183,6 +183,48 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
     switch (method) {
       case 'snapshot':
         throw const LedgerException('请使用账本快照接口。');
+      case 'recognizeInput':
+        final state = await _current(arguments);
+        final generation = _settingsGeneration;
+        final result = await _ai.runGuarded(
+          () => _guardAiOperation(state, generation),
+          () => _ai.recognizeInput(
+            arguments,
+            state,
+            nativeChat: _android
+                ? (messages, role) async =>
+                      await _store.invoke('recognitionChat', {
+                            'revision': state.revision,
+                            'messages': messages.map((message) {
+                              final content = message['content'];
+                              if (content is! List) return message;
+                              return {
+                                'role': message['role'],
+                                'content': content
+                                    .whereType<Map>()
+                                    .where((part) => part['type'] == 'text')
+                                    .map((part) => part['text'])
+                                    .join('\n'),
+                                'imageDataUrls': content
+                                    .whereType<Map>()
+                                    .where(
+                                      (part) => part['type'] == 'image_url',
+                                    )
+                                    .map(
+                                      (part) =>
+                                          (part['image_url'] as Map)['url'],
+                                    )
+                                    .toList(),
+                              };
+                            }).toList(),
+                            'modelRole': role,
+                          })
+                          as String
+                : null,
+          ),
+        );
+        await _guardAiOperation(state, generation);
+        return result;
       case 'parseText':
       case 'ask':
       case 'generateReport':
@@ -223,6 +265,13 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
             'qwenModel',
             'qwenBaseUrl',
             'chatGptModel',
+            'recognitionTextModel',
+            'recognitionVisionModel',
+            'recognitionReviewModel',
+            'recognitionTextProvider',
+            'recognitionVisionProvider',
+            'recognitionReviewProvider',
+            'cloudImageParsingEnabled',
           }.contains(key),
         )) {
           _settingsGeneration++;
@@ -318,6 +367,12 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
       case 'listModels':
         if (_android) return _store.invoke(method, arguments);
         return _ai.auth.listModels();
+      case 'pickRecognitionImage':
+        if (_android) return _store.invoke(method, arguments);
+        return _platform.pickRecognitionImage();
+      case 'pickBillFile':
+        if (_android) return _store.invoke(method, arguments);
+        return _platform.pickBillFile();
       case 'startSpeech':
         return {'text': await _voice.start()};
       case 'stopSpeech':

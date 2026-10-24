@@ -31,12 +31,7 @@ class QwenClient(
 
     override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String =
         withContext(Dispatchers.IO) {
-            val request = ChatRequest(
-                model = model,
-                messages = messages,
-                responseFormat = if (jsonMode) ResponseFormat() else null
-            )
-            val body = json.encodeToString(ChatRequest.serializer(), request)
+            val body = MultimodalMessages.request(json, model, messages, jsonMode)
 
             val httpRequest = Request.Builder()
                 .url("$baseUrl/chat/completions")
@@ -47,8 +42,8 @@ class QwenClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
-                throw LLMException("Qwen API error: ${response.code} ${response.message} $errBody".trim())
+                response.close()
+                throw UserFacingLlmException("AI 请求失败（HTTP ${response.code}），请检查模型、密钥与服务额度")
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("Qwen API returned empty body")
@@ -60,13 +55,14 @@ class QwenClient(
 
     override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools =
         withContext(Dispatchers.IO) {
+            MultimodalMessages.validate(messages)
             val requestJson = buildJsonObject {
                 put("model", model)
                 put("temperature", 0.1)
                 putJsonArray("messages") {
                     messages.forEach { msg ->
                         // 完整序列化消息（含 tool_call_id / tool_calls），保证工具调用协议正确
-                        add(json.encodeToJsonElement(Message.serializer(), msg))
+                        add(MultimodalMessages.compatibleMessage(json, msg))
                     }
                 }
                 putJsonArray("tools") {
@@ -85,8 +81,8 @@ class QwenClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
-                throw LLMException("Qwen API error: ${response.code} ${response.message} $errBody".trim())
+                response.close()
+                throw UserFacingLlmException("AI 请求失败（HTTP ${response.code}），请检查模型、密钥与服务额度")
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("Qwen API returned empty body")

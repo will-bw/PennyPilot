@@ -108,7 +108,7 @@ void main() {
     'saved receipt diagnostics explain pending records without reminders',
     (tester) async {
       await showCapture(tester, enabled: true, status: 'saved');
-      final target = find.text('已生成待确认账单');
+      final target = find.text('已保存识别结果');
       await tester.scrollUntilVisible(target, 400);
       expect(target, findsOneWidget);
       expect(find.textContaining('即使关闭记账提醒'), findsOneWidget);
@@ -243,7 +243,7 @@ void main() {
   });
 
   for (final outcome in [
-    ('saved', '已生成待确认账单'),
+    ('saved', '已保存识别结果'),
     ('not_receipt', '未识别到完整支付凭证'),
   ]) {
     testWidgets('history retains ${outcome.$1} after returning to chat', (
@@ -377,7 +377,7 @@ void main() {
     final row = tester.widget<SettingsRow>(
       find.byKey(const ValueKey('screen-read-history-0')),
     );
-    expect(row.title, '已生成待确认账单');
+    expect(row.title, '已保存识别结果');
     expect(row.subtitle, '2026年10月24日 10:00:15 · 检查 7 个节点');
     expect(find.byKey(const ValueKey('screen-read-history-1')), findsNothing);
     expect(find.textContaining('不应展示'), findsNothing);

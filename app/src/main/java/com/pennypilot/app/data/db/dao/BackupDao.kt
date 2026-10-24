@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Transaction
+import com.pennypilot.app.data.db.entity.CaptureTombstoneEntity
 import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
@@ -15,7 +16,8 @@ data class BackupSnapshot(
     val transactions: List<TransactionEntity>,
     val rules: List<ParseRuleEntity>,
     val reports: List<MonthlyReportEntity>,
-    val captureEvents: List<CaptureEvidenceEntity> = emptyList()
+    val captureEvents: List<CaptureEvidenceEntity> = emptyList(),
+    val captureTombstones: List<CaptureTombstoneEntity> = emptyList()
 )
 
 @Dao
@@ -31,9 +33,16 @@ interface BackupDao {
     @Query("SELECT * FROM capture_events")
     suspend fun captureEvents(): List<CaptureEvidenceEntity>
 
+    @Query("SELECT * FROM capture_tombstones")
+    suspend fun captureTombstones(): List<CaptureTombstoneEntity>
+    @Query("DELETE FROM capture_tombstones")
+    suspend fun clearCaptureTombstones()
+    @Insert
+    suspend fun insertCaptureTombstones(rows: List<CaptureTombstoneEntity>)
+
     @Transaction
     suspend fun snapshot(): BackupSnapshot =
-        BackupSnapshot(categories(), transactions(), rules(), reports(), captureEvents())
+        BackupSnapshot(categories(), transactions(), rules(), reports(), captureEvents(), captureTombstones())
 
     @Query("DELETE FROM capture_events")
     suspend fun clearCaptureEvents()
@@ -60,6 +69,7 @@ interface BackupDao {
     /** 通过事务恢复行，保留活动 Room 连接和观察者；任何失败都会回滚原账本。 */
     @Transaction
     suspend fun replace(snapshot: BackupSnapshot) {
+        clearCaptureTombstones()
         clearCaptureEvents()
         clearTransactions()
         clearReports()
@@ -70,5 +80,6 @@ interface BackupDao {
         insertRules(snapshot.rules)
         insertReports(snapshot.reports)
         insertCaptureEvents(snapshot.captureEvents)
+        insertCaptureTombstones(snapshot.captureTombstones)
     }
 }

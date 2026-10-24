@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 const maxTransactionFen = 999999999;
@@ -59,7 +61,9 @@ enum TxSource {
   notification('NOTIFICATION', '通知捕获'),
   accessibility('ACCESSIBILITY', '支付页面'),
   aiText('AI_TEXT', '文字记账'),
-  aiVoice('AI_VOICE', '语音记账');
+  aiVoice('AI_VOICE', '语音记账'),
+  aiImage('AI_IMAGE', '图片记账'),
+  billImport('BILL_IMPORT', '账单导入');
 
   const TxSource(this.wireValue, this.label);
   final String wireValue;
@@ -103,9 +107,13 @@ class LedgerTransaction {
     this.source = TxSource.manual,
     this.status = TxStatus.confirmed,
     this.duplicateOf,
+    this.businessKind,
+    this.metadataJson,
+    this.editVersion = 0,
   });
 
   final int id;
+  final int editVersion;
 
   /// Always positive. The Android database's signed amount is normalized here.
   final int amountFen;
@@ -117,6 +125,33 @@ class LedgerTransaction {
   final TxSource source;
   final TxStatus status;
   final int? duplicateOf;
+  final String? businessKind, metadataJson;
+  String get effectiveKind =>
+      (businessKind == null || businessKind == 'standard')
+      ? (type == TxType.expense ? 'expense' : 'income')
+      : businessKind!;
+  bool get countsAsExpense => effectiveKind == 'expense';
+  bool get countsAsIncome => effectiveKind == 'income';
+  String get businessLabel =>
+      const {
+        'expense': '消费',
+        'income': '收入',
+        'transfer': '账户转移',
+        'receivable': '应收／垫付',
+        'payable': '应付／偿还',
+        'refund': '退款',
+        'unknown': '待分类资金变动',
+      }[effectiveKind] ??
+      '待分类资金变动';
+  Map<String, dynamic> get recognitionMetadata {
+    try {
+      return metadataJson == null ? {} : stringMap(jsonDecode(metadataJson!));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  bool get isRefund => effectiveKind == 'refund';
   int get signedAmountFen => type == TxType.income ? -amountFen : amountFen;
 
   factory LedgerTransaction.fromMap(
@@ -138,9 +173,10 @@ class LedgerTransaction {
     merchant: map['merchant'] as String?,
     note: map['note'] as String?,
     accountTag: map['accountTag'] as String?,
-    source: draft
-        ? TxSource.aiText
-        : TxSource.fromWire(map['source'] ?? 'MANUAL'),
+    source: TxSource.fromWire(map['source'] ?? (draft ? 'AI_TEXT' : 'MANUAL')),
+    businessKind: map['businessKind'] as String?,
+    metadataJson: map['metadataJson'] as String?,
+    editVersion: integer(map['editVersion'], 'editVersion', fallback: 0),
     status: TxStatus.fromWire(map['status'] ?? 'CONFIRMED'),
     duplicateOf: map['duplicateOf'] == null
         ? null
@@ -157,6 +193,9 @@ class LedgerTransaction {
     'note': note,
     'accountTag': accountTag,
     'source': source.wireValue,
+    'businessKind': effectiveKind,
+    'metadataJson': metadataJson,
+    'editVersion': editVersion,
   };
 
   LedgerTransaction copyWith({
@@ -170,6 +209,8 @@ class LedgerTransaction {
     String? accountTag,
     TxSource? source,
     TxStatus? status,
+    String? businessKind,
+    String? metadataJson,
   }) => LedgerTransaction(
     id: id ?? this.id,
     amountFen: amountFen ?? this.amountFen,
@@ -183,6 +224,9 @@ class LedgerTransaction {
     source: source ?? this.source,
     status: status ?? this.status,
     duplicateOf: duplicateOf,
+    businessKind: businessKind ?? this.businessKind,
+    metadataJson: metadataJson ?? this.metadataJson,
+    editVersion: editVersion,
   );
 }
 

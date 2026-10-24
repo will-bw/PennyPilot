@@ -68,7 +68,8 @@ class CaptureServiceMonitor @Inject constructor() {
     private fun ServiceHealth.recordScreenTrace(status: String, now: Long, packageName: String?): ServiceHealth {
         // parsed 是中间态，不进入历史，避免每次重绘的 parsed → duplicate 挤走已保存结果。
         if (status !in setOf("unreadable", "input_page", "password_page", "incomplete_tree", "traversal_limit",
-                "text_limit", "empty_page", "not_receipt", "saved", "duplicate", "error")) return this
+                "text_limit", "empty_page", "not_receipt", "saved", "duplicate", "error",
+                "visual_unavailable", "model_queued", "model_processing", "model_rejected", "model_failed")) return this
         val trace = ScreenReadTrace(status, now, packageName ?: lastScreenPackage, screenReadDiagnostics.toMap())
         val previous = screenReadHistory.lastOrNull()
         // 同页密集重绘合并成一次；返回聊天不能抹掉刚才完成页的读取结果。

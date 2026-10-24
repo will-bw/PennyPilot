@@ -31,6 +31,22 @@ class AppPreferences @Inject constructor(
     private val notificationCaptureKey = booleanPreferencesKey("notification_capture_enabled")
     private val screenCaptureKey = booleanPreferencesKey("screen_capture_enabled")
 
+    private val screenCloudParsingKey = booleanPreferencesKey("screen_cloud_parsing_enabled")
+    private val captureAutoRecordKey = booleanPreferencesKey("capture_auto_record_enabled")
+    private val activeInputAutoSaveKey = booleanPreferencesKey("active_input_auto_save_enabled")
+    private val screenVisualCaptureKey = booleanPreferencesKey("screen_visual_capture_enabled")
+    val screenVisualCaptureEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenVisualCaptureKey] ?: false }
+    suspend fun setScreenVisualCaptureEnabled(enabled: Boolean) { context.dataStore.edit { it[screenVisualCaptureKey] = enabled } }
+    private val cloudImageParsingKey = booleanPreferencesKey("cloud_image_parsing_enabled")
+    val screenCloudParsingEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenCloudParsingKey] ?: false }
+    val captureAutoRecordEnabled: Flow<Boolean> = context.dataStore.data.map { it[captureAutoRecordKey] ?: false }
+    val activeInputAutoSaveEnabled: Flow<Boolean> = context.dataStore.data.map { it[activeInputAutoSaveKey] ?: false }
+    val cloudImageParsingEnabled: Flow<Boolean> = context.dataStore.data.map { it[cloudImageParsingKey] ?: false }
+    suspend fun setScreenCloudParsingEnabled(enabled: Boolean) { context.dataStore.edit { it[screenCloudParsingKey] = enabled } }
+    suspend fun setCaptureAutoRecordEnabled(enabled: Boolean) { context.dataStore.edit { it[captureAutoRecordKey] = enabled } }
+    suspend fun setActiveInputAutoSaveEnabled(enabled: Boolean) { context.dataStore.edit { it[activeInputAutoSaveKey] = enabled } }
+    suspend fun setCloudImageParsingEnabled(enabled: Boolean) { context.dataStore.edit { it[cloudImageParsingKey] = enabled } }
+
     val notificationCaptureEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[notificationCaptureKey] ?: true }
     // 页面读取需单独同意；系统授权本身不能替代应用内开关。

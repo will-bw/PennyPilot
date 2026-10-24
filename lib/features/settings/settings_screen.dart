@@ -5,6 +5,7 @@ import 'package:pennypilot/core/models.dart';
 import 'package:pennypilot/core/updates/app_update_service.dart';
 
 import 'ai_settings_screen.dart';
+import 'recognition_settings_screen.dart';
 import 'capture_settings_screen.dart';
 import 'categories_screen.dart';
 import 'rules_screen.dart';
@@ -218,6 +219,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     icon: Icons.tune_outlined,
                     onTap: () =>
                         _open(AiSettingsScreen(controller: widget.controller)),
+                  ),
+                  SettingsRow(
+                    title: '识别与自动录入',
+                    subtitle: '模型角色、图片识别、自动保存与分类偏好',
+                    icon: Icons.auto_awesome_outlined,
+                    onTap: () => _open(
+                      RecognitionSettingsScreen(controller: widget.controller),
+                    ),
                   ),
                   SettingsRow(
                     title: '语音模型',

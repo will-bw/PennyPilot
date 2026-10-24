@@ -70,6 +70,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 import java.time.YearMonth
 import javax.inject.Inject
 
@@ -85,7 +86,8 @@ class NativeLedgerBridge @Inject constructor(
     private val insight: InsightUseCase,
     private val backup: BackupUseCase,
     private val monitor: CaptureServiceMonitor,
-    private val captureProcessor: CaptureProcessor
+    private val captureProcessor: CaptureProcessor,
+    private val llmClient: com.pennypilot.app.data.llm.LLMClient
 ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
     private lateinit var activity: MainActivity
     private var scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -99,6 +101,7 @@ class NativeLedgerBridge @Inject constructor(
     private var speech: SpeechRecognizerManager? = null
     private var speechRequest: CompletableDeferred<String>? = null
     private var launch: Map<String, Any?>? = null
+    private var sharedImageUri: Uri? = null
     private var launchJob: Job? = null
     private val reportJobs = mutableMapOf<String, Job>()
 
@@ -152,6 +155,17 @@ class NativeLedgerBridge @Inject constructor(
 
     fun handleIntent(intent: Intent?) {
         if (intent == null) return
+        if (intent.action == Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) {
+            @Suppress("DEPRECATION")
+            val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            if (uri?.scheme == "content") {
+                sharedImageUri = uri
+                launch = mapOf("route" to "recognition_image")
+                if (sink != null) { emit("launch", launch.orEmpty()); launch = null }
+                intent.removeExtra(Intent.EXTRA_STREAM)
+                return
+            }
+        }
         launchJob?.cancel()
         val revision = LedgerRevision.current
         val id = intent.getLongExtra("edit_tx_id", -1)
@@ -221,6 +235,7 @@ class NativeLedgerBridge @Inject constructor(
                     LedgerRevision.advance()
                 }
                 runCatching { context.getSystemService(android.app.NotificationManager::class.java).cancelAll() }
+                com.pennypilot.app.data.recognition.RecognitionTaskStore(context).clear()
                 LedgerRevision.publish()
             }
             null
@@ -249,6 +264,7 @@ class NativeLedgerBridge @Inject constructor(
                 require(value in setOf("CONFIRMED", "IGNORED")) { "不支持此账目状态。" }; TxStatus.valueOf(value)
             }
             val row = requireNotNull(database.transactionDao().getById(id)) { "账目已不存在，请刷新。" }
+            require(status != TxStatus.CONFIRMED || row.businessKind != "unknown") { "请先打开账目选择账务用途，再确认。" }
             require(database.transactionDao().updateStatus(id, status) == 1) { "账目已处理，请刷新列表。" }
             NotificationHelper.cancelCaptureNotification(context, id, row.captureEventKey)
             null
@@ -268,6 +284,13 @@ class NativeLedgerBridge @Inject constructor(
             if (args.containsKey("lastBackupAt")) preferences.setLastBackupAt(args.long("lastBackupAt").also { require(it >= 0) })
             emit("changed"); null
         }
+        "pickRecognitionImage" -> activity.chooseRecognitionDocument(true)?.let { RecognitionDocuments.image(context, it) }
+        "pickBillFile" -> activity.chooseRecognitionDocument(false)?.let { RecognitionDocuments.bill(context, it) }
+        "consumeSharedImage" -> sharedImageUri?.let { uri -> sharedImageUri = null; RecognitionDocuments.image(context, uri) }
+        "armCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.arm()
+        "readCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.read()
+        "clearCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.clear()
+        "recognitionChat" -> recognitionChat(args)
         "parseText" -> parse(args)
         "ask" -> ask(args)
         "exportBackup" -> exportBackup()
@@ -317,6 +340,18 @@ class NativeLedgerBridge @Inject constructor(
                 "notificationCaptureEnabled" to preferences.notificationCaptureEnabled.first(),
                 "screenCaptureEnabled" to preferences.screenCaptureEnabled.first(),
                 "notificationCloudParsingEnabled" to preferences.notificationCloudParsingEnabled.first(),
+                "screenCloudParsingEnabled" to preferences.screenCloudParsingEnabled.first(),
+                "screenVisualCaptureEnabled" to preferences.screenVisualCaptureEnabled.first(),
+                "captureAutoRecordEnabled" to preferences.captureAutoRecordEnabled.first(),
+                "activeInputAutoSaveEnabled" to preferences.activeInputAutoSaveEnabled.first(),
+                "cloudImageParsingEnabled" to preferences.cloudImageParsingEnabled.first(),
+                "recognitionTextProvider" to keyStore.recognitionTextProvider,
+                "recognitionVisionProvider" to keyStore.recognitionVisionProvider,
+                "recognitionReviewProvider" to keyStore.recognitionReviewProvider,
+                "recognitionTextModel" to keyStore.recognitionTextModel,
+                "recognitionVisionModel" to keyStore.recognitionVisionModel,
+                "recognitionReviewModel" to keyStore.recognitionReviewModel,
+                "recognitionPreferencesJson" to uiPreferences.getString("recognition_preferences", "[]"),
                 "lastBackupAt" to preferences.lastBackupAt.first(),
                 "budgetCents" to uiPreferences.getLong("budget_cents", 0),
                 "themeMode" to uiPreferences.getString("theme_mode", "system"),
@@ -408,16 +443,39 @@ class NativeLedgerBridge @Inject constructor(
         val accountTag = args.optionalString("accountTag")?.takeIf { it.isNotBlank() }
         require((note?.length ?: 0) <= 2000 && (merchant?.length ?: 0) <= 200 && (accountTag?.length ?: 0) <= 100) { "备注、商户或账户名称过长。" }
         val signedAmount = if (type == TxType.INCOME) -amount else amount
+        val businessKind = args.optionalString("businessKind") ?: old?.businessKind ?: "standard"
+        require(businessKind in PortableBackupCodec.BUSINESS_KINDS) { "账目业务类型无效。" }
+        require(PortableBackupCodec.validBusinessKind(businessKind, type)) { "账务用途与资金方向不一致。" }
+        val confirmPending = args.boolean("confirmPending", false)
+        require(!confirmPending || old?.status == TxStatus.PENDING && businessKind != "unknown") { "请先选择待确认账目的用途。" }
+        val metadata = args.optionalString("metadataJson") ?: old?.metadataJson
+        require(metadata == null || metadata.length <= 100000) { "识别依据过长。" }
+        val metadataObject = metadata?.let { Json.parseToJsonElement(it) as? kotlinx.serialization.json.JsonObject
+            ?: throw IllegalArgumentException("识别依据格式无效。") }
+        val operationKey = args.optionalString("operationKey") ?: (metadataObject?.get("operationId") as? kotlinx.serialization.json.JsonPrimitive)?.content
+        require(operationKey == null || operationKey.isNotBlank() && operationKey.length <= 2000) { "录入身份无效。" }
+        if (old == null && operationKey != null) {
+            require(database.transactionDao().tombstone("operation:$operationKey") == null) { "这次录入已撤销，请重新识别后录入。" }
+            database.transactionDao().getByOperationKey(operationKey)?.let { existing ->
+                require(existing.amount == signedAmount && existing.type == type) { "录入身份冲突，请重新识别。" }
+                return existing.id
+            }
+        }
         if (old != null) {
+            args.optionalLong("editVersion")?.let { require(it == old.editVersion) { "账目已更新，请刷新后重试。" } }
             database.transactionDao().update(old.copy(amount = signedAmount, type = type, categoryId = category.id,
-                note = note, merchant = merchant, accountTag = accountTag, occurredAt = occurredAt))
+                note = note, merchant = merchant, accountTag = accountTag, occurredAt = occurredAt,
+                businessKind = businessKind, metadataJson = metadata, editVersion = old.editVersion + 1,
+                status = if (confirmPending) TxStatus.CONFIRMED else old.status))
             return old.id
         }
         val source = args.optionalString("source") ?: "MANUAL"
-        require(source in setOf("MANUAL", "AI_TEXT", "AI_VOICE")) { "不支持此录入来源。" }
+        require(source in setOf("MANUAL", "AI_TEXT", "AI_VOICE", "AI_IMAGE", "BILL_IMPORT")) { "不支持此录入来源。" }
+        require(!source.startsWith("AI_") || businessKind != "unknown") { "请先为识别草稿选择账务用途。" }
         return database.transactionDao().insert(TransactionEntity(amount = signedAmount, type = type, categoryId = category.id,
             note = note, merchant = merchant, accountTag = accountTag, occurredAt = occurredAt,
-            source = TxSource.valueOf(source), status = TxStatus.CONFIRMED))
+            source = TxSource.valueOf(source), status = if (source == "BILL_IMPORT" && businessKind == "unknown") TxStatus.PENDING else TxStatus.CONFIRMED,
+            businessKind = businessKind, metadataJson = metadata, operationKey = operationKey))
     }
 
     private suspend fun saveCategory(args: Map<String, Any?>): Long {
@@ -483,6 +541,46 @@ class NativeLedgerBridge @Inject constructor(
         return database.parseRuleDao().insert(rule)
     }
 
+    private suspend fun recognitionChat(args: Map<String, Any?>): String {
+        val revision = checkRevision(args)
+        val role = when (args.optionalString("modelRole")) {
+            "vision" -> com.pennypilot.app.data.llm.ModelRole.VISION
+            "review" -> com.pennypilot.app.data.llm.ModelRole.REVIEW
+            else -> com.pennypilot.app.data.llm.ModelRole.TEXT
+        }
+        val rows = args.maps("messages")
+        require(rows.size in 1..10) { "识别请求过长。" }
+        val messages = rows.map { row ->
+            val messageRole = row.string("role")
+            require(messageRole in setOf("system", "user", "assistant")) { "识别消息角色无效。" }
+            val images = mutableListOf<String>()
+            val content = when (val value = row["content"]) {
+                is String -> value
+                is List<*> -> value.map { part ->
+                    val item = part as? Map<*, *> ?: throw IllegalArgumentException("识别内容格式无效。")
+                    when (item["type"]) {
+                        "text" -> item["text"] as? String ?: ""
+                        "image_url" -> { images += ((item["image_url"] as? Map<*, *>)?.get("url") as? String
+                            ?: throw IllegalArgumentException("识别图片格式无效。")); "" }
+                        else -> throw IllegalArgumentException("不支持此识别内容。")
+                    }
+                }.joinToString("\n")
+                else -> throw IllegalArgumentException("识别内容格式无效。")
+            }
+            (row["imageDataUrls"] as? List<*>)?.forEach { images += it as? String ?: throw IllegalArgumentException("图片格式无效。") }
+            Message(messageRole, content, imageDataUrls = images)
+        }
+        require(messages.sumOf { it.content.length } <= 60000 && messages.sumOf { it.imageDataUrls.sumOf(String::length) } <= 3 * 1024 * 1024) { "识别内容过大，请减少文字或裁剪图片。" }
+        if (messages.any { it.imageDataUrls.isNotEmpty() }) {
+            require(preferences.cloudImageParsingEnabled.first()) { "请先开启云端图片识别。" }
+            require(role in setOf(com.pennypilot.app.data.llm.ModelRole.VISION, com.pennypilot.app.data.llm.ModelRole.REVIEW)) { "请选择图片理解或复核模型。" }
+        }
+        val operation = llmClient.forRole(role)
+        val result = kotlinx.coroutines.withTimeout(60_000) { operation.chat(messages, jsonMode = true) }
+        if (revision != LedgerRevision.current) throw StaleLedgerException()
+        return result
+    }
+
     private suspend fun parse(args: Map<String, Any?>): Map<String, Any?> {
         val revision = checkRevision(args)
         val input = args.string("text").trim()
@@ -514,7 +612,7 @@ class NativeLedgerBridge @Inject constructor(
 
     private suspend fun updateSettings(args: Map<String, Any?>) = settingsMutex.withLock {
         // Validate everything before any writes. Omitted keys preserve existing secrets.
-        listOf("onboardingDone", "notificationCaptureEnabled", "screenCaptureEnabled", "notificationCloudParsingEnabled")
+        listOf("onboardingDone", "notificationCaptureEnabled", "screenCaptureEnabled", "notificationCloudParsingEnabled", "screenCloudParsingEnabled", "screenVisualCaptureEnabled", "captureAutoRecordEnabled", "activeInputAutoSaveEnabled", "cloudImageParsingEnabled")
             .filter(args::containsKey).forEach { args.boolean(it) }
         args["activeProvider"]?.let { require(it in setOf("", "chatgpt", "deepseek", "qwen")) { "请选择有效的 AI 服务。" } }
         args["themeMode"]?.let { require(it in setOf("system", "light", "dark")) { "主题设置无效。" } }
@@ -522,6 +620,15 @@ class NativeLedgerBridge @Inject constructor(
         require(budget == null || budget in 0..MoneyUtil.MAX_TRANSACTION_CENTS) { "月预算须在 0～9,999,999.99 元之间。" }
         listOf("deepSeekModel", "qwenModel", "chatGptModel").filter(args::containsKey).forEach {
             require(args.string(it).isNotBlank() && args.string(it).length <= 256) { "请填写有效的模型名称。" }
+        }
+        listOf("recognitionTextProvider", "recognitionVisionProvider", "recognitionReviewProvider").filter(args::containsKey).forEach {
+            require(args.string(it) in setOf("", "chatgpt", "deepseek", "qwen")) { "识别服务无效。" }
+        }
+        listOf("recognitionTextModel", "recognitionVisionModel", "recognitionReviewModel").filter(args::containsKey).forEach {
+            require(args.string(it).length <= 256 && !args.string(it).any(Char::isISOControl)) { "模型名称无效。" }
+        }
+        args.optionalString("recognitionPreferencesJson")?.let {
+            require(it.length <= 50000 && Json.parseToJsonElement(it) is kotlinx.serialization.json.JsonArray) { "分类偏好格式无效。" }
         }
         listOf("deepSeekKey", "qwenKey").filter(args::containsKey).forEach {
             require(args.string(it).length <= 8192 && !args.string(it).any(Char::isISOControl)) { "API Key 格式无效。" }
@@ -534,7 +641,7 @@ class NativeLedgerBridge @Inject constructor(
             auth.awaitReady()
             requireNotNull(auth.state.value.activeAccount?.takeIf { it.isSignedIn }?.id) { "请先登录 ChatGPT 账号。" }
         } else null
-        val secureFields = listOf("deepSeekKey", "qwenKey", "deepSeekModel", "qwenModel", "qwenBaseUrl", "activeProvider", "chatGptModel")
+        val secureFields = listOf("deepSeekKey", "qwenKey", "deepSeekModel", "qwenModel", "qwenBaseUrl", "activeProvider", "chatGptModel", "recognitionTextModel", "recognitionVisionModel", "recognitionReviewModel", "recognitionTextProvider", "recognitionVisionProvider", "recognitionReviewProvider")
         if (secureFields.any(args::containsKey)) withContext(Dispatchers.IO) {
             args.optionalString("deepSeekKey")?.let { keyStore.deepSeekKey = it.trim() }
             args.optionalString("qwenKey")?.let { keyStore.qwenKey = it.trim() }
@@ -543,11 +650,23 @@ class NativeLedgerBridge @Inject constructor(
             args.optionalString("qwenBaseUrl")?.let { keyStore.qwenBaseUrl = it.trim().trimEnd('/') }
             args.optionalString("chatGptModel")?.let { keyStore.setChatGptModel(requireNotNull(modelAccount), it.trim()) }
             args.optionalString("activeProvider")?.let { keyStore.activeProvider = it }
+            args.optionalString("recognitionTextProvider")?.let { keyStore.recognitionTextProvider = it }
+            args.optionalString("recognitionVisionProvider")?.let { keyStore.recognitionVisionProvider = it }
+            args.optionalString("recognitionReviewProvider")?.let { keyStore.recognitionReviewProvider = it }
+            args.optionalString("recognitionTextModel")?.let { keyStore.recognitionTextModel = it.trim() }
+            args.optionalString("recognitionVisionModel")?.let { keyStore.recognitionVisionModel = it.trim() }
+            args.optionalString("recognitionReviewModel")?.let { keyStore.recognitionReviewModel = it.trim() }
             keyStore.clearRecoveryNotice()
         }
         if (args.containsKey("notificationCaptureEnabled")) preferences.setNotificationCaptureEnabled(args.boolean("notificationCaptureEnabled"))
         if (args.containsKey("screenCaptureEnabled")) preferences.setScreenCaptureEnabled(args.boolean("screenCaptureEnabled"))
         if (args.containsKey("notificationCloudParsingEnabled")) preferences.setNotificationCloudParsingEnabled(args.boolean("notificationCloudParsingEnabled"))
+        if (args.containsKey("screenCloudParsingEnabled")) preferences.setScreenCloudParsingEnabled(args.boolean("screenCloudParsingEnabled"))
+        if (args.containsKey("screenVisualCaptureEnabled")) preferences.setScreenVisualCaptureEnabled(args.boolean("screenVisualCaptureEnabled"))
+        if (args.containsKey("captureAutoRecordEnabled")) preferences.setCaptureAutoRecordEnabled(args.boolean("captureAutoRecordEnabled"))
+        if (args.containsKey("activeInputAutoSaveEnabled")) preferences.setActiveInputAutoSaveEnabled(args.boolean("activeInputAutoSaveEnabled"))
+        if (args.containsKey("cloudImageParsingEnabled")) preferences.setCloudImageParsingEnabled(args.boolean("cloudImageParsingEnabled"))
+        args.optionalString("recognitionPreferencesJson")?.let { check(uiPreferences.edit().putString("recognition_preferences", it).commit()) }
         if (args.boolean("onboardingDone", false)) preferences.setOnboardingDone()
         if (budget != null || args.containsKey("themeMode")) withContext(Dispatchers.IO) {
             val editor = uiPreferences.edit()
@@ -667,7 +786,8 @@ private fun Map<String, Any?>.maps(key: String): List<Map<String, Any?>> {
 private fun TransactionEntity.toMap(): Map<String, Any?> = mapOf(
     "id" to id, "amount" to amount, "type" to type.name, "categoryId" to categoryId,
     "note" to note, "merchant" to merchant, "accountTag" to accountTag, "occurredAt" to occurredAt,
-    "createdAt" to createdAt, "source" to source.name, "status" to status.name, "duplicateOf" to duplicateOf
+    "createdAt" to createdAt, "source" to source.name, "status" to status.name, "duplicateOf" to duplicateOf,
+    "businessKind" to businessKind, "metadataJson" to metadataJson, "operationKey" to operationKey, "editVersion" to editVersion
 )
 private fun CategoryEntity.toMap(): Map<String, Any?> = mapOf(
     "id" to id, "name" to name, "icon" to icon, "colorIndex" to colorIndex, "type" to type.name,

@@ -17,10 +17,10 @@ Errors use `PlatformException(code, message)` with a user-facing Chinese message
 `snapshot {}` → map:
 
 - `revision`: int
-- `transactions`: all rows including ignored; `{id, amount, type, categoryId, note, merchant, accountTag, occurredAt, createdAt, source, status, duplicateOf}`. **Stored amount is positive for EXPENSE and negative for INCOME.** UI displays absolute amount. Types: EXPENSE/INCOME. Status: CONFIRMED/PENDING/IGNORED. Source: MANUAL/AI_TEXT/AI_VOICE/NOTIFICATION/ACCESSIBILITY.
+- `transactions`: all rows including ignored; `{id, amount, type, categoryId, note, merchant, accountTag, occurredAt, createdAt, source, status, duplicateOf}`. **Stored amount is positive for EXPENSE and negative for INCOME.** UI displays absolute amount. Types: EXPENSE/INCOME. Status: CONFIRMED/PENDING/IGNORED. Source: MANUAL/AI_TEXT/AI_VOICE/AI_IMAGE/BILL_IMPORT/NOTIFICATION/ACCESSIBILITY. Rows additionally carry businessKind, metadataJson, operationKey and editVersion.
 - `categories`: `{id,name,icon,colorIndex,type,sortOrder,enabled,isPreset}`
 - `rules`: `{id,appPackage,regexAmount,regexMerchant,directionHint,enabled,priority}`
-- `reports`: `{id,yearMonth,totalExpense,totalIncome,byCategoryJson,llmSummary,generatedAt}`; report totals are positive cents.
+- `reports`: `{id,yearMonth,totalExpense,totalIncome,byCategoryJson,llmSummary,generatedAt}`; income totals are nonnegative cents; net expense can be negative when refunds exceed spending.
 - `settings`: `{onboardingDone,notificationCaptureEnabled,screenCaptureEnabled,notificationCloudParsingEnabled,lastBackupAt,budgetCents,themeMode,activeProvider,deepSeekModel,qwenModel,qwenBaseUrl,hasDeepSeekKey,hasQwenKey,needsReconfiguration,chatGptModel}`. themeMode = system/light/dark; budgetCents=0 disables budget. Secret keys are never returned.
 - `capabilities`: `{platform:"android",notificationListenerGranted,accessibilityGranted,remindersEnabled,microphoneGranted,batteryExempt,speechAvailable,notificationServiceConnected,accessibilityServiceConnected,todayCaptureCount,duplicateCount,lastCaptureAt,lastError,lastScreenEventTime,lastScreenReadTime,lastScreenPackage,screenCaptureStatus,screenReadDiagnostics,screenReadHistory}`. Page diagnostics contain timestamps, a supported package name, a status and numeric node counters only; never page text. `screenReadDiagnostics` optionally contains `visitedNodes`, `textNodes`, `editableNodes`, `passwordNodes`, `missingChildren`, `hiddenNodes`, and `foreignNodes`. Status codes: `waiting`, `disabled`, `disconnected`, `event_received`, `unreadable`, `input_page`, `password_page`, `incomplete_tree`, `traversal_limit`, `text_limit`, `empty_page`, `protected` (legacy), `not_receipt`, `parsed`, `saved`, `duplicate`, `error`. `screenReadHistory` optionally contains at most eight in-memory entries `{status,timestamp,packageName,diagnostics}` in occurrence order; adjacent same-status/package samples are coalesced, and transient `parsed` updates are omitted from history. Read/save outcomes carry the originating request package even if a new event arrives while saving. This keeps the receipt result visible after returning to a chat input page. It is not included in ledger backups. Connection/authorization alone does not imply `screenCaptureEnabled`.
 - `auth`: `{accounts:[{id,email,canUsePlan,isSignedIn}],activeAccountId,isAuthorizing,loginUrl,error,showWelcome}`. No tokens cross the bridge.
@@ -28,10 +28,10 @@ Errors use `PlatformException(code, message)` with a user-facing Chinese message
 
 ## Ledger commands
 
-- `saveTransaction {revision,id?:0,amount,type,categoryId,note?,merchant?,accountTag?,occurredAt,source?:MANUAL}` → `{id}`. Input amount is **positive absolute cents**. Existing rows preserve source/status/capture identity. New rows are CONFIRMED; source limited to MANUAL/AI_TEXT/AI_VOICE.
+- `saveTransaction {revision,id?:0,amount,type,categoryId,note?,merchant?,accountTag?,occurredAt,source?:MANUAL}` → `{id}`. Input amount is **positive absolute cents**. Existing rows preserve source/status/capture identity. New rows are CONFIRMED; source limited to MANUAL/AI_TEXT/AI_VOICE/AI_IMAGE/BILL_IMPORT. Optional businessKind, metadataJson and operationKey retain recognition provenance. Existing updates accept editVersion and reject stale edits. confirmPending:true atomically edits and confirms a pending row after its unknown purpose has been resolved.
 - `saveTransactions {revision,transactions:[same fields as saveTransaction without revision]}` → `{ids}`. Atomic batch for reviewed AI drafts; no partial-save duplication.
 - `deleteTransaction {revision,id}` → null.
-- `setTransactionStatus {revision,id,status:CONFIRMED|IGNORED}` → null. Only pending rows can transition.
+- `setTransactionStatus {revision,id,status:CONFIRMED|IGNORED}` → null. Only pending rows can transition; unknown businessKind must be resolved before confirmation.
 - `saveCategory {revision,id?:0,name,icon,type,enabled?:true,sortOrder?}` → `{id}`. Existing type cannot change; preset category cannot be deleted. Name <=20 characters and unique within type.
 - `deleteCategory {revision,id}` → null. Moves transactions atomically to same-type “其他”.
 - `saveRule {revision,id?:0,appPackage,regexAmount,regexMerchant?,directionHint,enabled?:true,priority?:0}` → `{id}`. Regex must have capture group; appPackage required.
@@ -57,7 +57,7 @@ Every event is a map with `type` and `revision`.
 - `{type:"restored",revision}`: clear drafts, navigation, pending AI results; reload.
 - `{type:"launch",revision,transactionId?,route?}`: validated notification navigation.
 - `{type:"speech",revision,text}`: live partial transcription.
-- `{type:"speechState",revision,state:preparing|recording|transcribing|idle}`: shared cloud transcription lifecycle. A completed transcript is returned by `startSpeech`, not automatically parsed or saved.
+- `{type:"speechState",revision,state:preparing|recording|transcribing|idle}`: shared cloud transcription lifecycle. A completed transcript is returned by `startSpeech`; the entry UI then starts recognition and applies the separately enabled active-input save policy.
 - `{type:"report",revision,yearMonth,state}`: ENQUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED/BLOCKED.
 
 Android owns its Room persistence and capture services. Dart never directly opens
@@ -100,3 +100,17 @@ into a generated build directory, excluding the previous Compose UI, previous
 this same filtered tree, so Hilt does not generate factories for removed UI
 ViewModels. The original `app/` remains the owning source for Room, services,
 authentication and use cases; generated copies are never edited or committed.
+
+## Recognition protocol (0.5.0)
+
+- `recognitionChat {revision,modelRole:text|vision|review,messages}` returns structured JSON text, never writes the ledger. Content supports text or OpenAI-style text/image parts. Image requests require cloudImageParsingEnabled and a vision/review role. The selected role pins its provider/model and stored credentials.
+- `pickRecognitionImage {}` / `consumeSharedImage {}` return `{base64,mimeType,ocrText}` or null; Android uses a system picker or image share intent, normalizes orientation, bounds size and runs local Chinese OCR. Shared images launch route `recognition_image`.
+- `pickBillFile {}` returns `{name,text}` or null; Android reads UTF-8 or GB18030 CSV through the system picker. Parsing and import previews stay local.
+- `armCaptureDiagnostic {}` / `readCaptureDiagnostic {}` / `clearCaptureDiagnostic {}` return `{state:idle|waiting|ready,sample?}`. One user-armed sample expires after ten minutes. Unsafe pages only contribute numeric reasons; safe receipts may include editable redacted text, so users preview before copying.
+- Settings add `screenCloudParsingEnabled`, `screenVisualCaptureEnabled`, `cloudImageParsingEnabled`, `captureAutoRecordEnabled`, `activeInputAutoSaveEnabled` (all false by default). Text/image/voice permissions remain independent.
+- Settings add `recognitionTextProvider`, `recognitionVisionProvider`, `recognitionReviewProvider` (empty reuses active provider; otherwise chatgpt/deepseek/qwen), and the corresponding `recognitionTextModel`, `recognitionVisionModel`, `recognitionReviewModel` (empty reuses that provider's default model).
+- `recognitionPreferencesJson` is a bounded array of explicit merchant/category corrections. It contains no credentials and is not a substitute for amount, direction or payment evidence.
+- `businessKind` is standard/expense/income/transfer/receivable/payable/refund/unknown. expense requires EXPENSE; income/refund require INCOME. Transfers, receivables, payables and unknown purpose do not inflate income/expense. Refunds offset expense with their signed negative amount.
+- Stable operationKey prevents request retries creating extra rows. Delete saves tombstones; late active-input saves or capture events cannot recreate the same operation. Portable backups include optional captureTombstones and recognition fields while retaining v1 compatibility.
+- Android schema v6 and portable SQLite v2 add provenance, edit versions and tombstones. Restoring advances a durable ledger generation and clears encrypted recognition tasks. Ordinary diagnostic history remains transient.
+- Screen status adds `visual_unavailable`, `model_queued`, `model_processing`, `model_rejected`, `model_failed`. Background candidates use an encrypted, bounded 24-hour queue and never require the Flutter screen to remain alive.

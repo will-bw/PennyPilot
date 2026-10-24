@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
 
 import 'settings_widgets.dart';
+import 'capture_diagnostic_screen.dart';
 
 String screenCaptureStatusLabel(String? status) => switch (status) {
   'disabled' => '页面读取已暂停',
@@ -17,7 +18,14 @@ String screenCaptureStatusLabel(String? status) => switch (status) {
   'empty_page' => '未读到可见页面文字',
   'not_receipt' => '未识别到完整支付凭证',
   'parsed' => '已识别，正在保存',
-  'saved' => '已生成待确认账单',
+  'saved' => '已保存识别结果',
+  'model_queued' => '已加入模型识别队列',
+  'model_pending' => '模型识别待确认',
+  'model_processing' => '模型正在理解支付凭证',
+  'model_rejected' => '模型未获得完整交易依据',
+  'model_failed' => '模型暂时不可用，等待重试',
+  'visual_unavailable' => '当前页面无法截图识别',
+  'visual_read' => '正在本地识别支付截图',
   'duplicate' => '重复页面已拦截',
   'error' => '页面处理未完成',
   _ => '等待支付页面事件',
@@ -40,6 +48,11 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'empty_page' => '当前页面没有可读取的可见文字。请在本次支付完成页停留约 5 秒后再查看诊断；仍无记录时可手动或语音补记。',
   'not_receipt' => '没有同时找到明确完成状态和有效金额。失败、待支付、聊天和历史页面也会被跳过。',
   'parsed' => '正在将识别出的交易字段保存到待确认列表。',
+  'model_queued' => '页面已进入持久识别队列，可离开此页。',
+  'model_processing' => '正在使用所选模型理解支付字段，结果仍会经过本地校验。',
+  'model_rejected' => '没有取得可核对的金额、方向和成功状态，未自动入账。可分享截图或导入账单补录。',
+  'model_failed' => '请检查 AI 服务配置与网络，待处理任务会按策略重试。',
+  'visual_unavailable' => '截图能力未启用、页面受保护或截图失败，可通过主动图片记账或账单导入补录。',
   'saved' => '请回到流水核对；即使关闭记账提醒，也可在待确认列表中查看。',
   'duplicate' => '同一页面不会反复生成账单，请查看已有待确认记录。',
   'error' => '请查看下方运行记录，检查权限并核对最近交易。',
@@ -547,6 +560,19 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                     ),
                     subtitle: screenCaptureStatusDetail(
                       capabilities['screenCaptureStatus'] as String?,
+                    ),
+                  ),
+                  SettingsRow(
+                    title: '诊断这次支付',
+                    subtitle: '主动采集本地页面样本，预览脱敏后可复制',
+                    icon: Icons.bug_report_outlined,
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => CaptureDiagnosticScreen(
+                          controller: widget.controller,
+                        ),
+                      ),
                     ),
                   ),
                   if (screenReadSummary != null)

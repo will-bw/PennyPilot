@@ -101,4 +101,22 @@ class ParseTextUseCaseTest {
         assertTrue(result.transactions.isEmpty())
         assertNotNull(result.error)
     }
+    @Test fun `unknown type and invalid date cannot silently become expense or today`() = runTest {
+        val invalidType = """{"transactions":[{"amount":1000,"type":"TRANSFER","category":"其他"}]}"""
+        assertTrue(createUseCase(invalidType).execute("转账10元").transactions.isEmpty())
+        val invalidDate = """{"transactions":[{"amount":1000,"type":"EXPENSE","category":"其他","occurred_at":"2026-02-30T12:00:00"}]}"""
+        assertTrue(createUseCase(invalidDate).execute("午饭10元").transactions.isEmpty())
+    }
+
+    @Test fun `unsupported amount and future intent require clarification`() = runTest {
+        assertTrue(createUseCase().execute("午饭15打车30").transactions.isEmpty())
+        assertTrue(createUseCase().execute("明天准备午饭25打车32").transactions.isEmpty())
+    }
+
+    @Test fun `decimal amount must be verified exactly without truncating cents`() = runTest {
+        val response = """{"transactions":[{"amount":1250,"type":"EXPENSE","category":"餐饮"}]}"""
+        assertEquals(1250L, createUseCase(response).execute("午饭12.50元").transactions.single().amount)
+        assertTrue(createUseCase(response).execute("午饭12.51元").transactions.isEmpty())
+    }
+
 }

@@ -27,8 +27,35 @@ class DynamicLlmClient(
         return GuardedLlmOperation(delegate) { configuration() == expected }
     }
 
+    override suspend fun operationIdentity(role: ModelRole): String {
+        if (providerForRole(role) == "chatgpt") chatGptAuth.awaitReady()
+        return roleIdentity(role)
+    }
+
+    override suspend fun forRole(role: ModelRole): LLMClient {
+        val expected = operationIdentity(role)
+        val delegate = resolve(providerForRole(role), modelForRole(role))
+        return GuardedLlmOperation(delegate) { roleIdentity(role) == expected }
+    }
+
+    private fun roleIdentity(role: ModelRole): String = ModelRoleRouting.identity(
+        configuration(providerForRole(role)), role, modelForRole(role)
+    )
+
+    private fun providerForRole(role: ModelRole): String = ModelRoleRouting.provider(keyStore.activeProvider, when (role) {
+        ModelRole.TEXT -> keyStore.recognitionTextProvider
+        ModelRole.VISION -> keyStore.recognitionVisionProvider
+        ModelRole.REVIEW -> keyStore.recognitionReviewProvider
+    })
+
+    private fun modelForRole(role: ModelRole): String = when (role) {
+        ModelRole.TEXT -> keyStore.recognitionTextModel
+        ModelRole.VISION -> keyStore.recognitionVisionModel
+        ModelRole.REVIEW -> keyStore.recognitionReviewModel
+    }
+
     // 只在内存比较；不能日志输出包含旧 API Key 的配置指纹。
-    private fun configuration(): List<String> = when (val provider = keyStore.activeProvider) {
+    private fun configuration(provider: String = keyStore.activeProvider): List<String> = when (provider) {
         "chatgpt" -> chatGptAuth.state.value.activeAccount.let { account ->
             listOf(provider, account?.id.orEmpty(), account?.isSignedIn.toString(), account?.canUsePlan.toString(),
                 account?.id?.let(keyStore::chatGptModel).orEmpty())
@@ -39,8 +66,7 @@ class DynamicLlmClient(
     }
 
     @Synchronized
-    private fun resolve(): LLMClient {
-        val provider = keyStore.activeProvider
+    private fun resolve(provider: String = keyStore.activeProvider, overrideModel: String = ""): LLMClient {
         if (provider.isBlank()) {
             throw UserFacingLlmException("请先到「我的 → AI 设置」登录 ChatGPT，或配置其他 AI 服务。")
         }
@@ -49,7 +75,7 @@ class DynamicLlmClient(
             return ChatGptClient(chatGptAuth) {
                 val account = chatGptAuth.state.value.activeAccount
                     ?: throw UserFacingLlmException("请到「我的 → AI 设置」登录 ChatGPT。")
-                keyStore.chatGptModel(account.id).ifBlank {
+                overrideModel.ifBlank { keyStore.chatGptModel(account.id) }.ifBlank {
                     throw UserFacingLlmException("请到「我的 → AI 设置」选择并保存此账号的模型。")
                 }
             }
@@ -63,20 +89,20 @@ class DynamicLlmClient(
             throw LLMException("当前供应商的 API Key 未配置，请到「设置 → AI 设置」填写")
         }
 
+        val selectedModel = overrideModel.ifBlank { if (provider == "deepseek") keyStore.deepSeekModel else keyStore.qwenModel }
         val signature = buildString {
             append(provider).append('|').append(apiKey).append('|')
-            append(keyStore.deepSeekModel).append('|')
-            append(keyStore.qwenModel).append('|')
+            append(selectedModel).append('|')
             append(keyStore.qwenBaseUrl)
         }
         cached?.let { if (signature == cacheKey) return it }
 
         val client = when (provider) {
-            "deepseek" -> DeepSeekClient(apiKey = apiKey, model = keyStore.deepSeekModel)
+            "deepseek" -> DeepSeekClient(apiKey = apiKey, model = selectedModel)
             else -> QwenClient(
                 apiKey = apiKey,
                 baseUrl = keyStore.qwenBaseUrl,
-                model = keyStore.qwenModel
+                model = selectedModel
             )
         }
         cached = client

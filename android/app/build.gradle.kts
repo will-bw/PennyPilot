@@ -71,6 +71,7 @@ tasks.matching {
 }
 flutter { source = "../.." }
 dependencies {
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation("junit:junit:4.13.2")
     implementation(libs.core.ktx)
     implementation("androidx.fragment:fragment-ktx:1.8.5")

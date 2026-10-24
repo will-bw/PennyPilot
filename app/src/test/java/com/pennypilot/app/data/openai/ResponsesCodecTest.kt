@@ -30,6 +30,23 @@ class ResponsesCodecTest {
         }
     }
 
+    @Test fun `user receipt images use Responses input image format`() {
+        val image = "data:image/jpeg;base64,aGVsbG8="
+        val request = ResponsesCodec.request("vision-model", listOf(Message("user", "识别这张票据", imageDataUrls = listOf(image))), jsonMode = true)
+        val parts = request.getValue("input").jsonArray.single().jsonObject.getValue("content").jsonArray
+        assertEquals("input_text", parts[0].jsonObject.string("type"))
+        assertEquals("input_image", parts[1].jsonObject.string("type"))
+        assertEquals(image, parts[1].jsonObject.string("image_url"))
+        assertFalse(request.containsKey("tools"))
+    }
+
+    @Test fun `remote image urls and hidden system attachments are rejected`() {
+        for (message in listOf(Message("user", "识别", imageDataUrls = listOf("https://example.com/private")),
+            Message("system", "识别", imageDataUrls = listOf("data:image/png;base64,aA==")))) {
+            try { ResponsesCodec.request("model", listOf(message)); fail() } catch (_: IllegalArgumentException) { }
+        }
+    }
+
     @Test fun `tools are grouped in official namespace shape`() {
         val request = ResponsesCodec.request("account-model", listOf(Message("user", "支出")), listOf(tool))
         val namespace = request.getValue("tools").jsonArray.single().jsonObject

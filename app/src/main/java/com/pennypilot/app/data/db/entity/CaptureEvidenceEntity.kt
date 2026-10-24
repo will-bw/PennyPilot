@@ -32,5 +32,6 @@ data class CaptureEvidenceEntity(
     @ColumnInfo(name = "order_domain") val orderDomain: String,
     @ColumnInfo(name = "amount") val amount: Long,
     @ColumnInfo(name = "type") val type: TxType,
-    @ColumnInfo(name = "merchant_fingerprint") val merchantFingerprint: String?
+    @ColumnInfo(name = "merchant_fingerprint") val merchantFingerprint: String?,
+    @ColumnInfo(name = "metadata_json") val metadataJson: String? = null
 )

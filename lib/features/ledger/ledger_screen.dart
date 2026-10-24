@@ -510,6 +510,7 @@ class TransactionRow extends StatelessWidget {
         ? tx.merchant!
         : category?.name ?? '未分类';
     final detail = [
+      if (!tx.countsAsExpense && !tx.countsAsIncome) tx.businessLabel,
       category?.name ?? '未分类',
       if (tx.note?.isNotEmpty == true) tx.note!,
       if (tx.status != TxStatus.confirmed) tx.status.label,
@@ -593,6 +594,9 @@ class PendingScreen extends StatelessWidget {
     listenable: controller,
     builder: (context, _) {
       final rows = controller.pendingTransactions;
+      final confirmable = rows
+          .where((tx) => tx.effectiveKind != 'unknown')
+          .toList();
       final displayedRevision = controller.revision;
       return Scaffold(
         appBar: AppBar(title: const Text('待确认账单')),
@@ -611,18 +615,22 @@ class PendingScreen extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('核对金额和分类，确认后计入收支。重复或无关的记录可以忽略。'),
+                          const Text(
+                            '核对金额和用途后确认。消费和收入计入统计；转移、借还款单独记录。待分类转账需先选择用途，重复或无关记录可以忽略。',
+                          ),
                           const SizedBox(height: 16),
                           OutlinedButton.icon(
-                            onPressed: controller.isBusy
+                            onPressed: controller.isBusy || confirmable.isEmpty
                                 ? null
                                 : () async {
                                     final ok = await showDialog<bool>(
                                       context: context,
                                       builder: (context) => AlertDialog(
-                                        title: Text('确认这 ${rows.length} 笔账单？'),
+                                        title: Text(
+                                          '确认这 ${confirmable.length} 笔已分类账单？',
+                                        ),
                                         content: const Text(
-                                          '请确保已经核对金额、分类及重复记录。',
+                                          '请确保已核对金额、用途和重复记录。待分类转账不会批量确认。',
                                         ),
                                         actions: [
                                           TextButton(
@@ -647,13 +655,17 @@ class PendingScreen extends StatelessWidget {
                                           );
                                         }
                                         return controller.confirmPending(
-                                          rows.map((t) => t.id),
+                                          confirmable.map((t) => t.id),
                                         );
                                       }, success: '账单已入账');
                                     }
                                   },
                             icon: const Icon(Icons.done_all),
-                            label: const Text('全部确认'),
+                            label: Text(
+                              confirmable.length == rows.length
+                                  ? '全部确认'
+                                  : '确认已分类的 ${confirmable.length} 笔',
+                            ),
                           ),
                         ],
                       ),
@@ -706,6 +718,15 @@ class PendingScreen extends StatelessWidget {
                                 FilledButton.tonal(
                                   onPressed: controller.isBusy
                                       ? null
+                                      : tx.effectiveKind == 'unknown'
+                                      ? () => Navigator.of(context).push(
+                                          MaterialPageRoute<void>(
+                                            builder: (_) => EntryScreen(
+                                              controller: controller,
+                                              transaction: tx,
+                                            ),
+                                          ),
+                                        )
                                       : () => runUi(
                                           context,
                                           () => controller.command(
@@ -718,7 +739,11 @@ class PendingScreen extends StatelessWidget {
                                             ledger: true,
                                           ),
                                         ),
-                                  child: const Text('确认入账'),
+                                  child: Text(
+                                    tx.effectiveKind == 'unknown'
+                                        ? '选择用途并确认'
+                                        : '确认入账',
+                                  ),
                                 ),
                               ],
                             ),

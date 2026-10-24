@@ -46,6 +46,94 @@ class CapturePersistenceTest {
         evidence: CaptureEvidence = evidence(), transaction: TransactionEntity = tx()
     ): CaptureResult = CapturePersistence.capture(db, LedgerRevision.current, transaction, evidence)
 
+    @Test fun `late receipt fields enrich durable identity without overwriting edited bill`() = runTest {
+        val first = capture(evidence(event = "screen-session"), tx(TxSource.ACCESSIBILITY, null)) as CaptureResult.Inserted
+        val row = db.transactionDao().getById(first.transactionId)!!
+        db.transactionDao().update(row.copy(note = "手动备注", merchant = "用户名称", status = TxStatus.CONFIRMED, editVersion = 1))
+        val later = evidence(event = "screen-session", orderId = "ORDER202610240009", at = time + 2000)
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(later, tx(TxSource.ACCESSIBILITY)))
+        assertEquals("ORDER202610240009", db.transactionDao().captureEvidenceByKey("screen-session")!!.orderId)
+        assertEquals("用户名称", db.transactionDao().getById(first.transactionId)!!.merchant)
+        assertEquals("手动备注", db.transactionDao().getById(first.transactionId)!!.note)
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(later.copy(eventKey = "late-notification")))
+        assertEquals(1, db.backupDao().transactions().size)
+    }
+
+    @Test fun `conflicting late amount or order never rewrites accepted evidence`() = runTest {
+        val first = capture(evidence(orderId = "ORDER202610240001")) as CaptureResult.Inserted
+        assertEquals(CaptureResult.Conflict(first.transactionId), capture(evidence(orderId = "ORDER202610240002"), tx().copy(amount = 9900)))
+        val evidence = db.transactionDao().captureEvidenceByKey("first")!!
+        assertEquals(1800L, evidence.amount)
+        assertEquals("ORDER202610240001", evidence.orderId)
+        assertEquals(1800L, db.transactionDao().getById(first.transactionId)!!.amount)
+    }
+
+    @Test fun `evidence changed while waiting for database cannot create a stale bill`() = runTest {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val held = async(Dispatchers.IO) {
+            db.withTransaction { entered.complete(Unit); release.await() }
+        }
+        entered.await()
+        var current = true
+        val pending = async(Dispatchers.IO) {
+            CapturePersistence.capture(db, LedgerRevision.current, tx(), evidence(), isCurrent = { current })
+        }
+        current = false
+        release.complete(Unit)
+        held.await()
+        assertEquals(CaptureResult.StaleEvidence, pending.await())
+        assertTrue(db.backupDao().transactions().isEmpty())
+        assertTrue(db.backupDao().captureEvents().isEmpty())
+    }
+
+    @Test fun `trusted auto record is confirmed but weak duplicate always waits`() = runTest {
+        val first = capture(evidence(), tx().copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        assertEquals(TxStatus.CONFIRMED, db.transactionDao().getById(first.transactionId)!!.status)
+        val second = capture(evidence(event = "other-page", notificationKey = null), tx(TxSource.ACCESSIBILITY).copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        assertEquals(first.transactionId, second.duplicateOf)
+        assertEquals(TxStatus.PENDING, db.transactionDao().getById(second.transactionId)!!.status)
+    }
+
+    @Test fun `business transfers never inflate income or expense and refund offsets expense`() = runTest {
+        db.transactionDao().insert(tx().copy(source = TxSource.AI_TEXT, status = TxStatus.CONFIRMED, businessKind = "expense"))
+        db.transactionDao().insert(tx().copy(source = TxSource.AI_TEXT, status = TxStatus.CONFIRMED, businessKind = "transfer", amount = 90000))
+        db.transactionDao().insert(tx().copy(source = TxSource.AI_TEXT, status = TxStatus.CONFIRMED, businessKind = "receivable", amount = 16000))
+        db.transactionDao().insert(tx().copy(source = TxSource.AI_TEXT, status = TxStatus.CONFIRMED, businessKind = "refund", type = TxType.INCOME, amount = -500))
+        assertEquals(1300L, db.insightDao().totalExpense(time - 1, time + 1))
+        assertEquals(0L, db.insightDao().totalIncome(time - 1, time + 1))
+    }
+
+    @Test fun `unclassified capture requires purpose before bulk or notification confirmation`() = runTest {
+        val saved = capture(transaction = tx().copy(businessKind = "unknown")) as CaptureResult.Inserted
+        assertEquals(0, db.transactionDao().updateStatus(saved.transactionId, TxStatus.CONFIRMED))
+        assertEquals(0, db.transactionDao().updateCapturedStatus(saved.transactionId, "first", TxStatus.CONFIRMED))
+        val row = db.transactionDao().getById(saved.transactionId)!!
+        db.transactionDao().update(row.copy(businessKind = "transfer"))
+        assertEquals(1, db.transactionDao().updateStatus(saved.transactionId, TxStatus.CONFIRMED))
+        assertEquals(0L, db.insightDao().totalExpense(time - 1, time + 1))
+    }
+
+    @Test fun `same order conflicting amount cannot auto confirm a second bill`() = runTest {
+        val first = capture(evidence(orderId = "ORDER202610240031"), tx().copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        val second = capture(evidence(event = "other-source", orderId = "ORDER202610240031"), tx().copy(amount = 2200, status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        assertEquals(first.transactionId, second.duplicateOf)
+        val row = db.transactionDao().getById(second.transactionId)!!
+        assertEquals(TxStatus.PENDING, row.status)
+        assertTrue(row.metadataJson!!.contains("同一订单出现不同金额"))
+        assertEquals(1800L, db.insightDao().totalExpense(time - 1, time + 1))
+    }
+
+    @Test fun `deletion tombstones survive database backup restore`() = runTest {
+        val first = capture(evidence(orderId = "ORDER202610240020")) as CaptureResult.Inserted
+        db.transactionDao().deleteById(first.transactionId)
+        val snapshot = db.backupDao().snapshot()
+        db.backupDao().replace(snapshot)
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture())
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(evidence(event = "new-alias", orderId = "ORDER202610240020")))
+        assertTrue(db.backupDao().transactions().isEmpty())
+    }
+
     @Test fun `notification parsing started before restore cannot write into restored ledger`() = runTest {
         val parsedUnderRevision = LedgerRevision.current
         db.withTransaction { LedgerRevision.advance() }
@@ -194,8 +282,9 @@ class CapturePersistenceTest {
         assertNull(db.transactionDao().captureEvidenceByKey(original.eventKey))
         assertNull(db.transactionDao().captureEvidenceByKey("order-alias"))
         assertEquals(1, db.backupDao().captureEvents().size)
-        // 被用户删除的账目不留下永久的订单/事件墓碑。
-        assertTrue(capture(original) is CaptureResult.Inserted)
+        // 用户删除后，迟到的原事件及同订单新别名都不能复活账目。
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(original))
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(original.copy(eventKey = "after-delete")))
     }
 
     @Test fun `late notification flags matching manual entry and preserves the original`() = runTest {

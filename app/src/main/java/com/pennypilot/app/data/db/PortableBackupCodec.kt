@@ -21,7 +21,7 @@ object PortableBackupCodec {
             "type" to it.type.name, "categoryId" to it.categoryId, "note" to it.note,
             "merchant" to it.merchant, "accountTag" to it.accountTag, "occurredAt" to it.occurredAt,
             "createdAt" to it.createdAt, "source" to it.source.name, "status" to it.status.name,
-            "rawPayload" to it.rawPayload, "captureEventKey" to it.captureEventKey, "duplicateOf" to it.duplicateOf) },
+            "rawPayload" to it.rawPayload, "captureEventKey" to it.captureEventKey, "duplicateOf" to it.duplicateOf, "businessKind" to it.businessKind, "metadataJson" to it.metadataJson, "operationKey" to it.operationKey, "editVersion" to it.editVersion) },
         "rules" to data.rules.map { mapOf("id" to it.id, "appPackage" to it.appPackage,
             "regexAmount" to it.regexAmount, "regexMerchant" to it.regexMerchant,
             "directionHint" to it.directionHint, "enabled" to it.enabled, "priority" to it.priority) },
@@ -33,12 +33,13 @@ object PortableBackupCodec {
             "source" to it.source.name, "observedAt" to it.observedAt, "firstObservedAt" to it.firstObservedAt,
             "notificationKey" to it.notificationKey, "textFingerprint" to it.textFingerprint,
             "orderId" to it.orderId, "orderDomain" to it.orderDomain, "amount" to it.amount,
-            "type" to it.type.name, "merchantFingerprint" to it.merchantFingerprint) }
+            "type" to it.type.name, "merchantFingerprint" to it.merchantFingerprint, "metadataJson" to it.metadataJson) },
+        "captureTombstones" to data.captureTombstones.map { mapOf("identityKey" to it.identityKey, "transactionId" to it.transactionId, "deletedAt" to it.deletedAt) }
     )
 
     fun decode(data: Map<String, Any?>): BackupSnapshot {
         require(data["format"] == "pennypilot" && data.number("version") == 1L) { "不支持此备份格式或版本。" }
-        require(data.keys.all { it in setOf("format", "version", "categories", "transactions", "rules", "reports", "captureEvents") }) {
+        require(data.keys.all { it in setOf("format", "version", "categories", "transactions", "rules", "reports", "captureEvents", "captureTombstones") }) {
             "备份包含未知字段，请升级应用后重试。"
         }
         require(portableJson(data).toString().toByteArray(Charsets.UTF_8).size <= 20 * 1024 * 1024) { "备份文件不能超过 20 MB。" }
@@ -64,9 +65,15 @@ object PortableBackupCodec {
                 createdAt = row.time("createdAt"), source = TxSource.valueOf(row.text("source")),
                 status = TxStatus.valueOf(row.text("status")), rawPayload = row.optionalText("rawPayload", 100000),
                 captureEventKey = row.optionalText("captureEventKey", 2000),
-                duplicateOf = duplicateOf)
+                duplicateOf = duplicateOf,
+                businessKind = (row.optionalText("businessKind", 32) ?: "standard").also { require(validBusinessKind(it, type)) { "账务用途与资金方向不一致。" } },
+                metadataJson = row.optionalText("metadataJson", 100000)?.also { require(Json.parseToJsonElement(it) is JsonObject) },
+                operationKey = row.optionalText("operationKey", 2000),
+                editVersion = row["editVersion"]?.let { row.number("editVersion").also { require(it >= 0) } } ?: 0)
         }
         unique(transactions.map { it.id })
+        val operationKeys = transactions.mapNotNull { it.operationKey }
+        require(operationKeys.distinct().size == operationKeys.size) { "备份录入身份重复。" }
         val captureKeys = transactions.mapNotNull { it.captureEventKey }
         require(captureKeys.distinct().size == captureKeys.size) { "备份采集标识重复。" }
         // A duplicate candidate can point at an already-deleted transaction; preserve it as evidence.
@@ -100,10 +107,14 @@ object PortableBackupCodec {
                 source, row.time("observedAt"), row.time("firstObservedAt"),
                 row.optionalText("notificationKey", 2000), row.text("textFingerprint", 2000),
                 row.optionalText("orderId", 2000), row.text("orderDomain", 300), amount, type,
-                row.optionalText("merchantFingerprint", 2000))
+                row.optionalText("merchantFingerprint", 2000), row.optionalText("metadataJson", 100000))
         }
         require(evidence.map { it.eventKey }.distinct().size == evidence.size) { "备份采集证据重复。" }
-        return BackupSnapshot(categories, transactions, rules, reports, evidence)
+        val tombstones = data.rows("captureTombstones", optional = true).map { row ->
+            CaptureTombstoneEntity(row.text("identityKey", 4000), row.positive("transactionId"), row.time("deletedAt"))
+        }
+        require(tombstones.map { it.identityKey }.distinct().size == tombstones.size) { "备份撤销身份重复。" }
+        return BackupSnapshot(categories, transactions, rules, reports, evidence, tombstones)
     }
 
     fun decodeReport(row: Map<String, Any?>): MonthlyReportEntity {
@@ -120,13 +131,21 @@ object PortableBackupCodec {
             require(name != null && name.isString && name.content.isNotBlank() && name.content.length <= 200)
             for (field in listOf("total", "count")) {
                 val value = item[field] as? JsonPrimitive
-                require(value != null && !value.isString && value.longOrNull?.let { it in 0..MAX_SAFE_INTEGER } == true)
+                require(value != null && !value.isString && value.longOrNull?.let { (if (field == "count") it in 0..MAX_SAFE_INTEGER else it in -MAX_SAFE_INTEGER..MAX_SAFE_INTEGER) } == true)
             }
         }
         return MonthlyReportEntity(id = row["id"]?.let { row.number("id").also { id -> require(id >= 0) } } ?: 0,
-            yearMonth = month, totalExpense = row.number("totalExpense").also { require(it >= 0) },
+            yearMonth = month, totalExpense = row.number("totalExpense"),
             totalIncome = row.number("totalIncome").also { require(it >= 0) }, byCategoryJson = categories,
             llmSummary = row.text("llmSummary", 100000, allowEmpty = true), generatedAt = row.time("generatedAt"))
+    }
+
+    val BUSINESS_KINDS = setOf("standard", "expense", "income", "transfer", "receivable", "payable", "refund", "unknown")
+
+    fun validBusinessKind(kind: String, type: TxType): Boolean = kind in BUSINESS_KINDS && when (kind) {
+        "expense" -> type == TxType.EXPENSE
+        "income", "refund" -> type == TxType.INCOME
+        else -> true
     }
 
     private fun unique(ids: List<Long>) { require(ids.distinct().size == ids.size) { "备份编号重复。" } }

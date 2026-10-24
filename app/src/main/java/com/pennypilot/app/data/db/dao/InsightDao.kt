@@ -38,7 +38,7 @@ interface InsightDao {
         """
         SELECT c.name as categoryName, COALESCE(SUM(t.amount), 0) as total, COUNT(*) as count
         FROM transactions t JOIN categories c ON t.category_id = c.id
-        WHERE t.status = 'CONFIRMED' AND t.type = 'EXPENSE' AND t.occurred_at >= :start AND t.occurred_at < :end
+        WHERE t.status = 'CONFIRMED' AND ((t.type = 'EXPENSE' AND t.business_kind IN ('standard','expense')) OR t.business_kind = 'refund') AND t.occurred_at >= :start AND t.occurred_at < :end
         AND (:category IS NULL OR c.name = :category)
         AND (:keyword IS NULL OR t.merchant LIKE '%' || :keyword || '%' OR t.note LIKE '%' || :keyword || '%')
         GROUP BY c.name ORDER BY total DESC
@@ -55,7 +55,7 @@ interface InsightDao {
         """
         SELECT DATE(occurred_at / 1000, 'unixepoch', 'localtime') as day, COALESCE(SUM(amount), 0) as total
         FROM transactions
-        WHERE status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end AND type = 'EXPENSE'
+        WHERE status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end AND ((type = 'EXPENSE' AND business_kind IN ('standard','expense')) OR business_kind = 'refund')
         AND (:keyword IS NULL OR merchant LIKE '%' || :keyword || '%' OR note LIKE '%' || :keyword || '%')
         GROUP BY day ORDER BY day
         """
@@ -66,7 +66,7 @@ interface InsightDao {
         """
         SELECT DATE(occurred_at / 1000, 'unixepoch', 'localtime') as day, COALESCE(SUM(amount), 0) as total
         FROM transactions
-        WHERE status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end AND type = 'EXPENSE'
+        WHERE status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end AND ((type = 'EXPENSE' AND business_kind IN ('standard','expense')) OR business_kind = 'refund')
         GROUP BY day ORDER BY day
         """
     )
@@ -76,7 +76,7 @@ interface InsightDao {
         """
         SELECT strftime('%Y-%m', occurred_at / 1000, 'unixepoch', 'localtime') as ym, COALESCE(SUM(amount), 0) as total
         FROM transactions
-        WHERE status = 'CONFIRMED' AND type = 'EXPENSE' AND occurred_at >= :start AND occurred_at < :end
+        WHERE status = 'CONFIRMED' AND ((type = 'EXPENSE' AND business_kind IN ('standard','expense')) OR business_kind = 'refund') AND occurred_at >= :start AND occurred_at < :end
         GROUP BY ym ORDER BY ym ASC
         """
     )
@@ -86,7 +86,7 @@ interface InsightDao {
         """
         SELECT strftime('%Y-%m', occurred_at / 1000, 'unixepoch', 'localtime') as ym, COALESCE(SUM(amount), 0) as total
         FROM transactions
-        WHERE status = 'CONFIRMED' AND type = 'EXPENSE' AND occurred_at >= :start AND occurred_at < :end
+        WHERE status = 'CONFIRMED' AND ((type = 'EXPENSE' AND business_kind IN ('standard','expense')) OR business_kind = 'refund') AND occurred_at >= :start AND occurred_at < :end
         GROUP BY ym ORDER BY ym ASC
         """
     )
@@ -120,7 +120,7 @@ interface InsightDao {
     @Query(
         """
         SELECT COALESCE(SUM(amount), 0) FROM transactions
-        WHERE status = 'CONFIRMED' AND type = 'EXPENSE' AND occurred_at >= :start AND occurred_at < :end
+        WHERE status = 'CONFIRMED' AND ((type = 'EXPENSE' AND business_kind IN ('standard','expense')) OR business_kind = 'refund') AND occurred_at >= :start AND occurred_at < :end
         """
     )
     suspend fun totalExpense(start: Long, end: Long): Long
@@ -128,7 +128,7 @@ interface InsightDao {
     @Query(
         """
         SELECT COALESCE(SUM(amount), 0) FROM transactions
-        WHERE status = 'CONFIRMED' AND type = 'INCOME' AND occurred_at >= :start AND occurred_at < :end
+        WHERE status = 'CONFIRMED' AND type = 'INCOME' AND business_kind IN ('standard','income') AND occurred_at >= :start AND occurred_at < :end
         """
     )
     suspend fun totalIncome(start: Long, end: Long): Long

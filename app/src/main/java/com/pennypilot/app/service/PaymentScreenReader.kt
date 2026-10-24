@@ -1,6 +1,9 @@
 package com.pennypilot.app.service
 
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import com.pennypilot.app.data.parser.PaymentScreenNode
+import com.pennypilot.app.data.parser.PaymentScreenStructure
 
 /** 有界读取可见文本，跳过密码和所有输入控件；不截屏、不操作节点。 */
 object PaymentScreenReader {
@@ -13,7 +16,8 @@ object PaymentScreenReader {
         val text: String?,
         val hasInput: Boolean,
         val status: String,
-        val diagnostics: Map<String, Int>
+        val diagnostics: Map<String, Int>,
+        val structure: PaymentScreenStructure? = null
     )
 
     fun read(root: AccessibilityNodeInfo, packageName: String): String? = inspect(root, packageName).text
@@ -31,7 +35,8 @@ object PaymentScreenReader {
         var length = 0
         var refusalStatus: String? = null
         val lines = mutableListOf<String>()
-        fun visit(node: AccessibilityNodeInfo, depth: Int) {
+        val facts = mutableListOf<PaymentScreenNode>()
+        fun visit(node: AccessibilityNodeInfo, depth: Int, parentId: Int? = null) {
             if (refusalStatus != null) return
             if (++visited > MAX_VISITED_NODES || depth > MAX_DEPTH) {
                 refusalStatus = "traversal_limit"
@@ -43,6 +48,7 @@ object PaymentScreenReader {
                 foreignNodes++
                 return
             }
+            val nodeId = visited
             if (!node.isVisibleToUser) {
                 hiddenNodes++
                 // 隐藏的输入/密码子树整体跳过，不能从其子节点泄漏内容。
@@ -71,6 +77,15 @@ object PaymentScreenReader {
                     lines.add(text)
                 }
             }
+            // Preserve hierarchy even for hidden containers; their own text is never retained.
+            val bounds = Rect().also(node::getBoundsInScreen)
+            facts.add(PaymentScreenNode(nodeId, parentId,
+                text = node.text?.toString()?.trim()?.takeIf { node.isVisibleToUser && it.isNotEmpty() },
+                description = node.contentDescription?.toString()?.trim()?.takeIf { node.isVisibleToUser && it.isNotEmpty() },
+                className = node.className?.toString()?.take(200),
+                resourceId = node.viewIdResourceName?.take(200),
+                bounds = listOf(bounds.left, bounds.top, bounds.right, bounds.bottom),
+                visible = node.isVisibleToUser))
             for (i in 0 until node.childCount) {
                 // 无障碍树切换时可能瞬时返回 null；只重取一次，仍缺失则拒绝整页。
                 val child = node.getChild(i) ?: node.getChild(i)
@@ -79,7 +94,7 @@ object PaymentScreenReader {
                     refusalStatus = "incomplete_tree"
                     break
                 }
-                try { visit(child, depth + 1) } finally { child.recycle() }
+                try { visit(child, depth + 1, nodeId) } finally { child.recycle() }
                 if (refusalStatus != null) break
             }
         }
@@ -106,7 +121,9 @@ object PaymentScreenReader {
                 "missingChildren" to missingChildren,
                 "hiddenNodes" to hiddenNodes,
                 "foreignNodes" to foreignNodes
-            )
+            ),
+            // Refused pages must expose neither partial text nor partial structured facts.
+            structure = if (status == "ready") PaymentScreenStructure(facts) else null
         )
     }
 }

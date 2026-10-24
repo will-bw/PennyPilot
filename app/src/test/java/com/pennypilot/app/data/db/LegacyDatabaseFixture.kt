@@ -35,6 +35,14 @@ internal fun legacyDatabase(context: Context, name: String, version: Int): File 
             db.execSQL("DELETE FROM monthly_reports WHERE id = 1")
             db.execSQL("CREATE UNIQUE INDEX index_monthly_reports_year_month ON monthly_reports(year_month)")
         }
+        if (version >= 5) {
+            db.execSQL("ALTER TABLE transactions ADD COLUMN duplicate_of INTEGER")
+            db.execSQL("CREATE TABLE capture_events (event_key TEXT NOT NULL PRIMARY KEY, transaction_id INTEGER NOT NULL, package_name TEXT NOT NULL, source TEXT NOT NULL, observed_at INTEGER NOT NULL, first_observed_at INTEGER NOT NULL, notification_key TEXT, text_fingerprint TEXT NOT NULL, order_id TEXT, order_domain TEXT NOT NULL, amount INTEGER NOT NULL, type TEXT NOT NULL, merchant_fingerprint TEXT, FOREIGN KEY(transaction_id) REFERENCES transactions(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            db.execSQL("CREATE INDEX index_capture_events_transaction_id ON capture_events(transaction_id)")
+            db.execSQL("CREATE INDEX index_capture_events_observed_at ON capture_events(observed_at)")
+            db.execSQL("CREATE INDEX index_capture_events_order_domain_order_id ON capture_events(order_domain, order_id)")
+            db.execSQL("CREATE INDEX index_capture_events_package_name_notification_key ON capture_events(package_name, notification_key)")
+        }
         db.version = version
     }
     return file

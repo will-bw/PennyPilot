@@ -1,6 +1,7 @@
 package com.pennypilot.app.data.openai
 
 import com.pennypilot.app.data.llm.FunctionCallData
+import com.pennypilot.app.data.llm.MultimodalMessages
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ToolCall
 import com.pennypilot.app.data.llm.ToolDefinition
@@ -33,6 +34,7 @@ internal object ResponsesCodec {
         jsonMode: Boolean = false
     ): JsonObject {
         if (model.isBlank() || model.length > 256 || model.any(Char::isISOControl)) throw OpenAiErrors.noModel()
+        MultimodalMessages.validate(messages)
         if (messages.isEmpty()) throw OpenAiErrors.protocol("对话为空")
         val names = tools.map { it.function.name }
         if (names.distinct().size != names.size || tools.any { it.type != "function" || !functionName.matches(it.function.name) }) {
@@ -50,7 +52,13 @@ internal object ResponsesCodec {
                         add(buildJsonObject {
                             put("type", "message")
                             put("role", if (message.role == "system") "developer" else message.role)
-                            put("content", message.content)
+                            if (message.imageDataUrls.isEmpty()) put("content", message.content)
+                            else putJsonArray("content") {
+                                add(buildJsonObject { put("type", "input_text"); put("text", message.content) })
+                                message.imageDataUrls.forEach { image -> add(buildJsonObject {
+                                    put("type", "input_image"); put("image_url", image)
+                                }) }
+                            }
                         })
                     }
                     "assistant" -> {

@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
+
+import 'recognition/recognition_protocol.dart';
 
 import 'package:flutter/foundation.dart';
 
@@ -59,6 +62,8 @@ class LedgerController extends ChangeNotifier {
   int? _categoryFilter;
   int? get categoryFilter => _categoryFilter;
 
+  List<String> recognitionQuestions = [];
+  String? recognitionNotice;
   List<LedgerTransaction> _drafts = [];
   int _draftGeneration = 0;
   List<LedgerTransaction> get drafts => List.unmodifiable(_drafts);
@@ -295,9 +300,11 @@ class LedgerController extends ChangeNotifier {
           !_inMonth(transaction, month)) {
         continue;
       }
-      if (transaction.type == TxType.expense) {
+      if (transaction.isRefund) {
+        expense -= transaction.amountFen;
+      } else if (transaction.countsAsExpense) {
         expense += transaction.amountFen;
-      } else {
+      } else if (transaction.countsAsIncome) {
         income += transaction.amountFen;
       }
       count++;
@@ -312,7 +319,7 @@ class LedgerController extends ChangeNotifier {
     final amounts = <int, int>{}, counts = <int, int>{};
     for (final transaction in transactions) {
       if (transaction.status != TxStatus.confirmed ||
-          transaction.type != TxType.expense ||
+          !transaction.countsAsExpense ||
           !_inMonth(transaction, _selectedMonth)) {
         continue;
       }
@@ -345,7 +352,7 @@ class LedgerController extends ChangeNotifier {
     final result = <int, int>{};
     for (final transaction in transactions) {
       if (transaction.status == TxStatus.confirmed &&
-          transaction.type == TxType.expense &&
+          transaction.countsAsExpense &&
           _inMonth(transaction, _selectedMonth)) {
         result.update(
           transaction.occurredAt.day,
@@ -439,6 +446,12 @@ class LedgerController extends ChangeNotifier {
         code: 'INVALID_AMOUNT',
       );
     }
+    if ((transaction.effectiveKind == 'expense' &&
+            transaction.type != TxType.expense) ||
+        (const {'income', 'refund'}.contains(transaction.effectiveKind) &&
+            transaction.type != TxType.income)) {
+      throw const LedgerException('账务用途与资金方向不一致，请重新选择。');
+    }
     final category = categoryById(transaction.categoryId);
     if (category == null || category.type != transaction.type) {
       throw const LedgerException('请选择与收支类型一致的分类。', code: 'INVALID_CATEGORY');
@@ -448,12 +461,29 @@ class LedgerController extends ChangeNotifier {
   Future<int> saveTransaction(
     LedgerTransaction transaction, {
     int? expectedRevision,
+    bool confirmPending = false,
   }) async {
     _validateTransaction(transaction);
+    if (transaction.id == 0 &&
+        transaction.effectiveKind == 'unknown' &&
+        const {
+          TxSource.aiText,
+          TxSource.aiVoice,
+          TxSource.aiImage,
+        }.contains(transaction.source)) {
+      throw const LedgerException('请先核对草稿并选择账务用途，再保存。');
+    }
+    if (confirmPending && transaction.effectiveKind == 'unknown') {
+      throw const LedgerException('请先选择这笔资金变动的账务用途。');
+    }
     final result = stringMap(
       await command(
         'saveTransaction',
-        arguments: {...transaction.toMap(), 'revision': ?expectedRevision},
+        arguments: {
+          ...transaction.toMap(),
+          'revision': ?expectedRevision,
+          if (confirmPending) 'confirmPending': true,
+        },
         ledger: true,
       ),
     );
@@ -465,6 +495,10 @@ class LedgerController extends ChangeNotifier {
   }
 
   Future<void> setTransactionStatus(int id, TxStatus status) async {
+    if (status == TxStatus.confirmed &&
+        transactions.any((tx) => tx.id == id && tx.effectiveKind == 'unknown')) {
+      throw const LedgerException('请先选择这笔资金变动的账务用途。');
+    }
     if (status == TxStatus.pending) {
       throw const LedgerException('只能确认或忽略待确认账单。');
     }
@@ -480,7 +514,12 @@ class LedgerController extends ChangeNotifier {
         _requireLoaded();
         final selected = ids?.toSet();
         final pending = pendingTransactions
-            .where((item) => selected == null || selected.contains(item.id))
+            .where(
+              (item) =>
+                  (selected == null || selected.contains(item.id)) &&
+                  (status != TxStatus.confirmed ||
+                      item.effectiveKind != 'unknown'),
+            )
             .toList();
         final generation = _generation;
         final currentRevision = revision;
@@ -532,10 +571,122 @@ class LedgerController extends ChangeNotifier {
     _drafts = [..._drafts, ...parsed];
     return List.unmodifiable(parsed);
   });
+  Future<List<LedgerTransaction>> recognizeInput({
+    String text = '',
+    TxSource source = TxSource.aiText,
+    Map<String, dynamic>? image,
+    String? sessionId,
+  }) async {
+    final parsed = await _operation('parseText', () async {
+      _requireLoaded();
+      final generation = _generation, draftGeneration = _draftGeneration;
+      final result = stringMap(
+        await _repository.invoke('recognizeInput', {
+          'revision': revision,
+          'text': text,
+          'source': source.wireValue,
+          'operationId':
+              sessionId ??
+              RecognitionProtocol.identity(
+                '${_clock().microsecondsSinceEpoch}:$text',
+              ),
+          ...?image,
+        }),
+      );
+      _requireCurrent(generation);
+      if (draftGeneration != _draftGeneration) {
+        throw const LedgerException('这次录入已取消。', code: 'CANCELLED');
+      }
+      recognitionQuestions = (result['questions'] as List? ?? [])
+          .whereType<String>()
+          .toList();
+      if (result['error'] is String) {
+        throw LedgerException(result['error'] as String);
+      }
+      final items = (result['transactions'] as List? ?? []).map((row) {
+        final tx = LedgerTransaction.fromMap(stringMap(row), draft: true);
+        return sessionId == null
+            ? tx
+            : tx.copyWith(
+                metadataJson: jsonEncode({
+                  ...tx.recognitionMetadata,
+                  'requestSessionId': sessionId,
+                }),
+              );
+      }).toList();
+      for (final item in items) {
+        _validateTransaction(item);
+      }
+      if (sessionId != null) {
+        final reviewed = _drafts
+            .where(
+              (t) =>
+                  t.recognitionMetadata['requestSessionId'] == sessionId &&
+                  t.recognitionMetadata['reviewed'] == true,
+            )
+            .map((t) => t.recognitionMetadata['operationId'])
+            .toSet();
+        _drafts.removeWhere(
+          (t) =>
+              t.recognitionMetadata['requestSessionId'] == sessionId &&
+              t.recognitionMetadata['reviewed'] != true,
+        );
+        items.removeWhere(
+          (t) => reviewed.contains(t.recognitionMetadata['operationId']),
+        );
+      }
+      _drafts = [..._drafts, ...items];
+      recognitionNotice = items.isEmpty
+          ? '没有新增账目，请查看下面的提示。'
+          : '识别到 ${items.length} 笔，核对后保存。';
+      return (items: items, auto: result['autoSaveEligible'] == true);
+    });
+    if (parsed.auto &&
+        settings['activeInputAutoSaveEnabled'] == true &&
+        parsed.items.isNotEmpty) {
+      await saveDrafts(items: parsed.items);
+      recognitionNotice = '已自动保存 ${parsed.items.length} 笔，可在账本中修改或删除。';
+      _notify();
+    }
+    return parsed.items;
+  }
+
+  void addImportedDrafts(List<LedgerTransaction> items) {
+    if (isBusy) throw const LedgerException('请等待当前操作完成。');
+    for (final item in items) {
+      _validateTransaction(item);
+    }
+    final existing = {
+      ...transactions.map((t) => t.recognitionMetadata['operationId']),
+      ..._drafts.map((t) => t.recognitionMetadata['operationId']),
+    };
+    _drafts = [
+      ..._drafts,
+      ...items.where(
+        (item) => !existing.contains(item.recognitionMetadata['operationId']),
+      ),
+    ];
+    recognitionNotice = '导入预览已加入待核对账单。';
+    _notify();
+  }
+
   void updateDraft(int index, LedgerTransaction value) {
     if (busyFor('saveTransactions')) return;
     _validateTransaction(value);
-    _drafts[index] = value.copyWith(id: 0);
+    final prior = _drafts[index];
+    _drafts[index] = value.copyWith(
+      id: 0,
+      metadataJson: jsonEncode({
+        ...prior.recognitionMetadata,
+        ...value.recognitionMetadata,
+        'reviewed': true,
+        'questions': <String>[],
+      }),
+    );
+    if (prior.categoryId != value.categoryId &&
+        value.merchant?.isNotEmpty == true) {
+      unawaited(_rememberCategory(value));
+    }
     _notify();
   }
 
@@ -549,7 +700,37 @@ class LedgerController extends ChangeNotifier {
     if (busyFor('saveTransactions')) return;
     _draftGeneration++;
     _drafts = [];
+    recognitionQuestions = [];
+    recognitionNotice = null;
     _notify();
+  }
+
+  Future<void> _rememberCategory(LedgerTransaction item) async {
+    try {
+      final raw = settings['recognitionPreferencesJson'] as String? ?? '[]';
+      final preferences = (jsonDecode(raw) as List)
+          .whereType<Map>()
+          .map((v) => Map<String, dynamic>.from(v))
+          .toList();
+      preferences.removeWhere(
+        (p) =>
+            p['merchant'] == item.merchant && p['type'] == item.type.wireValue,
+      );
+      preferences.add({
+        'merchant': item.merchant,
+        'type': item.type.wireValue,
+        'category': categoryById(item.categoryId)?.name,
+      });
+      await updateSettings({
+        'recognitionPreferencesJson': jsonEncode(
+          preferences
+              .skip((preferences.length - 100).clamp(0, 100000))
+              .toList(),
+        ),
+      });
+    } catch (_) {
+      /* A preference write must never discard the corrected draft. */
+    }
   }
 
   Future<int> saveDrafts({
@@ -565,18 +746,48 @@ class LedgerController extends ChangeNotifier {
     if (isParsing) throw const LedgerException('请等待解析完成后再保存。');
     for (final transaction in saving) {
       _validateTransaction(transaction);
+      if (transaction.effectiveKind == 'unknown' &&
+          transaction.source != TxSource.billImport) {
+        throw const LedgerException('请先打开待分类草稿，选择账务用途后再保存。');
+      }
     }
     final generation = _generation;
-    await _repository.invoke('saveTransactions', {
-      'revision': revision,
-      'transactions': saving
-          .map((item) => item.copyWith(id: 0).toMap())
-          .toList(),
-    });
-    _requireCurrent(generation);
-    _drafts = _drafts.where((draft) => !saving.contains(draft)).toList();
+    final currentRevision = revision;
+    var saved = 0;
+    try {
+      while (saved < saving.length) {
+        _requireCurrent(generation);
+        final batch = saving.sublist(
+          saved,
+          (saved + 100).clamp(0, saving.length),
+        );
+        await _repository.invoke('saveTransactions', {
+          'revision': currentRevision,
+          'transactions': batch
+              .map((item) => item.copyWith(id: 0).toMap())
+              .toList(),
+        });
+        saved += batch.length;
+        _requireCurrent(generation);
+        _drafts = _drafts.where((draft) => !batch.contains(draft)).toList();
+        _notify();
+      }
+    } catch (error) {
+      try {
+        await refresh();
+      } catch (_) {
+        /* Keep the original write error. */
+      }
+      if (saved > 0) {
+        throw LedgerException(
+          '已保存 $saved 笔，剩余 ${saving.length - saved} 笔尚未保存。${error is LedgerException ? error.message : '请重试剩余账单。'}',
+          code: error is LedgerException ? error.code : 'PARTIAL_SAVE',
+        );
+      }
+      rethrow;
+    }
     await refresh();
-    return saving.length;
+    return saved;
   });
 
   void clearConversation() {

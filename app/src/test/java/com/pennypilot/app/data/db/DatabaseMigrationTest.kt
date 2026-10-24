@@ -23,6 +23,8 @@ class DatabaseMigrationTest {
     @Test fun `version three upgrades and keeps newest duplicate report`() = verifyMigration(3)
     @Test fun `version four preserves capture identities and terminal status`() = verifyMigration(4)
 
+    @Test fun `version five gains recognition metadata without losing ledger`() = verifyMigration(5)
+
     private fun verifyMigration(version: Int) = runTest {
         val name = "migration-${UUID.randomUUID()}.db"
         legacyDatabase(context, name, version)
@@ -34,6 +36,11 @@ class DatabaseMigrationTest {
             assertEquals("保留备注", tx.note)
             assertNull(tx.captureEventKey)
             assertNull(tx.duplicateOf)
+            assertEquals("standard", tx.businessKind)
+            assertNull(tx.metadataJson)
+            assertNull(tx.operationKey)
+            assertEquals(0L, tx.editVersion)
+            assertTrue(db.backupDao().captureTombstones().isEmpty())
             assertTrue(db.backupDao().captureEvents().isEmpty())
             assertEquals("自定义餐饮", db.categoryDao().getById(42)!!.name)
             assertEquals(AppDatabase.VERSION, db.openHelper.writableDatabase.version)

@@ -18,6 +18,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var updateBridge: AppUpdateBridge? = null
     private var exportRequest: CompletableDeferred<Uri?>? = null
     private var restoreRequest: CompletableDeferred<List<Uri>>? = null
+    private var recognitionRequest: CompletableDeferred<Uri?>? = null
     private var permissionRequest: CompletableDeferred<Boolean>? = null
 
     private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) {
@@ -25,6 +26,9 @@ class MainActivity : FlutterFragmentActivity() {
     }
     private val restoreLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
         restoreRequest?.complete(it)
+    }
+    private val recognitionLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) {
+        recognitionRequest?.complete(it)
     }
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         permissionRequest?.complete(it)
@@ -69,6 +73,7 @@ class MainActivity : FlutterFragmentActivity() {
         exportRequest?.cancel()
         restoreRequest?.cancel()
         permissionRequest?.cancel()
+        recognitionRequest?.cancel()
         if (attached) ledgerBridge.detach()
         attached = false
         super.onDestroy()
@@ -92,6 +97,16 @@ class MainActivity : FlutterFragmentActivity() {
             restoreLauncher.launch(arrayOf("*/*"))
             request.await()
         } finally { restoreRequest = null }
+    }
+
+    suspend fun chooseRecognitionDocument(image: Boolean): Uri? {
+        check(recognitionRequest == null && exportRequest == null && restoreRequest == null) { "请先完成当前文件选择。" }
+        val request = CompletableDeferred<Uri?>()
+        recognitionRequest = request
+        return try {
+            recognitionLauncher.launch(if (image) arrayOf("image/*") else arrayOf("text/*", "application/csv", "application/octet-stream", "application/vnd.ms-excel"))
+            request.await()
+        } finally { recognitionRequest = null }
     }
 
     suspend fun askPermission(permission: String): Boolean {

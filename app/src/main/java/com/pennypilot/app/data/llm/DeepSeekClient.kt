@@ -30,6 +30,7 @@ class DeepSeekClient(
 
     override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String =
         withContext(Dispatchers.IO) {
+            if (messages.any { it.imageDataUrls.isNotEmpty() }) throw UserFacingLlmException("当前 DeepSeek 接口仅支持文本，请配置支持图片的 AI 服务")
             val request = ChatRequest(
                 model = model,
                 messages = messages,
@@ -46,8 +47,8 @@ class DeepSeekClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
-                throw LLMException("DeepSeek API error: ${response.code} ${response.message} $errBody".trim())
+                response.close()
+                throw UserFacingLlmException("AI 请求失败（HTTP ${response.code}），请检查模型、密钥与服务额度")
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("DeepSeek API returned empty body")
@@ -59,6 +60,7 @@ class DeepSeekClient(
 
     override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools =
         withContext(Dispatchers.IO) {
+            if (messages.any { it.imageDataUrls.isNotEmpty() }) throw UserFacingLlmException("当前 DeepSeek 接口仅支持文本，请配置支持图片的 AI 服务")
             val requestJson = buildJsonObject {
                 put("model", model)
                 put("temperature", 0.1)
@@ -84,8 +86,8 @@ class DeepSeekClient(
 
             val response = httpClient.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                val errBody = runCatching { response.body?.string()?.take(300) }.getOrNull() ?: ""
-                throw LLMException("DeepSeek API error: ${response.code} ${response.message} $errBody".trim())
+                response.close()
+                throw UserFacingLlmException("AI 请求失败（HTTP ${response.code}），请检查模型、密钥与服务额度")
             }
             val responseBody = response.body?.string()
                 ?: throw LLMException("DeepSeek API returned empty body")

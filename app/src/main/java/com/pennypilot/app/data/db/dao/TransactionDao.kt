@@ -1,6 +1,7 @@
 package com.pennypilot.app.data.db.dao
 
 import androidx.room.*
+import com.pennypilot.app.data.db.entity.CaptureTombstoneEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.domain.model.TxSource
@@ -38,17 +39,32 @@ interface TransactionDao {
     @Query("SELECT * FROM capture_events WHERE observed_at BETWEEN :start AND :end AND amount = :amount ORDER BY observed_at DESC")
     suspend fun captureEvidenceNear(start: Long, end: Long, amount: Long): List<CaptureEvidenceEntity>
 
-    @Query("SELECT * FROM transactions WHERE source IN ('MANUAL', 'AI_TEXT', 'AI_VOICE') AND status != 'IGNORED' AND occurred_at BETWEEN :start AND :end AND amount = :amount AND type = :type ORDER BY occurred_at DESC, id DESC")
+    @Query("SELECT * FROM transactions WHERE source IN ('MANUAL', 'AI_TEXT', 'AI_VOICE', 'AI_IMAGE', 'BILL_IMPORT') AND status != 'IGNORED' AND occurred_at BETWEEN :start AND :end AND amount = :amount AND type = :type ORDER BY occurred_at DESC, id DESC")
     suspend fun nonCapturedTransactionsNear(start: Long, end: Long, amount: Long, type: TxType): List<TransactionEntity>
+
+    @Update
+    suspend fun updateCaptureEvidence(evidence: CaptureEvidenceEntity)
+
+    @Query("SELECT * FROM transactions WHERE operation_key = :key LIMIT 1")
+    suspend fun getByOperationKey(key: String): TransactionEntity?
+
+    @Query("SELECT * FROM capture_tombstones WHERE identity_key = :key LIMIT 1")
+    suspend fun tombstone(key: String): CaptureTombstoneEntity?
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertTombstones(rows: List<CaptureTombstoneEntity>)
+
+    @Query("SELECT * FROM capture_events WHERE transaction_id = :id")
+    suspend fun evidenceForTransaction(id: Long): List<CaptureEvidenceEntity>
 
     @Update
     suspend fun update(tx: TransactionEntity)
 
-    @Query("UPDATE transactions SET status = :status WHERE id = :id AND status = 'PENDING' AND :status IN ('CONFIRMED', 'IGNORED')")
+    @Query("UPDATE transactions SET status = :status, edit_version = edit_version + 1 WHERE id = :id AND status = 'PENDING' AND :status IN ('CONFIRMED', 'IGNORED') AND (:status != 'CONFIRMED' OR business_kind != 'unknown')")
     suspend fun updateStatus(id: Long, status: TxStatus): Int
 
     /** 通知动作同时绑定事件身份；恢复后复用同一自增 ID 不会改到别的账目。 */
-    @Query("UPDATE transactions SET status = :status WHERE id = :id AND capture_event_key = :eventKey AND status = 'PENDING' AND :status IN ('CONFIRMED', 'IGNORED')")
+    @Query("UPDATE transactions SET status = :status, edit_version = edit_version + 1 WHERE id = :id AND capture_event_key = :eventKey AND status = 'PENDING' AND :status IN ('CONFIRMED', 'IGNORED') AND (:status != 'CONFIRMED' OR business_kind != 'unknown')")
     suspend fun updateCapturedStatus(id: Long, eventKey: String, status: TxStatus): Int
 
     @Query("SELECT * FROM transactions WHERE status != 'IGNORED' AND occurred_at >= :start AND occurred_at < :end ORDER BY occurred_at DESC")
@@ -57,10 +73,10 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: Long): TransactionEntity?
 
-    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'EXPENSE' AND status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end")
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE ((type = 'EXPENSE' AND business_kind IN ('standard','expense')) OR business_kind = 'refund') AND status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end")
     fun observeMonthExpense(start: Long, end: Long): Flow<Long>
 
-    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'INCOME' AND status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end")
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'INCOME' AND business_kind IN ('standard','income') AND status = 'CONFIRMED' AND occurred_at >= :start AND occurred_at < :end")
     fun observeMonthIncome(start: Long, end: Long): Flow<Long>
 
     @Query("SELECT COUNT(*) FROM transactions WHERE status = 'PENDING'")
@@ -86,6 +102,13 @@ interface TransactionDao {
     /** 删除候选关联及账目原子提交；capture_events 外键同步清理所有事件别名。 */
     @Transaction
     suspend fun deleteById(id: Long) {
+        val row = getById(id) ?: return
+        val keys = evidenceForTransaction(id).flatMap { evidence ->
+            listOfNotNull(evidence.eventKey, evidence.orderId?.let {
+                "order:${evidence.orderDomain}:$it:${evidence.type.name}:${evidence.amount}"
+            })
+        } + listOfNotNull(row.captureEventKey, row.operationKey?.let { "operation:$it" })
+        insertTombstones(keys.distinct().map { CaptureTombstoneEntity(it, id, System.currentTimeMillis()) })
         clearDuplicateReferences(id)
         deleteTransactionById(id)
     }

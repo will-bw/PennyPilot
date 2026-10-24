@@ -17,7 +17,9 @@ import java.util.concurrent.TimeUnit
 class PennyPilotApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.pennypilot.app.data.db.LedgerRevision.initialize(this)
         NotificationHelper.createChannels(this)
+        com.pennypilot.app.data.recognition.RecognitionWorker.recover(this)
 
         // 每天核对已结束月份并补齐遗漏，避免固定 30 天周期跳过自然月。
         val initialDelay = millisUntilNextReportTime()

@@ -117,7 +117,7 @@ class BackupUseCaseTest {
     @Test fun `backup preserves capture evidence ignored status and duplicate links`() = runTest {
         val timestamp = 1770000000000L
         val captured = TransactionEntity(amount = 1800, type = TxType.EXPENSE, categoryId = 1,
-            merchant = "小王面馆", occurredAt = timestamp, source = TxSource.NOTIFICATION)
+            merchant = "小王面馆", occurredAt = timestamp, source = TxSource.NOTIFICATION, status = TxStatus.PENDING)
         val evidence = CaptureEvidence("com.sankuai.meituan", "order-notification", timestamp,
             "小王面馆支付成功18元", notificationKey = "notice-1")
         val first = CapturePersistence.capture(db, LedgerRevision.current, captured, evidence) as CaptureResult.Inserted

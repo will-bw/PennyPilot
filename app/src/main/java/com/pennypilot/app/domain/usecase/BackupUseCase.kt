@@ -100,6 +100,7 @@ class BackupUseCase @Inject constructor(private val database: AppDatabase) {
             }
             // 即使发起页面随后销毁，提交后的旧通知也必须失效。
             runCatching { context.getSystemService(NotificationManager::class.java).cancelAll() }
+            com.pennypilot.app.data.recognition.RecognitionTaskStore(context).clear()
             LedgerRevision.publish()
         }
     }
