@@ -31,9 +31,9 @@
 
 ## 安装与更新
 
-当前发布版本为 **v0.5.3（构建号 11）**，提供 Android 8.0 及以上的通用 APK：`PennyPilot-v0.5.3-android.apk`。从 [GitHub Releases](https://github.com/will-bw/PennyPilot/releases) 下载后，按 Android 提示允许当前安装来源并确认安装。iOS 工程可自行构建，目前没有对外分发的 iOS 安装包。
+当前发布版本为 **v0.6.0（构建号 15）**，提供 Android 8.0 及以上的通用 APK：`PennyPilot-v0.6.0-android.apk`。从 [GitHub Releases](https://github.com/will-bw/PennyPilot/releases) 下载后，按 Android 提示允许当前安装来源并确认安装。iOS 工程可自行构建，目前没有对外分发的 iOS 安装包。
 
-本版支持“今天中午”等按日精度的记账日期，识别提示包含设备当地时间与 UTC 偏移，区分无效日期与未来时间；沿用原签名、账本和配置。此前的微信空节点转账补充和百炼原生语音接入继续保留。验证范围见 [更新记录](CHANGELOG.md)。
+本版新增账本 Agent、本机会话与长期记忆、账单和预算提案核对、统一权限引导，并完善微信收款、红包及钱包退款识别。沿用原正式签名，支持覆盖更新并保留账本和配置。会话和记忆当前不进入账本 JSON 备份；支付采集的适用条件见 [更新记录](CHANGELOG.md)。
 
 打开「设置 → 数据与应用 → 检查更新」。检查和下载均由用户主动触发；发现新版后选择「下载更新」，校验成功后选择「安装更新」。若系统要求安装授权，按页面提示前往授权，再返回继续安装。iOS 可查看发布说明，目前 Release 仅提供 Android 包。
 
