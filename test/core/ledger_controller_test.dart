@@ -372,7 +372,7 @@ void main() {
         'isError': false,
       };
       await controller.retryAsk();
-      expect(repository.calls.last.args['history'], isEmpty);
+      expect(repository.calls.last.args.containsKey('history'), isFalse);
       expect(controller.messages.length, 2);
       expect(controller.messages.first.text, '花了多少');
       expect(controller.messages.last.isError, false);

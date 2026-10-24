@@ -285,6 +285,9 @@ class MobilePlatformServices {
     }
   }
 
+  Future<bool> requestMicrophonePermission() async =>
+      _permissions.requestMicrophone();
+
   Future<void> dispose() async {
     _disposed = true;
     await cancelSpeech();
@@ -393,6 +396,7 @@ class PluginBackupFileAccess implements BackupFileAccess {
 
 abstract interface class DevicePermissions {
   Future<bool> microphoneGranted();
+  Future<bool> requestMicrophone();
   Future<bool> speechGranted();
   Future<bool> openSettings();
 }
@@ -401,6 +405,9 @@ class PluginDevicePermissions implements DevicePermissions {
   @override
   Future<bool> microphoneGranted() =>
       permissions.Permission.microphone.isGranted;
+  @override
+  Future<bool> requestMicrophone() async =>
+      (await permissions.Permission.microphone.request()).isGranted;
   @override
   Future<bool> speechGranted() => permissions.Permission.speech.isGranted;
   @override

@@ -151,6 +151,19 @@ void main() {
       expect(capabilities['microphoneGranted'], isTrue);
       expect(capabilities['speechRecognitionGranted'], isFalse);
       expect(speech.initializeCount, 0);
+      expect(permissions.requestCount, 0);
+    },
+  );
+
+  test(
+    'explicit microphone authorization does not initialize recording',
+    () async {
+      expect(await services.requestMicrophonePermission(), isFalse);
+      permissions.microphoneAllowed = true;
+      expect(await services.requestMicrophonePermission(), isTrue);
+      expect(permissions.requestCount, 2);
+      expect(speech.initializeCount, 0);
+      expect(speech.listenCount, 0);
     },
   );
 }
@@ -206,8 +219,15 @@ class FakeFiles implements BackupFileAccess {
 
 class FakePermissions implements DevicePermissions {
   bool microphoneAllowed = false;
+  int requestCount = 0;
   @override
   Future<bool> microphoneGranted() async => microphoneAllowed;
+  @override
+  Future<bool> requestMicrophone() async {
+    requestCount++;
+    return microphoneAllowed;
+  }
+
   @override
   Future<bool> speechGranted() async => false;
   @override

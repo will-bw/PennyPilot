@@ -3,6 +3,7 @@ import 'package:pennypilot/core/ledger_controller.dart';
 
 import 'settings_widgets.dart';
 import 'capture_diagnostic_screen.dart';
+import 'capture_consent.dart';
 import 'capture_background_guidance.dart';
 
 String screenCaptureStatusLabel(String? status) => switch (status) {
@@ -225,13 +226,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
 
   Future<void> _setScreen(bool value) async {
     if (value) {
-      final confirmed = await confirmSettingsAction(
-        context,
-        title: '开启支付页面读取？',
-        message:
-            'PennyPilot 会通过系统无障碍服务读取微信、支付宝、美团和抖音的屏幕可见文字，在本机判断是否为支付结果，生成待确认账单。\n\n只保存识别出的交易字段，不读取密码或输入内容，也不会代你点击、付款或操作其他应用。截图补充需在“识别与录入”中单独开启；未开启时不截图，开启后按需在本机识别，不自动上传图片。\n\n部分页面可能无法读取，不能保证覆盖每笔支付。你可以随时在本页暂停，或在系统设置中撤销授权。',
-        confirmLabel: '同意并开启',
-      );
+      final confirmed = await confirmScreenCapture(context);
       if (!confirmed || !mounted) return;
     }
     await _run(() async {
@@ -359,7 +354,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
       );
       return Scaffold(
         appBar: AppBar(
-          title: const Text('自动采集与权限'),
+          title: const Text('自动采集'),
           actions: [
             IconButton(
               tooltip: '刷新状态',

@@ -90,3 +90,28 @@
 - 未穷尽所有支付 App/系统版本和语言。后续真机验收应按本矩阵重放用户真实场景，并用新增诊断定位未覆盖的节点或状态。
 
 接口依据：[Android AccessibilityService](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService)、[Qwen ASR API](https://docs.modelstudio.console.alibabacloud.com/zh/model-studio/qwen-asr-api-reference)。
+
+## 2026-10-24：清理后台后的无障碍授权状态
+
+用户反馈：朋友的小米手机开启无障碍后，清理后台再打开应用，又显示等待授权。尚未取得该手机的型号、系统版本或清理前后的系统设置记录，不能据此确认系统是否真正撤销了授权。
+
+已确认的代码问题：此前以 `getEnabledAccessibilityServiceList` 判断授权，而 Android 15 AOSP 的该接口读取已绑定服务列表。服务被终止或尚未重连时，列表可能不包含 PennyPilot，但系统仍保留用户授权。参见 [AOSP 实现](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/accessibility/java/com/android/server/accessibility/AccessibilityManagerService.java#L1248)。
+
+本次修复：
+
+- 共享 `PaymentAccessibilityPermission` 优先精确匹配系统保存的无障碍服务组件，区分授权与进程内服务连接状态；支持完整和缩写组件名。系统设置为空或已移除本应用时显示未授权；仅在无法读取该设置时使用系统服务列表作为备用依据。
+- Flutter 宿主与旧 Compose 入口使用同一授权判断。已授权但未连接时先刷新状态，提供自启动与后台设置入口，服务连接后更新为就绪。
+- 自动采集页与权限引导补充小米、realme 的后台设置说明。电池优化豁免不等于已允许自启动，也不证明一键清理会保留应用。
+- 无障碍授权和服务绑定仍由系统管理；本次没有实现厂商清理后的强制重启或自动重新授权。
+
+验证结果：
+
+- `./tool/flutterw analyze`：0 issues。
+- `./tool/flutterw test test/settings/capture_diagnostics_test.dart test/settings/permission_setup_test.dart --no-pub --reporter expanded`：43 项通过，包括断连时保留授权、刷新不再发起授权、重连后显示就绪，以及小屏/大字/深色布局。
+- `JAVA_HOME=<JDK 17> ./gradlew :app:testDebugUnitTest --tests com.pennypilot.app.service.PaymentAccessibilityPermissionTest --max-workers=1 --console=plain`：Android 14 / Robolectric 的 6 项测试通过，覆盖进程重启、组件匹配、撤销授权与备用判断。Android 8 镜像下载耗时过长后取消，未完成该版本测试。
+- `./tool/flutterw build apk --debug --no-pub`：成功。首次依赖下载出现 TLS 错误，工具自动重试后构建成功。
+- `git diff --check`：通过。本次没有连接真机，未完成系统权限页面或小米后台恢复的设备验收。
+
+小米复测时先允许 PennyPilot 自启动、将应用省电策略设为“无限制”，并在最近任务中锁定应用。部分机型需在“手机管家 → 设置 → 优化加速 → 锁定应用”设置；入口随系统版本变化。依据：[自启动](https://www.mi.com/uk/support/faq/details/KA-497677/)、[省电限制](https://www.mi.com/my/support/faq/details/KA-538010/)、[后台锁定](https://www.mi.com/global/support/faq/details/KA-535435/)。realme 可检查应用耗电管理中的后台活动、自启动和最近任务锁定，依据：[官方 FAQ](https://www.realme.com/global/support/faq)、[后台锁定说明](https://www.realme.com/in/support/kw/doc/2062314)。
+
+复测顺序：确认页面采集已就绪 → 清理后台并重开 → 对照应用状态与系统无障碍开关 → 在新支付完成页验证是否产生待确认记录。若开关仍开启但持续未连接，可先检查上述后台限制，再关闭后重新开启无障碍服务；若开关确实已关闭，需用户重新授权。不要用显示“已授权”代替真实采集验收。

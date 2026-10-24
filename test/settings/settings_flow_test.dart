@@ -87,14 +87,14 @@ void main() {
       final controller = await _controller(repository);
       addTearDown(controller.dispose);
       await _show(tester, SettingsScreen(controller: controller));
-      expect(find.text('自动采集与权限'), findsNothing);
+      expect(find.text('自动采集'), findsNothing);
       expect(find.text('通知解析规则'), findsNothing);
-      expect(find.text('语音与系统权限'), findsOneWidget);
-      await tester.tap(find.text('语音与系统权限'));
+      expect(find.text('权限设置'), findsOneWidget);
+      await tester.tap(find.text('权限设置'));
       await tester.pumpAndSettle();
       expect(find.byType(SwitchListTile), findsNothing);
-      expect(find.text('打开应用设置'), findsOneWidget);
-      expect(find.textContaining('iOS 不提供'), findsOneWidget);
+      expect(find.text('允许使用麦克风'), findsOneWidget);
+      expect(find.textContaining('iOS 支持'), findsOneWidget);
     },
   );
   test(

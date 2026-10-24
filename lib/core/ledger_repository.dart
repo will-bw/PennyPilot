@@ -20,6 +20,11 @@ abstract class LedgerRepository {
   Future<Object?> invoke(String method, Map<String, dynamic> arguments);
 }
 
+/// Explicit capability for repositories that own durable Agent sessions.
+abstract interface class AgentSessionRepository {
+  Future<Map<String, dynamic>> agentState();
+}
+
 class NativeLedgerRepository implements LedgerRepository {
   NativeLedgerRepository({MethodChannel? channel, EventChannel? eventChannel})
     : _channel = channel ?? const MethodChannel('pennypilot/ledger'),

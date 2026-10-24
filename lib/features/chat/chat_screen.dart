@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../core/ledger_controller.dart';
 import '../../ui/common.dart';
+import 'agent_activity.dart';
+import 'agent_workspace_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
@@ -47,6 +49,18 @@ class _ChatScreenState extends State<ChatScreen> {
         title: const Text('问问账本'),
         actions: [
           IconButton(
+            tooltip: '对话、记忆与运行设置',
+            icon: const Icon(Icons.forum_outlined),
+            onPressed: c.isAsking
+                ? null
+                : () => Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => AgentWorkspaceScreen(controller: c),
+                    ),
+                  ),
+          ),
+          IconButton(
             tooltip: 'AI 设置',
             onPressed: widget.onSettings,
             icon: const Icon(Icons.tune),
@@ -73,7 +87,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         ],
                       ),
                     );
-                    if (ok == true) c.clearConversation();
+                    if (ok == true && context.mounted) {
+                      await runUi(context, c.clearConversation);
+                    }
                   },
             icon: const Icon(Icons.delete_sweep_outlined),
           ),
@@ -90,29 +106,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     : ListView.builder(
                         controller: scroll,
                         padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-                        itemCount: c.messages.length + (c.isAsking ? 1 : 0),
+                        itemCount: c.messages.length + 1,
                         itemBuilder: (context, index) {
                           if (index == c.messages.length) {
-                            return Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 20),
-                              child: Row(
-                                children: [
-                                  const SizedBox.square(
-                                    dimension: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Text(
-                                    '正在查询账本…',
-                                    style: TextStyle(
-                                      color: colors.onSurfaceVariant,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
+                            return AgentActivity(controller: c);
                           }
                           final msg = c.messages[index];
                           final user = msg.role == 'user';
@@ -247,7 +244,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                   maxLines: 5,
                                   maxLength: 2000,
                                   decoration: const InputDecoration(
-                                    hintText: '想了解哪笔开销？',
+                                    hintText: '查询、分析，或告诉我想完成的记账任务',
                                     counterText: '',
                                     filled: false,
                                     border: InputBorder.none,
@@ -267,20 +264,14 @@ class _ChatScreenState extends State<ChatScreen> {
                                   valueListenable: input,
                                   builder: (context, value, _) =>
                                       IconButton.filled(
-                                        tooltip: '发送问题',
-                                        onPressed:
-                                            c.isAsking ||
-                                                value.text.trim().isEmpty
+                                        tooltip: c.isAsking ? '停止任务' : '发送问题',
+                                        onPressed: c.isAsking
+                                            ? () => runUi(context, c.stopAgent)
+                                            : value.text.trim().isEmpty
                                             ? null
                                             : () => ask(input.text),
                                         icon: c.isAsking
-                                            ? const SizedBox.square(
-                                                dimension: 20,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                    ),
-                                              )
+                                            ? const Icon(Icons.stop, size: 21)
                                             : const Icon(
                                                 Icons.arrow_upward,
                                                 size: 21,
@@ -294,7 +285,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                       const SizedBox(height: 10),
                       Text(
-                        'AI 可能出错，请以账单明细为准。相关账本信息会发送到已配置的服务。',
+                        'AI 可能出错，请以账单明细为准。对话、必要账本数据和相关记忆会发送到所选 AI 服务。',
                         style: TextStyle(
                           fontSize: 11,
                           height: 1.5,
@@ -322,7 +313,7 @@ class _ChatScreenState extends State<ChatScreen> {
         for (final question in [
           '这个月一共花了多少钱？',
           '本月哪类支出最多？',
-          '最近三个月支出有什么变化？',
+          '对比本月和上月，找出增长最多的分类，再查明细分析。',
         ]) ...[
           InkWell(
             onTap: widget.controller.isAsking ? null : () => ask(question),

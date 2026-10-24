@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 import 'package:pennypilot/core/ai/shared_ai_service.dart';
+import 'package:pennypilot/core/agent/agent_store.dart';
 import 'package:pennypilot/core/cross_platform_repository.dart';
 import 'package:pennypilot/core/ledger_repository.dart';
 import 'package:pennypilot/core/models.dart';
@@ -15,7 +16,7 @@ class _GuardStore implements LedgerRepository {
   @override
   Future<LedgerSnapshot> snapshot() async => LedgerSnapshot(
     revision: revision,
-    settings: {'activeProvider': 'deepseek'},
+    settings: {'activeProvider': 'deepseek', 'deepSeekModel': 'deepseek-chat'},
     categories: const [LedgerCategory(id: 1, name: '餐饮', type: TxType.expense)],
     transactions: [
       LedgerTransaction(
@@ -46,17 +47,21 @@ void main() {
         requests++;
         // Restore after the planning request, before its response is consumed.
         store.revision = 2;
-        return fixtures.completion({'start': '2026-10-01', 'end': '2026-10-31'});
+        return fixtures.completion({
+          'start': '2026-10-01',
+          'end': '2026-10-31',
+        });
       });
       addTearDown(client.close);
       final ai = SharedAiService(
-      credentials: fixtures.MemoryCredentials(),
+        credentials: fixtures.MemoryCredentials(),
         client: client,
       );
       final repository = CrossPlatformLedgerRepository(
         store: store,
         platformServices: _Platform(),
         ai: ai,
+        agentStore: MemoryAgentStore(),
         android: true,
       );
       addTearDown(repository.close);

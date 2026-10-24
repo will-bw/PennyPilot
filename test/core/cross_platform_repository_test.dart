@@ -27,6 +27,8 @@ class _Credentials implements SharedCredentials {
 
 class _Platform extends MobilePlatformServices {
   bool saved = false;
+  bool microphoneAllowed = false;
+  int microphoneRequests = 0;
   String? selected;
   String? exported;
   @override
@@ -42,6 +44,12 @@ class _Platform extends MobilePlatformServices {
 
   @override
   Future<String?> importBackup() async => selected;
+  @override
+  Future<bool> requestMicrophonePermission() async {
+    microphoneRequests++;
+    return microphoneAllowed;
+  }
+
   @override
   Stream<String> get partialTranscripts => const Stream.empty();
   @override
@@ -96,6 +104,21 @@ void main() {
     await repository.close();
     await store.updates.close();
   });
+
+  test(
+    'microphone authorization uses shared device service without recording',
+    () async {
+      expect(await repository.invoke('requestMicrophonePermission', {}), {
+        'granted': false,
+      });
+      platform.microphoneAllowed = true;
+      expect(await repository.invoke('requestMicrophonePermission', {}), {
+        'granted': true,
+      });
+      expect(platform.microphoneRequests, 2);
+      expect(store.calls, isEmpty);
+    },
+  );
 
   test('iOS API keys use secure storage and never ordinary settings', () async {
     await repository.invoke('updateSettings', {

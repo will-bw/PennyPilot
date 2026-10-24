@@ -106,7 +106,11 @@ Future<({String body, String? contentType})> aiRequest(
 }
 
 /// Only completed Responses output is accepted; deltas and [DONE] are provisional.
-String decodeResponsesStream(String body, {String? contentType}) {
+String decodeResponsesStream(String body, {String? contentType}) => _outputText(
+  decodeResponsesOutput(body, contentType: contentType)['items'] as List,
+);
+
+Map<String, dynamic> decodeResponsesOutput(String body, {String? contentType}) {
   final prefix = body.replaceFirst('\uFEFF', '').trimLeft();
   if (contentType != null
       ? contentType.split(';').first.trim().toLowerCase() != 'text/event-stream'
@@ -171,7 +175,9 @@ String decodeResponsesStream(String body, {String? contentType}) {
             if (response['status'] != 'completed' || output is! List) {
               aiFailure('ChatGPT 响应未完整完成。');
             }
-            if (output.isNotEmpty) return _outputText(output);
+            if (output.isNotEmpty) {
+              return {'items': output, 'usage': response['usage']};
+            }
             final indices = done.keys.toList()..sort();
             if (!added.keys.every(done.containsKey) ||
                 indices.asMap().entries.any(
@@ -181,7 +187,10 @@ String decodeResponsesStream(String body, {String? contentType}) {
                     done.length) {
               aiFailure('ChatGPT 流式输出不完整。');
             }
-            return _outputText(indices.map((index) => done[index]).toList());
+            return {
+              'items': indices.map((index) => done[index]).toList(),
+              'usage': response['usage'],
+            };
           } else if (type == 'error' ||
               type == 'response.failed' ||
               type == 'response.incomplete') {

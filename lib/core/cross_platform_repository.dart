@@ -4,6 +4,9 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'ai/shared_ai_service.dart';
+import 'agent/agent_models.dart';
+import 'agent/agent_runtime.dart';
+import 'agent/agent_store.dart';
 import 'ledger_repository.dart';
 import 'models.dart';
 import 'platform/mobile_platform_services.dart';
@@ -14,13 +17,15 @@ import 'storage/portable_ledger_store.dart';
 /// Shared application services with platform-specific persistence adapters.
 /// Android retains its Room store so background captures and existing accounts
 /// continue using the same database. iOS uses a real SQLite store.
-class CrossPlatformLedgerRepository implements LedgerRepository {
+class CrossPlatformLedgerRepository
+    implements LedgerRepository, AgentSessionRepository {
   CrossPlatformLedgerRepository({
     LedgerRepository? store,
     MobilePlatformServices? platformServices,
     SharedCredentials? credentials,
     SharedAiService? ai,
     VoiceTranscriptionService? voice,
+    AgentStore? agentStore,
     bool? android,
   }) : _android =
            android ??
@@ -36,6 +41,15 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
         credentials ??
         (_android ? _AndroidCredentials(_store) : SecureSharedCredentials());
     _ai = ai ?? SharedAiService(credentials: _credentials);
+    _agentStore = agentStore ?? SqliteAgentStore();
+    _agent = LedgerAgentRuntime(
+      store: _agentStore,
+      onProgress: (data) {
+        if (!_closed) {
+          _events.add(LedgerEvent('agent', data['revision'] as int, data));
+        }
+      },
+    );
     _voiceEvents = _voice.states.listen(
       (state) => _emit('speechState', {'state': state}),
     );
@@ -83,18 +97,27 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
   late final StreamSubscription<String> _voiceEvents;
   late final SharedCredentials _credentials;
   late final SharedAiService _ai;
+  late final AgentStore _agentStore;
+  late final LedgerAgentRuntime _agent;
   final _events = StreamController<LedgerEvent>.broadcast();
   late final StreamSubscription<LedgerEvent> _storeEvents;
   StreamSubscription<String>? _speechEvents;
   StreamSubscription<Map<String, dynamic>>? _authEvents;
   int _revision = 0;
   int _settingsGeneration = 0;
+  int _agentInvocation = 0;
   String? _authIdentity;
   bool _closed = false;
   final Set<String> _reports = {};
 
   @override
   Stream<LedgerEvent> get events => _events.stream;
+
+  @override
+  Future<Map<String, dynamic>> agentState() async {
+    final current = await _store.snapshot();
+    return _agent.state(current.revision);
+  }
 
   void _emit(String type, [Map<String, dynamic> data = const {}]) {
     if (!_closed) _events.add(LedgerEvent(type, _revision, data));
@@ -225,8 +248,93 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
         );
         await _guardAiOperation(state, generation);
         return result;
-      case 'parseText':
+      case 'cancelAgent':
+        _agentInvocation++;
+        _agent.cancel();
+        return null;
+      case 'agentState':
+      case 'agentNewSession':
+      case 'agentSelectSession':
+      case 'agentDeleteSession':
+      case 'agentForgetMemory':
+      case 'agentConfigure':
+        final state = await _current(arguments);
+        return switch (method) {
+          'agentNewSession' => _agent.newSession(state.revision),
+          'agentSelectSession' => _agent.select(
+            state.revision,
+            arguments['id'] as String,
+          ),
+          'agentDeleteSession' => _agent.deleteSession(
+            state.revision,
+            arguments['id'] as String,
+          ),
+          'agentForgetMemory' => _agent.forget(
+            state.revision,
+            arguments['key'] as String,
+          ),
+          'agentConfigure' => () async {
+            await _agent.configure(agentMap(arguments['config']));
+            return _agent.state(state.revision);
+          }(),
+          _ => _agent.state(state.revision),
+        };
       case 'ask':
+      case 'agentResolveAction':
+        final invocation = ++_agentInvocation;
+        final initial = await _current(arguments);
+        final generation = _settingsGeneration;
+        Future<void> guard() async {
+          if (invocation != _agentInvocation) {
+            throw const LedgerException('已停止本次任务。', code: 'AGENT_CANCELLED');
+          }
+          await _guardAiOperation(initial, generation);
+        }
+        var question = arguments['question'] as String? ?? '';
+        if (method == 'agentResolveAction') {
+          question = await _agent.resolve(
+            revision: initial.revision,
+            actionId: arguments['actionId'] as String,
+            approve: arguments['approve'] as bool,
+            ledger: _store,
+            guard: guard,
+          );
+        }
+        final current = method == 'agentResolveAction'
+            ? await snapshot()
+            : initial;
+        await guard();
+        final model = await _ai.openAgentModel(
+          current,
+          guard: guard,
+          nativeTurn:
+              _android && current.settings['activeProvider'] == 'chatgpt'
+              ? (messages, tools) async {
+                  final raw = agentMap(
+                    await _store.invoke('agentModelTurn', {
+                      'revision': current.revision,
+                      'messagesJson': jsonEncode(messages),
+                      'toolsJson': jsonEncode(tools),
+                      'expectedAccountId': current.auth['activeAccountId'],
+                      'expectedModel': current.settings['chatGptModel'],
+                    }),
+                  );
+                  return AgentReply(
+                    message: agentMap(jsonDecode(raw['messageJson'] as String)),
+                  );
+                }
+              : null,
+        );
+        final result = await _agent.run(
+          question: question,
+          ledger: current,
+          model: model,
+          guard: guard,
+        );
+        // A user stop is a normal persisted outcome, not a stale-ledger result.
+        await _guardAiOperation(initial, generation);
+        return result;
+      case 'parseText':
       case 'generateReport':
         final state = await _current(arguments);
         if (_android && state.settings['activeProvider'] == 'chatgpt') {
@@ -242,13 +350,7 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
         }
         final result = await _ai.runGuarded(
           () => _guardAiOperation(state, generation),
-          () => method == 'parseText'
-              ? _ai.parseText(arguments['text'] as String, state)
-              : _ai.ask(
-                  arguments['question'] as String,
-                  (arguments['history'] as List? ?? []).map(stringMap).toList(),
-                  state,
-                ),
+          () => _ai.parseText(arguments['text'] as String, state),
         );
         await _current(arguments);
         if (_closed || generation != _settingsGeneration) {
@@ -393,6 +495,8 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
         if (_android) return _store.invoke(method, arguments);
         await _platform.openAppSettings();
         return null;
+      case 'requestMicrophonePermission':
+        return {'granted': await _platform.requestMicrophonePermission()};
       case 'requestNotificationPermission':
       case 'rebindNotificationService':
         if (_android) return _store.invoke(method, arguments);
@@ -449,12 +553,14 @@ class CrossPlatformLedgerRepository implements LedgerRepository {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    await _agent.shutdown();
     await _storeEvents.cancel();
     await _speechEvents?.cancel();
     await _voiceEvents.cancel();
     await _voice.dispose();
     await _authEvents?.cancel();
     await _ai.dispose();
+    await _agentStore.close();
     await _platform.dispose();
     if (_store is PortableLedgerStore) await _store.close();
     await _events.close();

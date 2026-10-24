@@ -41,12 +41,13 @@ Errors use `PlatformException(code, message)` with a user-facing Chinese message
 ## AI, settings and platform
 
 - `parseText {revision,text}` → `{transactions:[{amount,type,categoryId,categoryName,note,merchant,occurredAt}],error}`. No data saved. Error may be non-null. Positive amounts.
-- `ask {revision,question,history?:[{role:user|assistant,content}]}` → `{answer,isError,chartData?:{labels,values,highlightIndex,unit}}`.
+- `ask {revision,question}` → `{answer,isError,session,sessions,memories,config,chartData?}`. The shared Dart Agent runtime owns durable history; callers no longer send a truncated history array. Every provider uses the same multi-step loop.
 - `updateSettings {onboardingDone?,notificationCaptureEnabled?,screenCaptureEnabled?,notificationCloudParsingEnabled?,budgetCents?,themeMode?,activeProvider?,deepSeekKey?,deepSeekModel?,qwenKey?,qwenModel?,qwenBaseUrl?,chatGptModel?}` → null. Omit API key to preserve; empty key explicitly removes. Screen capture and cloud parsing should be enabled only after UI disclosure.
 - `exportBackup {}` → `{cancelled:bool}` after system save picker finishes.
 - `restoreBackup {revision}` → `{cancelled:bool}` after system multi-file picker and restore finish. UI confirms destructive replacement before calling. Restore invalidates all drafts via revision event.
 - `startSpeech {}` → `{text}` after final recognition. Requests RECORD_AUDIO first if needed. `stopSpeech {}` stops listening and waits for recognition; `cancelSpeech {}` cancels pending request with CANCELLED.
 - `openSystemSettings {target:notificationListener|accessibility|notifications|battery|app|microphone}` → null. `rebindNotificationService {}` → null. `requestNotificationPermission {}` → `{granted:bool}`.
+- `requestMicrophonePermission {}` → `{granted:bool}`. Handled by shared `MobilePlatformServices` on Android and iOS. Only requests microphone access after a user action; does not initialize speech recognition, start recording, or contact a speech service. Refresh the snapshot for current authorization; a denied request can be followed by the existing `microphone` system-settings target.
 - `signIn {accountId?,requestPlanPermission?:false}` → null; starts external browser. `cancelSignIn {}` / `selectAccount {id}` / `signOut {id}` / `dismissWelcome {}` → null.
 - `listModels {}` → `[{slug,displayName}]` for active signed-in account.
 
@@ -59,6 +60,7 @@ Every event is a map with `type` and `revision`.
 - `{type:"speech",revision,text}`: live partial transcription.
 - `{type:"speechState",revision,state:preparing|recording|transcribing|idle}`: shared cloud transcription lifecycle. A completed transcript is returned by `startSpeech`; the entry UI then starts recognition and applies the separately enabled active-input save policy.
 - `{type:"report",revision,yearMonth,state}`: ENQUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED/BLOCKED.
+- `{type:"agent",revision,sessionId,phase:model|tool,step,maxSteps,text,tool?,plan}`: shared Agent execution progress. No private reasoning or credentials.
 
 Android owns its Room persistence and capture services. Dart never directly opens
 `pennypilot.db`; iOS opens its own private SQLite store. Credentials are kept in
@@ -66,6 +68,20 @@ Android encrypted preferences or iOS Keychain. Only `has…Key` flags enter snap
 `readAiCredential {key:deepSeekKey|qwenKey}` is an app-internal Android adapter call:
 it reads the selected API key into transient Dart memory for a request. It must
 never be logged, returned to UI state, exported, or exposed to AI tools.
+
+## Shared Agent commands
+
+These commands are handled by `CrossPlatformLedgerRepository`, not forwarded as model tools to the Android ledger bridge:
+
+- `agentState {revision}` → `{session,sessions,memories,config}`; `AgentSessionRepository.agentState()` is the typed controller capability.
+- `agentNewSession {revision}`, `agentSelectSession {revision,id}`, `agentDeleteSession {revision,id}` → refreshed Agent state.
+- `agentForgetMemory {revision,key}` and `agentConfigure {revision,config:{contextTokens,maxSteps}}` → refreshed state; unavailable while a task runs.
+- `cancelAgent {}` stops the shared loop and ignores late output; an already-sent provider request may still be processed remotely.
+- `agentResolveAction {revision,actionId,approve}` resolves only the persisted proposal, then resumes the task with an application receipt. Direct model writes are not exposed. Update/delete proposals check record versions; budget writes compare `expectedBudgetCents` atomically in the platform store.
+
+Android ChatGPT uses app-internal `agentModelTurn {revision,messagesJson,toolsJson,expectedAccountId,expectedModel}` → `{messageJson}` for one model request. It accepts only registered tool definitions, binds account/model, preserves completed Responses items, and executes no ledger tools in Kotlin. iOS uses the shared Responses adapter; DeepSeek/Qwen use shared Chat Completions tools. The old native `ask` is retained only for excluded Compose regression compatibility.
+
+The independent `pennypilot-agent.sqlite` stores sessions, tool observations, plans, summaries, proposals and source-backed memories. Restored ledger generations use isolated namespaces. Agent data currently stays local and is not part of the ledger JSON backup. See [Agent architecture](agent-architecture.md) for limits and protocol details.
 
 ## Shared voice configuration and transcription
 

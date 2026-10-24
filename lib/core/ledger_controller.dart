@@ -69,6 +69,11 @@ class LedgerController extends ChangeNotifier {
   List<LedgerTransaction> get drafts => List.unmodifiable(_drafts);
   List<ChatMessage> _messages = [];
   List<ChatMessage> get messages => List.unmodifiable(_messages);
+  Map<String, dynamic> _agentSession = {};
+  Map<String, dynamic> get agentSession => Map.unmodifiable(_agentSession);
+  List<Map<String, dynamic>> agentSessions = [], agentMemories = [];
+  Map<String, dynamic> agentConfig = {}, agentProgress = {};
+  bool _agentLoaded = false;
   String? _retryQuestion;
   String? get retryQuestion => _retryQuestion;
   String _speechText = '';
@@ -139,6 +144,10 @@ class LedgerController extends ChangeNotifier {
       }
       _minimumRevision = next.revision;
       _snapshot = next;
+      if (!_agentLoaded) {
+        _agentLoaded = true;
+        await loadAgentState();
+      }
       if (next.launch != null) _launchTarget = Map.unmodifiable(next.launch!);
       _error = null;
     } catch (error) {
@@ -182,6 +191,9 @@ class LedgerController extends ChangeNotifier {
         if (month != null && state != null) _reportStates[month] = state;
         if (state == 'SUCCEEDED') unawaited(refresh());
         _notify();
+      case 'agent':
+        agentProgress = event.data;
+        _notify();
     }
   }
 
@@ -190,6 +202,11 @@ class LedgerController extends ChangeNotifier {
     _draftGeneration++;
     _drafts = [];
     _messages = [];
+    _agentSession = {};
+    agentSessions = [];
+    agentMemories = [];
+    agentProgress = {};
+    _agentLoaded = false;
     _retryQuestion = null;
     _speechText = '';
     _launchTarget = null;
@@ -496,7 +513,9 @@ class LedgerController extends ChangeNotifier {
 
   Future<void> setTransactionStatus(int id, TxStatus status) async {
     if (status == TxStatus.confirmed &&
-        transactions.any((tx) => tx.id == id && tx.effectiveKind == 'unknown')) {
+        transactions.any(
+          (tx) => tx.id == id && tx.effectiveKind == 'unknown',
+        )) {
       throw const LedgerException('请先选择这笔资金变动的账务用途。');
     }
     if (status == TxStatus.pending) {
@@ -790,11 +809,103 @@ class LedgerController extends ChangeNotifier {
     return saved;
   });
 
-  void clearConversation() {
+  Future<void> loadAgentState() async {
+    if (_snapshot == null ||
+        _disposed ||
+        _repository is! AgentSessionRepository) {
+      return;
+    }
+    final generation = _generation;
+    try {
+      final state = await (_repository as AgentSessionRepository).agentState();
+      if (!_disposed && generation == _generation) _adoptAgentState(state);
+    } on LedgerException catch (error) {
+      // Older test/platform adapters may not expose Agent storage yet.
+      if (error.code != 'TEST_UNSUPPORTED' &&
+          error.code != 'PLATFORM_UNAVAILABLE') {
+        _error = error.message;
+      }
+    } catch (_) {
+      _error = '对话记录暂时无法读取，请重试。';
+    }
+    _notify();
+  }
+
+  void _adoptAgentState(Map<String, dynamic> state) {
+    if (state['session'] == null) return;
+    _agentSession = stringMap(state['session']);
+    agentSessions = (state['sessions'] as List? ?? []).map(stringMap).toList();
+    agentMemories = (state['memories'] as List? ?? []).map(stringMap).toList();
+    agentConfig = stringMap(state['config'] ?? {});
+    _messages = (_agentSession['messages'] as List? ?? [])
+        .map(stringMap)
+        .where(
+          (m) =>
+              m['internal'] != true &&
+              m['provisional'] != true &&
+              (m['role'] == 'user' ||
+                  m['role'] == 'assistant' &&
+                      (m['tool_calls'] as List? ?? []).isEmpty),
+        )
+        .map(
+          (m) => ChatMessage(
+            role: m['role'] as String,
+            text: m['content'] as String? ?? '',
+            isError: m['isError'] == true,
+            chartData: m['chartData'] == null
+                ? null
+                : InsightChart.fromMap(stringMap(m['chartData'])),
+          ),
+        )
+        .toList();
+  }
+
+  Future<void> agentCommand(
+    String method, [
+    Map<String, dynamic> args = const {},
+  ]) => _operation('agentSession', () async {
+    if (isAsking) throw const LedgerException('请先停止当前任务。');
+    final generation = _generation;
+    final result = stringMap(
+      await _repository.invoke(method, {'revision': revision, ...args}),
+    );
+    _requireCurrent(generation);
+    _adoptAgentState(result);
+    _retryQuestion = null;
+    _notify();
+  });
+  Future<void> stopAgent() async {
+    await _repository.invoke('cancelAgent', const {});
+  }
+
+  Future<void> resolveAgentAction(String id, bool approve) =>
+      _operation('ask', () async {
+        final generation = _generation;
+        agentProgress = {};
+        try {
+          final result = stringMap(
+            await _repository.invoke('agentResolveAction', {
+              'revision': revision,
+              'actionId': id,
+              'approve': approve,
+            }),
+          );
+          _requireCurrent(generation);
+          _adoptAgentState(result);
+        } finally {
+          await refresh();
+          await loadAgentState();
+        }
+      });
+
+  Future<void> clearConversation() async {
     if (isAsking) return;
     _messages = [];
     _retryQuestion = null;
     _notify();
+    if (_agentSession['id'] != null) {
+      await agentCommand('agentDeleteSession', {'id': _agentSession['id']});
+    }
   }
 
   Future<ChatMessage> ask(String question) => _ask(question, retry: false);
@@ -816,19 +927,15 @@ class LedgerController extends ChangeNotifier {
         if (retry && prior.isNotEmpty && prior.last.role == 'user') {
           prior.removeLast();
         }
-        final history = prior
-            .skip(prior.length > 20 ? prior.length - 20 : 0)
-            .map((message) => message.toHistory())
-            .toList();
         _messages = [...prior, ChatMessage(role: 'user', text: text)];
         _retryQuestion = null;
+        agentProgress = {};
         _notify();
         try {
           final result = stringMap(
             await _repository.invoke('ask', {
               'revision': revision,
               'question': text,
-              'history': history,
             }),
           );
           _requireCurrent(generation);
@@ -840,7 +947,11 @@ class LedgerController extends ChangeNotifier {
                 ? null
                 : InsightChart.fromMap(stringMap(result['chartData'])),
           );
-          _messages = [..._messages, response];
+          if (result['session'] != null) {
+            _adoptAgentState(result);
+          } else {
+            _messages = [..._messages, response];
+          }
           _retryQuestion = response.isError ? text : null;
           return response;
         } catch (error) {
@@ -980,6 +1091,9 @@ class LedgerController extends ChangeNotifier {
 
   Future<bool> requestNotificationPermission() async =>
       stringMap(await command('requestNotificationPermission'))['granted'] ==
+      true;
+  Future<bool> requestMicrophonePermission() async =>
+      stringMap(await command('requestMicrophonePermission'))['granted'] ==
       true;
   Future<void> signIn({
     String? accountId,

@@ -6,6 +6,7 @@ import 'features/reports/reports_screen.dart';
 import 'features/chat/chat_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/settings/capture_settings_screen.dart';
+import 'features/settings/permission_setup_screen.dart';
 import 'features/entry/entry_screen.dart';
 import 'ui/common.dart';
 import 'ui/theme.dart';
@@ -89,6 +90,7 @@ class _AppHome extends StatefulWidget {
 
 class _AppHomeState extends State<_AppHome> {
   int selected = 0;
+  bool _permissionSetup = false;
   static const destinations = [
     NavigationDestination(
       icon: Icon(Icons.receipt_long_outlined),
@@ -115,7 +117,7 @@ class _AppHomeState extends State<_AppHome> {
   Widget build(BuildContext context) {
     final c = widget.controller;
     final launch = c.launchTarget;
-    if (launch != null) {
+    if (launch != null && c.settings['onboardingDone'] != false) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         c.consumeLaunch();
@@ -173,7 +175,19 @@ class _AppHomeState extends State<_AppHome> {
         ),
       );
     }
-    if (c.settings['onboardingDone'] == false) return _Welcome(controller: c);
+    if (c.settings['onboardingDone'] == false) {
+      if (_permissionSetup) {
+        return PermissionSetupScreen(
+          controller: c,
+          firstRun: true,
+          onBack: () => setState(() => _permissionSetup = false),
+        );
+      }
+      return _Welcome(
+        controller: c,
+        onConfigure: () => setState(() => _permissionSetup = true),
+      );
+    }
     final screens = [
       LedgerScreen(
         controller: c,
@@ -233,8 +247,9 @@ class _AppHomeState extends State<_AppHome> {
 }
 
 class _Welcome extends StatelessWidget {
-  const _Welcome({required this.controller});
+  const _Welcome({required this.controller, required this.onConfigure});
   final LedgerController controller;
+  final VoidCallback onConfigure;
   @override
   Widget build(BuildContext context) => Scaffold(
     body: SafeArea(
@@ -270,7 +285,7 @@ class _Welcome extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.fact_check_outlined),
                 title: Text('自动发现，亲自核对'),
-                subtitle: Text('支付通知与页面采集可在设置中按需开启。'),
+                subtitle: Text('接下来统一设置支付通知、页面采集与提醒，随时可以跳过。'),
               ),
             const ListTile(
               contentPadding: EdgeInsets.zero,
@@ -280,13 +295,18 @@ class _Welcome extends StatelessWidget {
             ),
             const SizedBox(height: 40),
             FilledButton(
+              onPressed: controller.isBusy ? null : onConfigure,
+              child: const Text('设置记账权限'),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
               onPressed: controller.isBusy
                   ? null
                   : () => runUi(
                       context,
                       () => controller.updateSettings({'onboardingDone': true}),
                     ),
-              child: const Text('开始记账'),
+              child: const Text('暂不设置，直接记账'),
             ),
           ],
         ),

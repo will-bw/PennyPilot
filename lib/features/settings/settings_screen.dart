@@ -7,6 +7,7 @@ import 'package:pennypilot/core/updates/app_update_service.dart';
 import 'ai_settings_screen.dart';
 import 'recognition_settings_screen.dart';
 import 'capture_settings_screen.dart';
+import 'permission_setup_screen.dart';
 import 'categories_screen.dart';
 import 'rules_screen.dart';
 import 'settings_widgets.dart';
@@ -196,10 +197,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               SettingsSection(
                 title: '记账方式',
                 children: [
+                  SettingsRow(
+                    title: '权限设置',
+                    subtitle: '集中查看授权状态，按需开启记账权限',
+                    icon: Icons.verified_user_outlined,
+                    onTap: () => _open(
+                      PermissionSetupScreen(controller: widget.controller),
+                    ),
+                  ),
                   if (android)
                     SettingsRow(
-                      title: '自动采集与权限',
-                      subtitle: '支付通知、支付页面与运行状态',
+                      title: '自动采集',
+                      subtitle: '采集开关、解析与运行诊断',
                       icon: Icons.notifications_active_outlined,
                       onTap: () => _open(
                         CaptureSettingsScreen(controller: widget.controller),
@@ -238,15 +247,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       VoiceSettingsScreen(controller: widget.controller),
                     ),
                   ),
-                  if (!android)
-                    SettingsRow(
-                      title: '语音与系统权限',
-                      subtitle: '管理麦克风与语音识别授权',
-                      icon: Icons.mic_none,
-                      onTap: () => _open(
-                        CaptureSettingsScreen(controller: widget.controller),
-                      ),
-                    ),
                 ],
               ),
               SettingsSection(

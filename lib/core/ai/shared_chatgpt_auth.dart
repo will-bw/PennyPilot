@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import '../agent/agent_models.dart';
+import '../agent/agent_wire.dart';
 import 'dart:io';
 import 'dart:math';
 
@@ -645,6 +647,53 @@ class SharedChatGptAuth {
     );
     if (jsonMode) decodeAiObject(text);
     return text;
+  }
+
+  Future<AgentReply> agentTurn(
+    String model,
+    List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>> tools, {
+    required String expectedAccountId,
+    Future<void> Function()? beforeRequest,
+  }) async {
+    final access = await _access();
+    if (access.accountId != expectedAccountId) {
+      aiFailure('ChatGPT账号已切换，本次任务已停止。');
+    }
+    final request = http.Request('POST', Uri.parse('$_resource/responses'))
+      ..headers.addAll({
+        'Authorization': 'Bearer ${access.token}',
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
+      })
+      ..body = jsonEncode({
+        'model': checkedModel(model),
+        'stream': true,
+        'store': false,
+        'include': ['reasoning.encrypted_content'],
+        'input': responsesAgentInput(messages, access.accountId),
+        if (tools.isNotEmpty) 'tools': responsesAgentTools(tools),
+      });
+    if (request.bodyBytes.length > 4 * 1024 * 1024) {
+      aiFailure('Agent请求过大，请缩小范围。');
+    }
+    await beforeRequest?.call();
+    _sameAccount(access.accountId);
+    final response = await aiRequest(_client, request);
+    _sameAccount(access.accountId);
+    await beforeRequest?.call();
+    final output = decodeResponsesOutput(
+      response.body,
+      contentType: response.contentType,
+    );
+    return agentReplyFromResponses(
+      (output['items'] as List).map(agentMap).toList(),
+      access.accountId,
+      usage: output['usage'] == null ? null : agentMap(output['usage']),
+      allowedTools: tools
+          .map((t) => agentMap(t['function'])['name'] as String)
+          .toSet(),
+    );
   }
 
   Future<Map<String, dynamic>> _metadata() async {

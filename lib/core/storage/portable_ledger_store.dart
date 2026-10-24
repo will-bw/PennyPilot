@@ -117,8 +117,16 @@ class PortableLedgerStore implements LedgerRepository {
         return database.transaction(_export);
       case 'updateSettings':
         final revision = await database.transaction((transaction) async {
-          final changes = _validateSettings(arguments);
           final current = await _settings(transaction);
+          _require(
+            arguments['expectedBudgetCents'] == null ||
+                arguments['expectedBudgetCents'] ==
+                    (current['budgetCents'] ?? 0),
+            '预算已变化，请重新核对提案。',
+          );
+          final changes = _validateSettings(
+            {...arguments}..remove('expectedBudgetCents'),
+          );
           await _putMetadata(transaction, 'settings', {...current, ...changes});
           return _revision(transaction);
         });
@@ -244,6 +252,11 @@ class PortableLedgerStore implements LedgerRepository {
       case 'deleteTransaction':
         final id = _int(arguments, 'id', min: 1);
         final deleted = await _existing(database, 'transactions', id, '账目');
+        _require(
+          arguments['editVersion'] == null ||
+              arguments['editVersion'] == (deleted['editVersion'] ?? 0),
+          '账目已更新，请重新核对删除提案。',
+        );
         final identities = <String>{
           if (deleted['captureEventKey'] is String)
             deleted['captureEventKey'] as String,

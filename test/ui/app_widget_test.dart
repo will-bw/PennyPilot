@@ -244,7 +244,8 @@ void main() {
       await chooseTab(tester, '问账');
       final input = find.byWidgetPredicate(
         (widget) =>
-            widget is TextField && widget.decoration?.hintText == '想了解哪笔开销？',
+            widget is TextField &&
+            widget.decoration?.hintText == '查询、分析，或告诉我想完成的记账任务',
       );
       await tester.enterText(input, '本月已确认支出是多少？');
       await tester.pump();
