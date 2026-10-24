@@ -116,12 +116,83 @@ void main() {
       isEmpty,
     );
   });
+  test('noon meal accepts a calendar date without inventing a clock time', () {
+    final r = validate([
+      {
+        ...proposal(amount: 2000, quote: '20块钱'),
+        'fieldEvidence': {
+          'amount': {'quote': '20块钱', 'source': 'user'},
+          'type': {'quote': '花了', 'source': 'user'},
+        },
+        'occurred_at': '2026-10-24',
+        // The local format determines precision, not a model confidence label.
+        'timePrecision': 'exact',
+      },
+    ], input: '今天中午吃的饺子花了20块钱。');
+    expect(r['questions'], isEmpty);
+    expect(r['autoSaveEligible'], true);
+    final tx = LedgerTransaction.fromMap(
+      stringMap((r['transactions'] as List).single),
+      draft: true,
+    );
+    expect(tx.amountFen, 2000);
+    expect(tx.occurredAt, DateTime(2026, 10, 24));
+    expect(tx.recognitionMetadata['timePrecision'], 'day');
+  });
+  for (final date in ['2026-02-30', '2026-13-01', '2026-10-25']) {
+    test('day-only $date still rejects invalid or future dates', () {
+      final r = validate([
+        {...proposal(), 'occurred_at': date, 'timePrecision': 'day'},
+      ]);
+      expect(r['transactions'], isEmpty);
+      expect(r['autoSaveEligible'], false);
+    });
+  }
+  test('day-only dates still must agree with the original relative date', () {
+    final r = validate([
+      {...proposal(), 'occurred_at': '2026-10-23'},
+    ], input: '今天午饭12元');
+    expect(r['transactions'], isEmpty);
+    expect(r['questions'], contains(contains('模型日期与原文不一致')));
+  });
+  test('format errors and future timestamps have different questions', () {
+    final invalid = validate([
+      {...proposal(), 'occurred_at': '2026-02-30'},
+    ]);
+    final future = validate([
+      {...proposal(), 'occurred_at': '2026-10-25T10:00:00'},
+    ]);
+    expect(invalid['questions'], contains(contains('时间格式或日期无效')));
+    expect(future['questions'], contains(contains('交易时间在未来')));
+  });
+  test('recognition prompt states local offset and day-level time rules', () {
+    final prompt = RecognitionProtocol.prompt(snapshot, now);
+    final localNow = now.toLocal();
+    final minutes = localNow.timeZoneOffset.inMinutes.abs();
+    final zone =
+        '${localNow.timeZoneOffset.isNegative ? '-' : '+'}'
+        '${(minutes ~/ 60).toString().padLeft(2, '0')}:'
+        '${(minutes % 60).toString().padLeft(2, '0')}';
+    expect(prompt, contains('${localNow.toIso8601String()}$zone'));
+    expect(prompt, contains('YYYY-MM-DD'));
+    expect(prompt, contains('不要编造具体时分'));
+    expect(prompt, contains('不得把当地钟面时间直接标成Z'));
+  });
   test('image needs original transaction date and never auto saves', () {
     expect(validate([proposal()], source: 'AI_IMAGE')['transactions'], isEmpty);
     final r = validate([
       {...proposal(status: 'completed'), 'occurred_at': '2026-10-23T10:00:00'},
     ], source: 'AI_IMAGE');
     expect((r['transactions'] as List).length, 1);
+    expect(r['autoSaveEligible'], false);
+  });
+  test('image date without a clock time retains day precision and review', () {
+    final r = validate([
+      {...proposal(status: 'completed'), 'occurred_at': '2026-10-23'},
+    ], source: 'AI_IMAGE');
+    final row = (r['transactions'] as List).single;
+    expect(row['occurredAt'], DateTime(2026, 10, 23).millisecondsSinceEpoch);
+    expect(jsonDecode(row['metadataJson'])['timePrecision'], 'day');
     expect(r['autoSaveEligible'], false);
   });
   for (final phrase in [
@@ -373,5 +444,11 @@ void main() {
     );
     expect(RecognitionProtocol.strictDate('2026-10-24T12:00+08:00'), isNotNull);
     expect(RecognitionProtocol.strictDate('2026-10-24T12:00:00+08:99'), isNull);
+    // CSV callers still require a full timestamp by default.
+    expect(RecognitionProtocol.strictDate('2026-10-24'), isNull);
+    expect(
+      RecognitionProtocol.strictDate('2026-10-24', allowDateOnly: true),
+      DateTime(2026, 10, 24),
+    );
   });
 }

@@ -148,6 +148,40 @@ void main() {
     expect(result['transactions'], isEmpty);
     await service.dispose();
   });
+  test('native text transport retains a day-only meal proposal', () async {
+    final service = SharedAiService(
+      credentials: MemoryCredentials(),
+      now: () => now,
+    );
+    final result = await service.recognizeInput(
+      {'text': '今天中午吃的饺子花了20块钱。', 'operationId': 'noon-meal'},
+      snapshot(provider: 'chatgpt'),
+      nativeChat: (messages, role) async {
+        expect(role, 'text');
+        expect(messages.first['content'], contains('YYYY-MM-DD'));
+        return jsonEncode({
+          'intent': 'record',
+          'proposals': [
+            {
+              ...proposal(amount: 2000, quote: '20块钱'),
+              'occurred_at': '2026-10-24',
+              'timePrecision': 'day',
+              'fieldEvidence': {
+                'amount': {'quote': '20块钱', 'source': 'user'},
+                'type': {'quote': '花了', 'source': 'user'},
+              },
+            },
+          ],
+        });
+      },
+    );
+    expect(result['questions'], isEmpty);
+    expect(result['autoSaveEligible'], true);
+    final row = (result['transactions'] as List).single;
+    expect(row['occurredAt'], DateTime(2026, 10, 24).millisecondsSinceEpoch);
+    expect(jsonDecode(row['metadataJson'])['timePrecision'], 'day');
+    await service.dispose();
+  });
   test(
     'DeepSeek text and Qwen vision route to different configured endpoints',
     () async {
