@@ -12,6 +12,7 @@ import android.view.accessibility.AccessibilityWindowInfo
 import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.parser.PaymentAppRegistry
 import com.pennypilot.app.data.parser.PaymentTextParser
+import com.pennypilot.app.data.parser.NotificationParseResult
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -22,11 +23,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import java.util.concurrent.atomic.AtomicLong
+import java.io.FileDescriptor
+import java.io.PrintWriter
 
 /** 可选的本机支付结果读取；系统授权及应用开关均满足后才读取指定应用。 */
 class PaymentAccessibilityService : AccessibilityService() {
@@ -41,6 +45,9 @@ class PaymentAccessibilityService : AccessibilityService() {
     private val visualAttempts = linkedMapOf<String, Long>()
     private val visualResults = linkedMapOf<String, PaymentTextParser.ScreenRecognition>()
     private val visualGeneration = AtomicLong()
+    private data class OpaqueAttempt(val firstAt: Long, val lastAt: Long, val attempts: Int,
+        val generation: Long, val parsed: NotificationParseResult? = null)
+    private val opaqueAttempts = linkedMapOf<Int, OpaqueAttempt>()
     @Volatile private var enabled = false
     @Volatile private var latestWindow: ReadRequest? = null
     private val hiltEntryPoint by lazy {
@@ -54,6 +61,7 @@ class PaymentAccessibilityService : AccessibilityService() {
     internal var unknownScreenHandler: (suspend (String, String, String, Long, Long, String?, List<String>) -> Boolean)? = null
     internal var visualCapture: (suspend (PaymentScreenReader.Snapshot) -> Bitmap?)? = null
     internal var visualOcr: suspend (Bitmap) -> String = PaymentImageReader::ocrBitmap
+    internal var opaqueVisualOcr: suspend (Bitmap) -> List<PaymentImageReader.OcrLine> = PaymentImageReader::ocrLines
     private val entryPoint get() = dependencies ?: hiltEntryPoint
 
     override fun onServiceConnected() {
@@ -61,7 +69,7 @@ class PaymentAccessibilityService : AccessibilityService() {
         entryPoint.monitor().onAccessibilityConnected()
         preferenceJob?.cancel()
         preferenceJob = scope.launch {
-            entryPoint.appPreferences().screenCaptureEnabled.collect { allow ->
+            entryPoint.appPreferences().screenCaptureEnabled.distinctUntilChanged().collect { allow ->
                 enabled = allow
                 readJob?.cancel()
                 latestWindow = null
@@ -69,6 +77,7 @@ class PaymentAccessibilityService : AccessibilityService() {
                 while (requests.tryReceive().isSuccess) { /* 开关切换前的事件不能在恢复后补读。 */ }
                 synchronized(session) { session.reset() }
                 synchronized(visualAttempts) { visualAttempts.clear(); visualResults.clear() }
+                synchronized(opaqueAttempts) { opaqueAttempts.clear() }
                 entryPoint.monitor().onScreenStatus(if (allow) "waiting" else "disabled")
                 if (allow) readJob = scope.launch(readDispatcher) {
                     // 重连/打开开关时页面可能已稳定，不会再发一个内容变化事件。
@@ -106,8 +115,23 @@ class PaymentAccessibilityService : AccessibilityService() {
             return
         }
         if (packageName !in PaymentAppRegistry.packages) return
+        val eventClass = event.className?.toString()
+        // Content redraws often name a View instead of the Activity. Retain only the Activity
+        // established by a window-state event for this exact window, never across navigation.
+        val pageClass = if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            latestWindow?.let { it.packageName == packageName && it.windowId == event.windowId } == true)
+            latestWindow?.className else eventClass
+        if (packageName == WechatOpaqueTransferReader.PACKAGE &&
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventClass == "com.tencent.mm.plugin.remittance.ui.RemittanceUI") {
+            // A new outgoing transfer flow can reuse the same result window and amount.
+            synchronized(opaqueAttempts) {
+                synchronized(session) { opaqueAttempts.keys.forEach { session.onInputPage(packageName, it, elapsedMillis()) } }
+                opaqueAttempts.clear()
+            }
+        }
         val request = ReadRequest(packageName, event.windowId, LedgerRevision.current,
-            event.eventType, event.className?.toString())
+            event.eventType, pageClass)
         latestWindow = request
         entryPoint.monitor().onScreenEvent(packageName)
         requests.trySend(request)
@@ -115,7 +139,7 @@ class PaymentAccessibilityService : AccessibilityService() {
 
     private fun isCurrent(request: ReadRequest) = enabled && request.revision == LedgerRevision.current &&
         latestWindow?.let { it.packageName == request.packageName && it.windowId == request.windowId &&
-            it.revision == request.revision } == true
+            it.revision == request.revision && it.className == request.className } == true
 
     @Suppress("DEPRECATION")
     private fun requestCurrentWindow() {
@@ -177,6 +201,14 @@ class PaymentAccessibilityService : AccessibilityService() {
             if (!isCurrent(request)) return true
             val text = snapshot.text
             if (text == null) {
+                if (WechatOpaqueTransferReader.accepts(request.packageName, request.className, snapshot)) {
+                    CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
+                        request.eventType, request.className, false)
+                    val parsed = readOpaqueTransfer(request, snapshot, actualWindowId) ?: return false
+                    if (!isCurrent(request) || !entryPoint.appPreferences().screenVisualCaptureEnabled.first()) return true
+                    entryPoint.monitor().onScreenRead("parsed", snapshot.diagnostics, request.packageName)
+                    return persistScreen(request, actualWindowId, parsed, nowMillis(), elapsedMillis())
+                }
                 // 明确输入页代表离开凭证；节点缺失/树未加载只算暂不可读，不能重置去重身份。
                 if (snapshot.hasInput) synchronized(session) {
                     session.onInputPage(request.packageName, actualWindowId, elapsedMillis())
@@ -269,19 +301,8 @@ class PaymentAccessibilityService : AccessibilityService() {
                 } else synchronized(session) { session.observe(request.packageName, actualWindowId, null, elapsed) }
                 return false
             }
-            val key = synchronized(session) { session.observe(request.packageName, actualWindowId, parsed, elapsed) }
-            if (key == null) {
-                entryPoint.monitor().onScreenStatus("duplicate", request.packageName)
-                return false
-            }
-            val evidence = synchronized(session) { session.evidence(key) } ?: parsed
-            if (entryPoint.captureProcessor().processScreen(request.packageName, evidence, key, now, request.revision)) {
-                synchronized(session) { session.markHandled(key) }
-                // A result may render its order ID later without emitting another event. Keep the
-                // same bounded sampling cycle so enrichment reaches persistence after the first save.
-                return false
-            }
-            entryPoint.monitor().onScreenStatus("error", request.packageName)
+            persistScreen(request, actualWindowId, parsed, now, elapsed)
+            // Keep sampling readable results so late order IDs can enrich existing evidence.
             return false
         } catch (e: CancellationException) { throw e
         } catch (_: Exception) {
@@ -289,6 +310,95 @@ class PaymentAccessibilityService : AccessibilityService() {
             entryPoint.monitor().onError("支付页面读取未完成；可检查授权或手动补记")
             return false
         }
+    }
+
+    private suspend fun persistScreen(request: ReadRequest, windowId: Int, parsed: NotificationParseResult,
+        now: Long, elapsed: Long): Boolean {
+        val key = synchronized(session) { session.observe(request.packageName, windowId, parsed, elapsed) }
+        if (key == null) {
+            entryPoint.monitor().onScreenStatus("duplicate", request.packageName)
+            return true
+        }
+        val evidence = synchronized(session) { session.evidence(key) } ?: parsed
+        if (entryPoint.captureProcessor().processScreen(request.packageName, evidence, key, now, request.revision)) {
+            synchronized(session) { session.markHandled(key) }
+            return true
+        }
+        entryPoint.monitor().onScreenStatus("error", request.packageName)
+        return false
+    }
+
+    private suspend fun readOpaqueTransfer(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot,
+        windowId: Int): NotificationParseResult? {
+        val monitor = entryPoint.monitor()
+        var diagnostics = snapshot.diagnostics
+        fun status(value: String) = monitor.onScreenRead(value, diagnostics, request.packageName)
+        if (!entryPoint.appPreferences().screenVisualCaptureEnabled.first()) {
+            status("visual_required")
+            return null
+        }
+        // Window-specific capture excludes other apps and overlays. Older Android versions retain
+        // the normal node-based path; no broad full-display fallback for an unobservable page.
+        if (Build.VERSION.SDK_INT < 34 || windowId < 0) {
+            status("visual_unavailable")
+            return null
+        }
+        val now = elapsedMillis()
+        val generation = visualGeneration.get()
+        val previous = synchronized(opaqueAttempts) { opaqueAttempts[windowId] }
+        if (previous != null && now - previous.firstAt < 10_000) {
+            previous.parsed?.takeIf { previous.generation == generation }?.let { return it }
+            if (now - previous.lastAt < 750 || previous.attempts >= 3) {
+                status("visual_waiting")
+                return null
+            }
+        }
+        synchronized(opaqueAttempts) {
+            opaqueAttempts[windowId] = OpaqueAttempt(
+                previous?.firstAt?.takeIf { now - it < 10_000 } ?: now, now,
+                if (previous != null && now - previous.firstAt < 10_000) previous.attempts + 1 else 1, generation)
+            while (opaqueAttempts.size > 8) opaqueAttempts.remove(opaqueAttempts.keys.first())
+        }
+        if (!matchesOpaqueSnapshot(request, snapshot, generation)) return null
+        status("visual_read")
+        val bitmap = if (visualCapture != null) visualCapture!!.invoke(snapshot) else captureBitmap(windowId)
+        if (bitmap == null) { status("visual_unavailable"); return null }
+        try {
+            val lines = opaqueVisualOcr(bitmap)
+            diagnostics = diagnostics + WechatOpaqueTransferReader.diagnostics(lines, bitmap.width, bitmap.height)
+            if (!matchesOpaqueSnapshot(request, snapshot, generation) ||
+                !entryPoint.appPreferences().screenVisualCaptureEnabled.first()) {
+                synchronized(opaqueAttempts) { opaqueAttempts.remove(windowId) }
+                return null
+            }
+            val parsed = WechatOpaqueTransferReader.parse(lines, bitmap.width, bitmap.height)
+            if (parsed == null) {
+                // A readable input/history/failed image is a real non-receipt boundary. An empty
+                // OCR result can be a transient loading frame and must not reset transaction identity.
+                if (lines.isNotEmpty()) synchronized(session) {
+                    session.observe(request.packageName, windowId, null, elapsedMillis())
+                }
+                status("visual_not_receipt")
+                return null
+            }
+            synchronized(opaqueAttempts) { opaqueAttempts[windowId]?.let {
+                opaqueAttempts[windowId] = it.copy(parsed = parsed)
+            } }
+            return parsed
+        } finally { bitmap.recycle() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun matchesOpaqueSnapshot(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot, generation: Long): Boolean {
+        if (!isCurrent(request) || visualGeneration.get() != generation || latestWindow?.className != request.className) return false
+        val root = activeRoot() ?: return false
+        return try {
+            root.packageName?.toString() == request.packageName && root.windowId == request.windowId &&
+                PaymentScreenReader.inspect(root, request.packageName).let {
+                    it.diagnostics == snapshot.diagnostics &&
+                        WechatOpaqueTransferReader.accepts(request.packageName, request.className, it)
+                }
+        } finally { root.recycle() }
     }
 
     @Suppress("DEPRECATION")
@@ -305,9 +415,23 @@ class PaymentAccessibilityService : AccessibilityService() {
     @androidx.annotation.RequiresApi(30)
     private suspend fun captureVisual(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot, generation: Long): Bitmap? {
         if (!matchesSnapshot(request, snapshot, generation)) return null
+        val whole = captureBitmap() ?: run {
+            entryPoint.monitor().onScreenStatus("visual_unavailable", request.packageName)
+            return null
+        }
+        return try {
+            if (!matchesSnapshot(request, snapshot, generation)) return null
+            val region = PaymentVisualRegion.bounds(snapshot.structure, whole.width, whole.height) ?: return null
+            Bitmap.createBitmap(whole, region.left, region.top, region.width(), region.height())
+                .let { if (it === whole) it.copy(Bitmap.Config.ARGB_8888, false) else it }
+        } finally { whole.recycle() }
+    }
+
+    @androidx.annotation.RequiresApi(30)
+    private suspend fun captureBitmap(windowId: Int? = null): Bitmap? {
         val whole = withTimeoutOrNull(2_500) {
             suspendCancellableCoroutine<Bitmap?> { continuation ->
-                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                val callback = object : TakeScreenshotCallback {
                     override fun onSuccess(result: ScreenshotResult) {
                         val buffer = result.hardwareBuffer
                         val bitmap = try {
@@ -325,19 +449,21 @@ class PaymentAccessibilityService : AccessibilityService() {
                     override fun onFailure(errorCode: Int) {
                         if (continuation.isActive) continuation.resume(null)
                     }
-                })
+                }
+                if (windowId != null && Build.VERSION.SDK_INT >= 34) takeScreenshotOfWindow(windowId, mainExecutor, callback)
+                else takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, callback)
             }
-        } ?: run {
-            entryPoint.monitor().onScreenStatus("visual_unavailable", request.packageName)
-            return null
         }
-        return try {
-            if (!matchesSnapshot(request, snapshot, generation)) return null
-            val region = PaymentVisualRegion.bounds(snapshot.structure, whole.width, whole.height) ?: return null
-            // A copy lets the full display buffer be released before OCR or any network operation.
-            Bitmap.createBitmap(whole, region.left, region.top, region.width(), region.height())
-                .let { if (it === whole) it.copy(Bitmap.Config.ARGB_8888, false) else it }
-        } finally { whole.recycle() }
+        return whole
+    }
+
+    // ADB diagnostics expose states/counters only, never screen/OCR text, images, amounts or names.
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>?) {
+        val health = entryPoint.monitor().health.value
+        writer.println("screenCaptureStatus=${health.screenCaptureStatus}")
+        writer.println("screenReadDiagnostics=${health.screenReadDiagnostics}")
+        writer.println("todayCaptureCount=${health.todayCaptureCount}")
+        health.screenReadHistory.forEach { writer.println("trace=${it.timestamp} ${it.status} ${it.diagnostics}") }
     }
 
     // 本服务没有语音/触觉反馈；onInterrupt 不代表系统已撤销授权。

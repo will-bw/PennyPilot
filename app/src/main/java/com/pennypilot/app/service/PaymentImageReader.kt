@@ -21,6 +21,8 @@ object PaymentImageReader {
 
     suspend fun ocrBitmap(bitmap: Bitmap): String = recognize(bitmap).text
 
+    internal suspend fun ocrLines(bitmap: Bitmap): List<OcrLine> = recognize(bitmap).lines
+
     private suspend fun recognize(bitmap: Bitmap): OcrResult = suspendCancellableCoroutine { continuation ->
         val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
         recognizer.process(InputImage.fromBitmap(bitmap, 0))

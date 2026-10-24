@@ -14,6 +14,50 @@ class VoiceConfiguration {
   final String provider, baseUrl, model, apiKey;
   bool get configured => apiKey.isNotEmpty;
 
+  /// Qwen-Audio ASR uses DashScope's synchronous speech API, not chat completions.
+  bool get usesDashScopeAsr =>
+      provider == 'qwen' &&
+      RegExp(
+        r'^qwen-audio-3\.[01]-asr-flash(?:-\d{4}-\d{2}-\d{2})?$',
+      ).hasMatch(model);
+
+  /// Resolve a request path without rewriting saved settings, region, host or key.
+  Uri get transcriptionUri {
+    final base = Uri.parse(baseUrl);
+    final path = base.path.replaceFirst(RegExp(r'/+$'), '');
+    if (usesDashScopeAsr) {
+      const endpoint = '/api/v1/services/aigc/multimodal-generation/generation';
+      final String nativePath;
+      if (path.endsWith(endpoint)) {
+        nativePath = path;
+      } else if (path.endsWith('/compatible-mode/v1')) {
+        nativePath =
+            path.substring(0, path.length - '/compatible-mode/v1'.length) +
+            endpoint;
+      } else if (path.endsWith('/api/v1')) {
+        nativePath = '$path/services/aigc/multimodal-generation/generation';
+      } else if (path.isEmpty) {
+        nativePath = endpoint;
+      } else {
+        throw const LedgerException(
+          '此模型使用百炼原生语音接口，服务地址请填写业务空间根地址、/api/v1 或 /compatible-mode/v1 基础地址。',
+          code: 'SPEECH_ENDPOINT',
+        );
+      }
+      return base.replace(path: nativePath);
+    }
+    if (provider == 'qwen' && model.startsWith('qwen-audio-')) {
+      throw const LedgerException(
+        '当前录音转写支持 qwen-audio-3.0-asr-flash；实时、Message 和 Filetrans 模型使用不同接口，不能在此直接调用。',
+        code: 'SPEECH_MODEL_UNSUPPORTED',
+      );
+    }
+    return base.replace(
+      path:
+          '$path/${provider == 'qwen' ? 'chat/completions' : 'audio/transcriptions'}',
+    );
+  }
+
   Map<String, dynamic> get publicSettings => {
     'speechProvider': provider,
     'speechBaseUrl': baseUrl,

@@ -15,10 +15,10 @@ import 'package:pennypilot/ui/theme.dart';
 import '../ui/test_ledger_repository.dart';
 
 class VoiceRepository extends TestLedgerRepository {
-  VoiceRepository() {
+  VoiceRepository({VoiceConfiguration config = const VoiceConfiguration()}) {
     data['settings'] = <String, dynamic>{
       ...data['settings'] as Map<String, dynamic>,
-      ...const VoiceConfiguration().publicSettings,
+      ...config.publicSettings,
       'hasSpeechKey': true,
     };
   }
@@ -86,6 +86,7 @@ Future<VoiceRepository> showVoice(
   Size size = const Size(390, 844),
   double scale = 1,
   Brightness brightness = Brightness.light,
+  VoiceConfiguration config = const VoiceConfiguration(),
 }) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
@@ -95,7 +96,7 @@ Future<VoiceRepository> showVoice(
     tester.view.resetDevicePixelRatio();
     tester.platformDispatcher.clearTextScaleFactorTestValue();
   });
-  final repository = VoiceRepository();
+  final repository = VoiceRepository(config: config);
   final controller = LedgerController(repository: repository);
   await controller.init();
   addTearDown(() async {
@@ -210,6 +211,44 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   });
+
+  testWidgets(
+    'saved Bailian 3.0 configuration tests without rewriting or exposing credentials',
+    (tester) async {
+      const config = VoiceConfiguration(
+        baseUrl: 'https://workspace.example.test/compatible-mode/v1',
+        model: 'qwen-audio-3.0-asr-flash',
+      );
+      final repository = await showVoice(tester, config: config);
+      expect(find.textContaining('当前模型使用百炼原生语音接口'), findsOneWidget);
+      expect(
+        tester.widget<TextField>(field('服务地址')).controller!.text,
+        config.baseUrl,
+      );
+      expect(
+        tester.widget<TextField>(field('语音模型名称')).controller!.text,
+        config.model,
+      );
+      expect(
+        tester.widget<TextField>(field('API Key')).controller!.text,
+        isEmpty,
+      );
+      await tester.ensureVisible(find.byType(OutlinedButton));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('开始测试录音'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('结束并转写'));
+      await tester.pumpAndSettle();
+      expect(find.text('转写成功'), findsOneWidget);
+      expect(repository.voiceCalls, ['startSpeech', 'stopSpeech']);
+      expect(
+        (repository.data['settings'] as Map)['speechBaseUrl'],
+        config.baseUrl,
+      );
+      expect((repository.data['settings'] as Map)['speechModel'], config.model);
+      expect(repository.data['transactions'], isEmpty);
+    },
+  );
 
   testWidgets('deleting a key requires explicit delete action', (tester) async {
     final repository = await showVoice(tester);

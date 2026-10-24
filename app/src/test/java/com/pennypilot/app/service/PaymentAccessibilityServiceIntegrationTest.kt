@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -579,6 +580,135 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(0, cloudCalls)
     }
 
+    private fun opaqueLines(amount: String = "¥3.00") = listOf(
+        PaymentImageReader.OcrLine("支付成功", Rect(570, 192, 780, 245)),
+        PaymentImageReader.OcrLine("待测试收款人确认收款", Rect(370, 570, 895, 625)),
+        PaymentImageReader.OcrLine(amount, Rect(440, 700, 825, 824)),
+        PaymentImageReader.OcrLine("完成", Rect(579, 2380, 685, 2430)))
+
+    private fun allowOpaqueCapture() {
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(1264, 2780, Bitmap.Config.ARGB_8888) }
+        service.opaqueVisualOcr = { opaqueLines() }
+        window.root = { screen("", visible = false) }
+    }
+
+    @Test fun `real phone empty root result is recovered locally and redraws save only one pending transfer`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        val row = rows().single()
+        assertEquals(300L, row.amount)
+        assertEquals(TxType.EXPENSE, row.type)
+        assertEquals(TxStatus.PENDING, row.status)
+        assertEquals("unknown", row.businessKind)
+        assertTrue(row.metadataJson!!.contains("wechat-opaque-transfer"))
+        repeat(2) {
+            scheduler.advanceTimeBy(1_000)
+            sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, className = "android.view.View")
+            awaitStatus("duplicate")
+        }
+        assertEquals(1, rows().size)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `empty root never screenshots without the separate local visual switch or on a generic activity`() {
+        connect(enabled = true)
+        var screenshots = 0
+        service.visualCapture = { screenshots++; null }
+        window.root = { screen("", visible = false) }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("visual_required")
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        sendEvent(className = "com.tencent.mm.ui.LauncherUI")
+        awaitStatus("empty_page")
+        drainRetries()
+        assertEquals(0, screenshots)
+        assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `opaque capture uses the exact window and screenshot failure cannot reach OCR or database`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        window.root = { screen("", visible = false) }
+        var ocrCalls = 0
+        service.opaqueVisualOcr = { ocrCalls++; opaqueLines() }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("visual_unavailable")
+        assertEquals(listOf(7), window.screenshotWindows)
+        assertEquals(0, ocrCalls)
+        assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `leaving the opaque window or revoking visual consent discards in flight OCR`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = {
+            window.root = { screen("聊天", windowId = 8, editableChild = true) }
+            sendEvent(windowId = 8, className = "com.tencent.mm.ui.LauncherUI")
+            opaqueLines()
+        }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("input_page")
+        assertTrue(rows().isEmpty())
+        allowOpaqueCapture()
+        scheduler.advanceTimeBy(1_000)
+        service.opaqueVisualOcr = {
+            preferences.setScreenVisualCaptureEnabled(false)
+            opaqueLines()
+        }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        drainRetries()
+        assertTrue(rows().isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `opaque pending password history or extra chat text cannot become a transaction`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        service.opaqueVisualOcr = {
+            opaqueLines() + PaymentImageReader.OcrLine("请输入支付密码", Rect(100, 1400, 600, 1450))
+        }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("visual_not_receipt")
+        drainRetries()
+        assertTrue(rows().isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `two identical opaque transfers separated by a new transfer flow are both captured`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        window.root = { screen("转账", windowId = 8, editableChild = true) }
+        sendEvent(windowId = 8, className = "com.tencent.mm.plugin.remittance.ui.RemittanceUI")
+        awaitStatus("input_page")
+        window.root = { screen("", visible = false) }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        assertEquals(2, rows().size)
+        assertTrue(rows().all { it.amount == 300L && it.status == TxStatus.PENDING })
+    }
+
+    @Test fun `new opaque frame invalidates an older image despite identical empty node facts`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        var calls = 0
+        service.opaqueVisualOcr = {
+            calls++
+            if (calls == 1) {
+                sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, className = "android.view.View")
+                opaqueLines("¥3.00")
+            } else opaqueLines("¥4.00")
+        }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        assertEquals(2, calls)
+        assertEquals(400L, rows().single().amount)
+    }
+
     private fun connect(enabled: Boolean, expectedStatus: String = if (enabled) "waiting" else "disabled") {
         runBlocking { preferences.setScreenCaptureEnabled(enabled) }
         ReflectionHelpers.callInstanceMethod<Unit>(service, "onServiceConnected")
@@ -591,8 +721,8 @@ class PaymentAccessibilityServiceIntegrationTest {
     }
 
     private fun sendEvent(type: Int = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-                          packageName: String = "com.tencent.mm", windowId: Int = 7) {
-        val event = AccessibilityEvent.obtain(type).apply { this.packageName = packageName }
+                          packageName: String = "com.tencent.mm", windowId: Int = 7, className: String? = null) {
+        val event = AccessibilityEvent.obtain(type).apply { this.packageName = packageName; this.className = className }
         shadowOf(event).setWindowId(windowId)
         service.onAccessibilityEvent(event)
         event.recycle()
@@ -657,6 +787,13 @@ class PaymentAccessibilityWindowShadow : ShadowAccessibilityService() {
     var root: () -> AccessibilityNodeInfo? = { null }
     var reads = 0
     var cacheClears = 0
+    val screenshotWindows = mutableListOf<Int>()
+
+    @Implementation(minSdk = 34)
+    protected fun takeScreenshotOfWindow(windowId: Int, executor: Executor, callback: AccessibilityService.TakeScreenshotCallback) {
+        screenshotWindows += windowId
+        callback.onFailure(AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR)
+    }
 
     @Implementation(minSdk = 33)
     protected fun clearCache(): Boolean {

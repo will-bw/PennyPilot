@@ -22,6 +22,10 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen>
   String? _error, _result;
 
   bool get _hasKey => widget.controller.settings['hasSpeechKey'] == true;
+  bool get _usesDashScopeAsr => VoiceConfiguration(
+    provider: _provider,
+    model: _model.text.trim(),
+  ).usesDashScopeAsr;
 
   @override
   void initState() {
@@ -222,9 +226,11 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen>
                             enabled: !disabled,
                             keyboardType: TextInputType.url,
                             autocorrect: false,
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               labelText: '服务地址',
-                              helperText: '填写 API 基础地址，需与密钥所属地区一致。',
+                              helperText: _usesDashScopeAsr
+                                  ? '当前模型使用百炼原生语音接口，可沿用 /compatible-mode/v1 基础地址，保持原域名与密钥。'
+                                  : '填写 API 基础地址，需与密钥所属地区一致。',
                               helperMaxLines: 3,
                             ),
                           ),

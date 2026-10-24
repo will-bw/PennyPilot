@@ -159,6 +159,218 @@ void main() {
     expect(bytes, contains('whisper-1'));
   });
 
+  Future<void> useNativeAsr() => configuration.save({
+    'provider': 'qwen',
+    'baseUrl': 'https://asr.example.test/compatible-mode/v1',
+    'model': 'qwen-audio-3.0-asr-flash',
+    // An omitted key must retain the existing encrypted credential.
+  });
+
+  test(
+    'Bailian 3.0 uses native HTTP while stored URL key and model stay unchanged',
+    () async {
+      await useNativeAsr();
+      final stored = credentials.data[VoiceConfigurationStore.storageKey];
+      responder = (_) async => http.Response(
+        jsonEncode({
+          'output': {
+            'text': '今天午饭28元。',
+            'sentence': {'text': '今天午饭28元。', 'sentence_end': true},
+          },
+          'usage': {'duration': 1},
+          'request_id': 'test-request',
+        }),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+      final result = service.start();
+      await tick();
+      recorder.say();
+      await tick();
+      expect(requests, isEmpty);
+      await service.stop();
+      expect(await result, '今天午饭28元。');
+      final request = requests.single;
+      expect(
+        request.url.toString(),
+        'https://asr.example.test/api/v1/services/aigc/multimodal-generation/generation',
+      );
+      expect(request.headers['Authorization'], 'Bearer test-secret');
+      expect(request.headers['X-DashScope-SSE'], 'disable');
+      expect(request.followRedirects, false);
+      final body = jsonDecode(request.body) as Map;
+      expect(body['model'], 'qwen-audio-3.0-asr-flash');
+      expect(body['parameters'], {'format': 'wav', 'sample_rate': '16000'});
+      expect(body.containsKey('messages'), false);
+      expect(body.containsKey('asr_options'), false);
+      final content = body['input']['messages'][0]['content'][0];
+      expect(content['type'], 'input_audio');
+      final encoded = content['input_audio']['data'] as String;
+      expect(encoded, startsWith('data:audio/wav;base64,'));
+      final wav = base64Decode(encoded.split(',').last);
+      expect(ascii.decode(wav.sublist(0, 4)), 'RIFF');
+      expect(ByteData.sublistView(wav).getUint32(24, Endian.little), 16000);
+      expect(wav.length, 32044);
+      expect(credentials.data[VoiceConfigurationStore.storageKey], stored);
+      expect(
+        (await service.settings())['speechBaseUrl'],
+        'https://asr.example.test/compatible-mode/v1',
+      );
+      expect(
+        (await service.settings())['speechModel'],
+        'qwen-audio-3.0-asr-flash',
+      );
+    },
+  );
+
+  for (final entry in {
+    '': '/api/v1/services/aigc/multimodal-generation/generation',
+    '/': '/api/v1/services/aigc/multimodal-generation/generation',
+    '/compatible-mode/v1/':
+        '/api/v1/services/aigc/multimodal-generation/generation',
+    '/api/v1': '/api/v1/services/aigc/multimodal-generation/generation',
+    '/api/v1/services/aigc/multimodal-generation/generation':
+        '/api/v1/services/aigc/multimodal-generation/generation',
+    '/gateway/compatible-mode/v1':
+        '/gateway/api/v1/services/aigc/multimodal-generation/generation',
+  }.entries) {
+    test('native ASR derives a same-origin endpoint from ${entry.key}', () {
+      final config = VoiceConfiguration(
+        baseUrl: 'https://workspace.example.test:8443${entry.key}',
+        model: 'qwen-audio-3.0-asr-flash',
+        apiKey: 'test-secret',
+      );
+      config.validate();
+      expect(
+        config.transcriptionUri.origin,
+        'https://workspace.example.test:8443',
+      );
+      expect(config.transcriptionUri.path, entry.value);
+      expect(config.baseUrl, 'https://workspace.example.test:8443${entry.key}');
+    });
+  }
+
+  for (final model in [
+    'qwen-audio-3.0-asr-flash-streaming',
+    'qwen-audio-3.0-asr-flash-filetrans',
+    'qwen-audio-3.1-asr-flash-message',
+  ]) {
+    test(
+      'unsupported speech protocol is rejected before recording: $model',
+      () async {
+        await configuration.save({
+          'provider': 'qwen',
+          'baseUrl': 'https://asr.example.test/compatible-mode/v1',
+          'model': model,
+        });
+        await expectLater(
+          service.start(),
+          throwsA(code('SPEECH_MODEL_UNSUPPORTED')),
+        );
+        expect(recorder.starts, 0);
+        expect(requests, isEmpty);
+      },
+    );
+  }
+
+  test(
+    'unknown native base path is actionable before opening microphone',
+    () async {
+      await configuration.save({
+        'provider': 'qwen',
+        'baseUrl': 'https://asr.example.test/other',
+        'model': 'qwen-audio-3.0-asr-flash',
+      });
+      await expectLater(service.start(), throwsA(code('SPEECH_ENDPOINT')));
+      expect(recorder.starts, 0);
+      expect(requests, isEmpty);
+    },
+  );
+
+  test(
+    'native finalized sentence can supply text when the aggregate is absent',
+    () async {
+      await useNativeAsr();
+      responder = (_) async => http.Response(
+        jsonEncode({
+          'output': {
+            'sentence': {'text': '地铁4元', 'sentence_end': true},
+          },
+        }),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+      final result = service.start();
+      await tick();
+      recorder.say();
+      await tick();
+      await service.stop();
+      expect(await result, '地铁4元');
+    },
+  );
+
+  for (final output in [
+    {'text': ''},
+    {'text': 28},
+    {
+      'text': '未完成',
+      'sentence': {'sentence_end': false},
+    },
+    {
+      'sentence': {'text': '未完成'},
+    },
+    null,
+  ]) {
+    test(
+      'native empty malformed or unfinished output is rejected: $output',
+      () async {
+        await useNativeAsr();
+        responder = (_) async => http.Response(
+          jsonEncode({'output': output}),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+        final result = expectLater(
+          service.start(),
+          throwsA(isA<LedgerException>()),
+        );
+        await tick();
+        recorder.say();
+        await tick();
+        await service.stop();
+        await result;
+        expect(service.state, 'idle');
+      },
+    );
+  }
+
+  test(
+    'native cancellation discards a late HTTP response and leaves saved config intact',
+    () async {
+      await useNativeAsr();
+      final stored = credentials.data[VoiceConfigurationStore.storageKey];
+      final response = Completer<http.Response>();
+      responder = (_) => response.future;
+      final result = expectLater(service.start(), throwsA(code('CANCELLED')));
+      await tick();
+      recorder.say();
+      await tick();
+      final stopped = service.stop();
+      await tick();
+      await service.cancel();
+      response.complete(
+        http.Response(
+          '{"output":{"text":"迟到结果"}}',
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        ),
+      );
+      await stopped;
+      await result;
+      expect(credentials.data[VoiceConfigurationStore.storageKey], stored);
+    },
+  );
+
   test('unconfigured service does not request microphone or network', () async {
     await configuration.removeKey();
     await expectLater(service.start(), throwsA(code('SPEECH_NOT_CONFIGURED')));

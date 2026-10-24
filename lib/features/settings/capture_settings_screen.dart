@@ -26,6 +26,9 @@ String screenCaptureStatusLabel(String? status) => switch (status) {
   'model_failed' => '模型暂时不可用，等待重试',
   'visual_unavailable' => '当前页面无法截图识别',
   'visual_read' => '正在本地识别支付截图',
+  'visual_required' => '此页面需要本地截图补充',
+  'visual_not_receipt' => '截图未匹配微信转账成功页',
+  'visual_waiting' => '等待支付画面稳定后重读',
   'duplicate' => '重复页面已拦截',
   'error' => '页面处理未完成',
   _ => '等待支付页面事件',
@@ -53,6 +56,10 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'model_rejected' => '没有取得可核对的金额、方向和成功状态，未自动入账。可分享截图或导入账单补录。',
   'model_failed' => '请检查 AI 服务配置与网络，待处理任务会按策略重试。',
   'visual_unavailable' => '截图能力未启用、页面受保护或截图失败，可通过主动图片记账或账单导入补录。',
+  'visual_required' => '微信仅提供了空节点。请在“识别与录入”中开启“本地支付截图补充”，再打开这张成功页；图片只在本机处理。',
+  'visual_not_receipt' => '未同时匹配支付成功、待收款人确认、有效金额和完成按钮。未生成账目，可继续停留或主动补录。',
+  'visual_read' => '仅在本机读取当前微信窗口，校验成功状态、金额和结果页布局；图片不会上传。',
+  'visual_waiting' => '为避免连续截图，当前正在等待下一次有界读取；已保存的账目可在待确认列表核对。',
   'saved' => '请回到流水核对；即使关闭记账提醒，也可在待确认列表中查看。',
   'duplicate' => '同一页面不会反复生成账单，请查看已有待确认记录。',
   'error' => '请查看下方运行记录，检查权限并核对最近交易。',
@@ -121,6 +128,14 @@ List<_ScreenReadHistoryEntry> _screenReadHistory(Object? value) {
     'duplicate',
     'error',
     'protected',
+    'visual_read',
+    'visual_required',
+    'visual_not_receipt',
+    'visual_unavailable',
+    'model_queued',
+    'model_processing',
+    'model_rejected',
+    'model_failed',
   };
   final history = <_ScreenReadHistoryEntry>[];
   for (final (sequence, entry) in value.indexed) {
@@ -213,7 +228,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
         context,
         title: '开启支付页面读取？',
         message:
-            'PennyPilot 会通过系统无障碍服务读取微信、支付宝、美团和抖音的屏幕可见文字，在本机判断是否为支付结果，生成待确认账单。\n\n只保存识别出的交易字段，不保存或上传整页，不读取密码或输入内容，不截图，也不会代你点击、付款或操作其他应用。\n\n部分页面可能无法读取，不能保证覆盖每笔支付。你可以随时在本页暂停，或在系统设置中撤销授权。',
+            'PennyPilot 会通过系统无障碍服务读取微信、支付宝、美团和抖音的屏幕可见文字，在本机判断是否为支付结果，生成待确认账单。\n\n只保存识别出的交易字段，不读取密码或输入内容，也不会代你点击、付款或操作其他应用。截图补充需在“识别与录入”中单独开启；未开启时不截图，开启后按需在本机识别，不自动上传图片。\n\n部分页面可能无法读取，不能保证覆盖每笔支付。你可以随时在本页暂停，或在系统设置中撤销授权。',
         confirmLabel: '同意并开启',
       );
       if (!confirmed || !mounted) return;

@@ -131,6 +131,8 @@ class VoiceTranscriptionService {
       final config = await configuration.read();
       if (!_current(generation)) return;
       config.validate();
+      // Reject a known protocol/path mismatch before opening the microphone.
+      config.transcriptionUri;
       _sessionConfig = config;
       final permission = await _recorder.requestPermission();
       if (!_current(generation)) return;
@@ -247,47 +249,62 @@ class VoiceTranscriptionService {
     _client = client;
     try {
       final http.BaseRequest request;
-      if (config.provider == 'qwen') {
-        request =
-            http.Request(
-                'POST',
-                Uri.parse('${config.baseUrl}/chat/completions'),
-              )
-              ..headers['Content-Type'] = 'application/json'
-              ..body = jsonEncode({
-                'model': config.model,
-                'messages': [
-                  {
-                    'role': 'user',
-                    'content': [
-                      {
-                        'type': 'input_audio',
-                        'input_audio': {
-                          'data': 'data:audio/wav;base64,${base64Encode(wav)}',
-                        },
+      if (config.usesDashScopeAsr) {
+        request = http.Request('POST', config.transcriptionUri)
+          ..headers['Content-Type'] = 'application/json'
+          ..headers['X-DashScope-SSE'] = 'disable'
+          ..body = jsonEncode({
+            'model': config.model,
+            'input': {
+              'messages': [
+                {
+                  'role': 'user',
+                  'content': [
+                    {
+                      'type': 'input_audio',
+                      'input_audio': {
+                        'data': 'data:audio/wav;base64,${base64Encode(wav)}',
                       },
-                    ],
+                    },
+                  ],
+                },
+              ],
+            },
+            'parameters': {'format': 'wav', 'sample_rate': '16000'},
+          });
+      } else if (config.provider == 'qwen') {
+        request = http.Request('POST', config.transcriptionUri)
+          ..headers['Content-Type'] = 'application/json'
+          ..body = jsonEncode({
+            'model': config.model,
+            'messages': [
+              {
+                'role': 'user',
+                'content': [
+                  {
+                    'type': 'input_audio',
+                    'input_audio': {
+                      'data': 'data:audio/wav;base64,${base64Encode(wav)}',
+                    },
                   },
                 ],
-                'stream': false,
-                'asr_options': {'enable_itn': false},
-              });
+              },
+            ],
+            'stream': false,
+            'asr_options': {'enable_itn': false},
+          });
       } else {
-        request =
-            http.MultipartRequest(
-                'POST',
-                Uri.parse('${config.baseUrl}/audio/transcriptions'),
-              )
-              ..fields['model'] = config.model
-              ..fields['response_format'] = 'json'
-              ..files.add(
-                http.MultipartFile.fromBytes(
-                  'file',
-                  wav,
-                  filename: 'recording.wav',
-                  contentType: MediaType('audio', 'wav'),
-                ),
-              );
+        request = http.MultipartRequest('POST', config.transcriptionUri)
+          ..fields['model'] = config.model
+          ..fields['response_format'] = 'json'
+          ..files.add(
+            http.MultipartFile.fromBytes(
+              'file',
+              wav,
+              filename: 'recording.wav',
+              contentType: MediaType('audio', 'wav'),
+            ),
+          );
       }
       request.headers['Authorization'] = 'Bearer ${config.apiKey}';
       // Never forward a credential to a redirect destination.
@@ -317,7 +334,34 @@ class VoiceTranscriptionService {
         return jsonDecode(utf8.decode(body.takeBytes()));
       })().timeout(requestTimeout);
       Object? text;
-      if (config.provider == 'qwen') {
+      if (config.usesDashScopeAsr) {
+        final output = data is Map ? data['output'] : null;
+        if (output is! Map) {
+          throw const LedgerException(
+            '百炼语音接口返回格式不正确，请检查模型与接口类型。',
+            code: 'SPEECH_RESPONSE',
+          );
+        }
+        final sentence = output['sentence'];
+        if (sentence is Map && sentence['sentence_end'] == false) {
+          throw const LedgerException(
+            '百炼尚未返回完整转写结果，请重新录音。',
+            code: 'SPEECH_RESPONSE',
+          );
+        }
+        text = output['text'];
+        if (text == null &&
+            sentence is Map &&
+            sentence['sentence_end'] == true) {
+          text = sentence['text'];
+        }
+        if (text != null && text is! String) {
+          throw const LedgerException(
+            '百炼语音接口返回格式不正确，请检查模型与接口类型。',
+            code: 'SPEECH_RESPONSE',
+          );
+        }
+      } else if (config.provider == 'qwen') {
         final choices = data is Map ? data['choices'] : null;
         final first = choices is List && choices.isNotEmpty
             ? choices.first

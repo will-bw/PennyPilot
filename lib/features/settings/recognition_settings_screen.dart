@@ -86,7 +86,7 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                 (
                   'screenVisualCaptureEnabled',
                   '本地支付截图补充',
-                  '支付节点缺失时按需截图并在本机识别文字；不自动上传图片。',
+                  '在支付候选页或指定微信空节点窗口按需截图，本机校验成功状态、金额和布局；不自动上传图片，离开后丢弃画面。',
                 ),
                 (
                   'screenCloudParsingEnabled',
