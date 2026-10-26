@@ -47,6 +47,8 @@ shasum -a 256 -c SHA256SUMS
 
 ## 开发
 
+所有开发都在工作分支进行，通过 Pull Request 合并到受保护的 `main`；禁止直接推送、强制推送或删除主分支，管理员同样遵守。具体步骤见 [贡献指南](CONTRIBUTING.md)。
+
 工具链：Flutter 3.47.7 / Dart 3.13.5、JDK 17、Android SDK 36；iOS 需要 macOS、Xcode 和对应模拟器或已配置签名的真机。先配置 `FLUTTER_ROOT` 或把 Flutter 加入 `PATH`，然后运行：
 
 ```sh
