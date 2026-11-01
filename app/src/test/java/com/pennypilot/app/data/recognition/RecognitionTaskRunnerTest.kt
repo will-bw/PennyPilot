@@ -44,6 +44,19 @@ class RecognitionTaskRunnerTest {
     @Test fun `configuration switch before execution never sends old data`() = runTest {
         enqueue(); config = "B"; assertTrue(runner().run("task")); assertEquals(0, calls); assertEquals(0, commits); assertNull(store.get("task"))
     }
+    @Test fun `consent revoked while reading semantic context stops before sending`() = runTest {
+        enqueue()
+        val guarded = RecognitionTaskRunner(store, client, { allowed },
+            { _, _, _, _ -> commits++; true }, reports::add,
+            semanticContext = {
+                allowed = false
+                CaptureSemanticContext(relatedHistory = listOf(CaptureSemanticHistory("小林", "EXPENSE", "expense", 1)))
+            })
+        assertTrue(guarded.run("task"))
+        assertEquals(0, calls)
+        assertEquals(0, commits)
+        assertNull(store.get("task"))
+    }
     @Test fun `configuration switch during inference never commits`() = runTest {
         enqueue(); val old = response; response = { config = "B"; old() }
         assertTrue(runner().run("task")); assertEquals(1, calls); assertEquals(0, commits); assertNull(store.get("task"))

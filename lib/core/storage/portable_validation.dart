@@ -439,8 +439,8 @@ const _defaultSettings = <String, dynamic>{
   'recognitionPreferencesJson': '[]',
   'screenCloudParsingEnabled': false,
   'screenVisualCaptureEnabled': false,
-  'captureAutoRecordEnabled': false,
-  'activeInputAutoSaveEnabled': false,
+  'captureAutoRecordEnabled': true,
+  'activeInputAutoSaveEnabled': true,
   'cloudImageParsingEnabled': false,
 };
 

@@ -11,6 +11,20 @@ import 'models.dart';
 
 export 'ledger_repository.dart' show LedgerException;
 
+@immutable
+class RecognitionSaveReceipt {
+  RecognitionSaveReceipt({
+    required this.revision,
+    required List<LedgerTransaction> transactions,
+  }) : transactions = List.unmodifiable(transactions),
+       ids = List.unmodifiable(transactions.map((item) => item.id));
+
+  final int revision;
+  final List<int> ids;
+  final List<LedgerTransaction> transactions;
+  int get count => ids.length;
+}
+
 class LedgerController extends ChangeNotifier {
   LedgerController({LedgerRepository? repository, DateTime Function()? clock})
     : _repository = repository ?? CrossPlatformLedgerRepository(),
@@ -64,6 +78,13 @@ class LedgerController extends ChangeNotifier {
 
   List<String> recognitionQuestions = [];
   String? recognitionNotice;
+  RecognitionSaveReceipt? _lastRecognitionSave;
+  final Set<String> _undoneRecognitionOperations = {};
+  RecognitionSaveReceipt? get lastRecognitionSave => _lastRecognitionSave;
+  bool get canUndoRecognitionSave =>
+      _lastRecognitionSave != null &&
+      _lastRecognitionSave!.revision == revision &&
+      !isBusy;
   List<LedgerTransaction> _drafts = [];
   int _draftGeneration = 0;
   List<LedgerTransaction> get drafts => List.unmodifiable(_drafts);
@@ -201,6 +222,8 @@ class LedgerController extends ChangeNotifier {
     _generation++;
     _draftGeneration++;
     _drafts = [];
+    _lastRecognitionSave = null;
+    _undoneRecognitionOperations.clear();
     _messages = [];
     _agentSession = {};
     agentSessions = [];
@@ -481,6 +504,9 @@ class LedgerController extends ChangeNotifier {
     bool confirmPending = false,
   }) async {
     _validateTransaction(transaction);
+    final previous = transactions
+        .where((item) => item.id == transaction.id)
+        .firstOrNull;
     if (transaction.id == 0 &&
         transaction.effectiveKind == 'unknown' &&
         const {
@@ -504,6 +530,15 @@ class LedgerController extends ChangeNotifier {
         ledger: true,
       ),
     );
+    if (transaction.merchant?.isNotEmpty == true &&
+        (previous == null ||
+            previous.merchant != transaction.merchant ||
+            previous.type != transaction.type ||
+            previous.categoryId != transaction.categoryId ||
+            previous.effectiveKind != transaction.effectiveKind ||
+            previous.accountTag != transaction.accountTag)) {
+      await _rememberCategory(transaction);
+    }
     return integer(result['id'], 'id');
   }
 
@@ -637,13 +672,14 @@ class LedgerController extends ChangeNotifier {
         _validateTransaction(item);
       }
       if (sessionId != null) {
-        final reviewed = _drafts
+        final protected = [..._drafts, ...transactions]
             .where(
               (t) =>
                   t.recognitionMetadata['requestSessionId'] == sessionId &&
-                  t.recognitionMetadata['reviewed'] == true,
+                  (t.id > 0 || t.recognitionMetadata['reviewed'] == true),
             )
             .map((t) => t.recognitionMetadata['operationId'])
+            .whereType<String>()
             .toSet();
         _drafts.removeWhere(
           (t) =>
@@ -651,20 +687,38 @@ class LedgerController extends ChangeNotifier {
               t.recognitionMetadata['reviewed'] != true,
         );
         items.removeWhere(
-          (t) => reviewed.contains(t.recognitionMetadata['operationId']),
+          (t) => protected.contains(t.recognitionMetadata['operationId']),
         );
       }
+      items.removeWhere(
+        (t) => _undoneRecognitionOperations.contains(
+          t.recognitionMetadata['operationId'],
+        ),
+      );
       _drafts = [..._drafts, ...items];
-      recognitionNotice = items.isEmpty
-          ? '没有新增账目，请查看下面的提示。'
-          : '识别到 ${items.length} 笔，核对后保存。';
-      return (items: items, auto: result['autoSaveEligible'] == true);
+      recognitionNotice = items.isNotEmpty
+          ? '已整理 ${items.length} 笔，确认后即可保存。'
+          : recognitionQuestions.isNotEmpty
+          ? '再补充下面的信息，就能继续整理账单。'
+          : '这次没有新的账单，已保存或已核对的记录已保留。';
+      return (
+        items: items,
+        eligible: items.where((item) {
+          final eligible = item.recognitionMetadata['autoSaveEligible'];
+          return eligible == true ||
+              (eligible == null && result['autoSaveEligible'] == true);
+        }).toList(),
+      );
     });
-    if (parsed.auto &&
-        settings['activeInputAutoSaveEnabled'] == true &&
-        parsed.items.isNotEmpty) {
-      await saveDrafts(items: parsed.items);
-      recognitionNotice = '已自动保存 ${parsed.items.length} 笔，可在账本中修改或删除。';
+    if (settings['activeInputAutoSaveEnabled'] != false &&
+        parsed.eligible.isNotEmpty) {
+      final count = await saveDrafts(
+        items: parsed.eligible,
+        rememberRecognitionSave: true,
+      );
+      recognitionNotice = recognitionQuestions.isEmpty
+          ? '已记 $count 笔，可修改或撤销。'
+          : '已记 $count 笔，其余信息可继续补充。';
       _notify();
     }
     return parsed.items;
@@ -702,7 +756,9 @@ class LedgerController extends ChangeNotifier {
         'questions': <String>[],
       }),
     );
-    if (prior.categoryId != value.categoryId &&
+    if ((prior.categoryId != value.categoryId ||
+            prior.effectiveKind != value.effectiveKind ||
+            prior.accountTag != value.accountTag) &&
         value.merchant?.isNotEmpty == true) {
       unawaited(_rememberCategory(value));
     }
@@ -721,6 +777,7 @@ class LedgerController extends ChangeNotifier {
     _drafts = [];
     recognitionQuestions = [];
     recognitionNotice = null;
+    _undoneRecognitionOperations.clear();
     _notify();
   }
 
@@ -739,6 +796,8 @@ class LedgerController extends ChangeNotifier {
         'merchant': item.merchant,
         'type': item.type.wireValue,
         'category': categoryById(item.categoryId)?.name,
+        'businessKind': item.effectiveKind,
+        'accountTag': item.accountTag,
       });
       await updateSettings({
         'recognitionPreferencesJson': jsonEncode(
@@ -755,6 +814,7 @@ class LedgerController extends ChangeNotifier {
   Future<int> saveDrafts({
     List<LedgerTransaction>? items,
     int? expectedRevision,
+    bool rememberRecognitionSave = false,
   }) => _operation('saveTransactions', () async {
     _requireLoaded();
     if (expectedRevision != null && expectedRevision != revision) {
@@ -772,6 +832,32 @@ class LedgerController extends ChangeNotifier {
     }
     final generation = _generation;
     final currentRevision = revision;
+    final existingIds = transactions.map((item) => item.id).toSet();
+    final savedIds = <int>{};
+    if (rememberRecognitionSave) _lastRecognitionSave = null;
+    void rememberSave() {
+      if (!rememberRecognitionSave ||
+          generation != _generation ||
+          currentRevision != revision) {
+        return;
+      }
+      final inserted = transactions
+          .where((item) => savedIds.contains(item.id))
+          // New rows start at version zero. A concurrent edit before refresh
+          // must make undo fail rather than become part of this receipt.
+          .map(
+            (item) =>
+                LedgerTransaction.fromMap({...item.toMap(), 'editVersion': 0}),
+          )
+          .toList();
+      if (inserted.isNotEmpty) {
+        _lastRecognitionSave = RecognitionSaveReceipt(
+          revision: currentRevision,
+          transactions: inserted,
+        );
+      }
+    }
+
     var saved = 0;
     try {
       while (saved < saving.length) {
@@ -780,12 +866,19 @@ class LedgerController extends ChangeNotifier {
           saved,
           (saved + 100).clamp(0, saving.length),
         );
-        await _repository.invoke('saveTransactions', {
+        final result = await _repository.invoke('saveTransactions', {
           'revision': currentRevision,
           'transactions': batch
               .map((item) => item.copyWith(id: 0).toMap())
               .toList(),
         });
+        if (result is Map && result['ids'] is List) {
+          savedIds.addAll(
+            (result['ids'] as List).whereType<int>().where(
+              (id) => !existingIds.contains(id),
+            ),
+          );
+        }
         saved += batch.length;
         _requireCurrent(generation);
         _drafts = _drafts.where((draft) => !batch.contains(draft)).toList();
@@ -797,6 +890,7 @@ class LedgerController extends ChangeNotifier {
       } catch (_) {
         /* Keep the original write error. */
       }
+      rememberSave();
       if (saved > 0) {
         throw LedgerException(
           '已保存 $saved 笔，剩余 ${saving.length - saved} 笔尚未保存。${error is LedgerException ? error.message : '请重试剩余账单。'}',
@@ -806,8 +900,46 @@ class LedgerController extends ChangeNotifier {
       rethrow;
     }
     await refresh();
+    rememberSave();
     return saved;
   });
+
+  Future<int> undoLastRecognitionSave() =>
+      _operation('undoRecognitionSave', () async {
+        _requireLoaded();
+        final receipt = _lastRecognitionSave;
+        if (receipt == null) throw const LedgerException('没有可撤销的自动记账。');
+        if (receipt.revision != revision) {
+          throw const LedgerException('账本已恢复，这次记账不能撤销。', code: 'STALE_LEDGER');
+        }
+        final generation = _generation;
+        final result = stringMap(
+          await _repository.invoke('undoRecognitionSave', {
+            'revision': receipt.revision,
+            'transactions': [
+              for (final item in receipt.transactions)
+                {
+                  'id': item.id,
+                  'editVersion': item.editVersion,
+                  'operationId': item.recognitionMetadata['operationId'],
+                },
+            ],
+          }),
+        );
+        _requireCurrent(generation);
+        final count = integer(result['count'], 'count');
+        _undoneRecognitionOperations.addAll(
+          receipt.transactions
+              .map((item) => item.recognitionMetadata['operationId'])
+              .whereType<String>(),
+        );
+        if (identical(_lastRecognitionSave, receipt)) {
+          _lastRecognitionSave = null;
+        }
+        await refresh();
+        recognitionNotice = '已撤销 $count 笔自动记账。';
+        return count;
+      });
 
   Future<void> loadAgentState() async {
     if (_snapshot == null ||
@@ -924,6 +1056,7 @@ class LedgerController extends ChangeNotifier {
         if (text.isEmpty) throw const LedgerException('请输入想了解的账本问题。');
         final generation = _generation;
         var prior = _messages.where((message) => !message.isError).toList();
+        final existingIds = transactions.map((item) => item.id).toSet();
         if (retry && prior.isNotEmpty && prior.last.role == 'user') {
           prior.removeLast();
         }
@@ -939,6 +1072,30 @@ class LedgerController extends ChangeNotifier {
             }),
           );
           _requireCurrent(generation);
+          final autoSavedIds = (result['autoSavedIds'] as List? ?? [])
+              .whereType<int>()
+              .where((id) => !existingIds.contains(id))
+              .toSet();
+          if (autoSavedIds.isNotEmpty) {
+            await refresh();
+            _requireCurrent(generation);
+            final inserted = transactions
+                .where((item) => autoSavedIds.contains(item.id))
+                .toList();
+            if (inserted.isNotEmpty) {
+              _lastRecognitionSave = RecognitionSaveReceipt(
+                revision: revision,
+                transactions: inserted
+                    .map(
+                      (item) => LedgerTransaction.fromMap({
+                        ...item.toMap(),
+                        'editVersion': 0,
+                      }),
+                    )
+                    .toList(),
+              );
+            }
+          }
           final response = ChatMessage(
             role: 'assistant',
             text: result['answer'] as String? ?? '暂未收到回答，请重试。',

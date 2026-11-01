@@ -42,6 +42,13 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE source IN ('MANUAL', 'AI_TEXT', 'AI_VOICE', 'AI_IMAGE', 'BILL_IMPORT') AND status != 'IGNORED' AND occurred_at BETWEEN :start AND :end AND amount = :amount AND type = :type ORDER BY occurred_at DESC, id DESC")
     suspend fun nonCapturedTransactionsNear(start: Long, end: Long, amount: Long, type: TxType): List<TransactionEntity>
 
+    @Query("""SELECT * FROM transactions
+        WHERE merchant = :merchant AND type = :type AND status = 'CONFIRMED' AND duplicate_of IS NULL
+        AND NOT (edit_version = 0 AND source IN ('NOTIFICATION', 'ACCESSIBILITY') AND business_kind = 'transfer'
+            AND (COALESCE(note, '') LIKE '%用途暂按资金转移%' OR COALESCE(metadata_json, '') LIKE '%用途暂按资金转移%'))
+        ORDER BY occurred_at DESC, id DESC LIMIT 12""")
+    suspend fun relatedCaptureHistory(merchant: String, type: TxType): List<TransactionEntity>
+
     @Update
     suspend fun updateCaptureEvidence(evidence: CaptureEvidenceEntity)
 

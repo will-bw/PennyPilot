@@ -135,6 +135,7 @@ class PortableLedgerStore implements LedgerRepository {
       case 'saveTransaction':
       case 'saveTransactions':
       case 'deleteTransaction':
+      case 'undoRecognitionSave':
       case 'setTransactionStatus':
       case 'saveCategory':
       case 'deleteCategory':
@@ -249,6 +250,31 @@ class PortableLedgerStore implements LedgerRepository {
           ids.add(await _saveTransaction(database, row));
         }
         return {'ids': ids};
+      case 'undoRecognitionSave':
+        final rows = _maps(arguments['transactions'], '自动记账记录', max: 100);
+        _require(rows.isNotEmpty, '没有可以撤销的自动记账。');
+        final seen = <int>{};
+        for (final expected in rows) {
+          final id = _int(expected, 'id', min: 1);
+          final row = await _existing(database, 'transactions', id, '账目');
+          _require(
+            seen.add(id) &&
+                const {
+                  'AI_TEXT',
+                  'AI_VOICE',
+                  'AI_IMAGE',
+                }.contains(row['source']) &&
+                row['operationKey'] ==
+                    _text(expected, 'operationId', max: 2000) &&
+                (row['editVersion'] ?? 0) ==
+                    _int(expected, 'editVersion', min: 0),
+            '账单已被修改，无法整批撤销，请在流水中处理。',
+          );
+        }
+        for (final expected in rows) {
+          await _mutate(database, 'deleteTransaction', expected);
+        }
+        return {'count': rows.length};
       case 'deleteTransaction':
         final id = _int(arguments, 'id', min: 1);
         final deleted = await _existing(database, 'transactions', id, '账目');

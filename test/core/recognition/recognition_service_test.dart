@@ -15,8 +15,10 @@ void main() {
     String provider = 'qwen',
     String visionProvider = '',
     String reviewProvider = '',
+    List<LedgerTransaction> transactions = const [],
   }) => LedgerSnapshot(
     revision: 0,
+    transactions: transactions,
     categories: const [LedgerCategory(id: 1, name: '餐饮', type: TxType.expense)],
     settings: {
       'activeProvider': provider,
@@ -100,11 +102,11 @@ void main() {
       'mimeType': 'image/png',
     }, snapshot(image: true));
     expect((result['transactions'] as List).single['source'], 'AI_IMAGE');
-    expect(result['autoSaveEligible'], false);
+    expect(result['autoSaveEligible'], true);
     await service.dispose();
   });
   test(
-    'review model is called only for unresolved evidence and cannot auto save',
+    'review resolves missing facts without blocking automatic recording',
     () async {
       final models = <String>[];
       final service = SharedAiService(
@@ -115,7 +117,7 @@ void main() {
           return completion({
             'intent': 'record',
             'proposals': [
-              proposal(type: models.length == 1 ? 'UNKNOWN' : 'EXPENSE'),
+              {...proposal(), 'amount': models.length == 1 ? null : 1200},
             ],
           });
         }),
@@ -125,7 +127,7 @@ void main() {
       }, snapshot(review: 'review-model'));
       expect(models, ['text-model', 'review-model']);
       expect((result['transactions'] as List).length, 1);
-      expect(result['autoSaveEligible'], false);
+      expect(result['autoSaveEligible'], true);
       await service.dispose();
     },
   );
@@ -226,7 +228,9 @@ void main() {
         client: MockClient(
           (_) async => completion({
             'intent': 'record',
-            'proposals': [proposal(type: 'UNKNOWN')],
+            'proposals': [
+              {...proposal(), 'amount': null},
+            ],
           }),
         ),
       );
@@ -243,7 +247,162 @@ void main() {
         },
       );
       expect(nativeCalls, 1);
-      expect(result['autoSaveEligible'], false);
+      expect(result['autoSaveEligible'], true);
+      await service.dispose();
+    },
+  );
+  test(
+    'review retains valid first-pass drafts when it only resolves another row',
+    () async {
+      var calls = 0;
+      final service = SharedAiService(
+        credentials: MemoryCredentials(),
+        now: () => now,
+        client: MockClient((request) async {
+          calls++;
+          if (calls == 2) {
+            final messages = jsonDecode(request.body)['messages'] as List;
+            expect(messages[messages.length - 2]['role'], 'assistant');
+          }
+          return completion({
+            'intent': 'record',
+            'proposals': calls == 1
+                ? [
+                    proposal(),
+                    {...proposal(amount: 500, quote: '5'), 'amount': null},
+                  ]
+                : [proposal(amount: 500, quote: '5')],
+          });
+        }),
+      );
+      final result = await service.recognizeInput({
+        'text': '午饭12元，午饭5元',
+      }, snapshot(review: 'review-model'));
+      expect(calls, 2);
+      expect(
+        (result['transactions'] as List).map((row) => row['amount']).toSet(),
+        {1200, 500},
+      );
+      expect(result['autoSaveEligible'], true);
+      await service.dispose();
+    },
+  );
+  test(
+    'review quoting a wider phrase does not duplicate an existing draft',
+    () async {
+      var calls = 0;
+      final service = SharedAiService(
+        credentials: MemoryCredentials(),
+        now: () => now,
+        client: MockClient((_) async {
+          calls++;
+          return completion({
+            'intent': 'record',
+            'proposals': [
+              {
+                ...proposal(amount: 1700),
+                'fieldEvidence': {
+                  'amount': {
+                    'quote': calls == 1 ? '17元' : '花了17元',
+                    'source': 'user',
+                  },
+                  'type': {
+                    'quote': calls == 1 ? '吃盖饭' : '盖饭',
+                    'source': 'user',
+                  },
+                },
+              },
+              if (calls == 1) {...proposal(), 'amount': null},
+            ],
+          });
+        }),
+      );
+      final result = await service.recognizeInput({
+        'text': '昨天吃盖饭花了17元，还有一笔忘了金额',
+      }, snapshot(review: 'review-model'));
+      expect(calls, 2);
+      expect(result['transactions'], hasLength(1));
+      expect((result['transactions'] as List).single['amount'], 1700);
+      await service.dispose();
+    },
+  );
+  test('image review preserves another already valid payment', () async {
+    var calls = 0;
+    final service = SharedAiService(
+      credentials: MemoryCredentials(),
+      now: () => now,
+      client: MockClient((_) async {
+        calls++;
+        Map<String, dynamic> imageRow(int amount, String quote) => {
+          ...proposal(amount: amount, quote: quote, status: 'completed'),
+          'occurred_at': '2026-10-23',
+        };
+        return completion({
+          'intent': 'record',
+          'proposals': calls == 1
+              ? [
+                  imageRow(1200, '12'),
+                  {...imageRow(500, '5'), 'amount': null},
+                ]
+              : [imageRow(500, '5')],
+        });
+      }),
+    );
+    final result = await service.recognizeInput({
+      'imageBase64': 'aW1hZ2U=',
+      'mimeType': 'image/png',
+    }, snapshot(image: true, review: 'review-model'));
+    expect(calls, 2);
+    expect(
+      (result['transactions'] as List).map((row) => row['amount']).toSet(),
+      {1200, 500},
+    );
+    expect(result['autoSaveEligible'], true);
+    await service.dispose();
+  });
+  test(
+    'active input receives only a bounded set of related merchant habits',
+    () async {
+      final service = SharedAiService(
+        credentials: MemoryCredentials(),
+        now: () => now,
+        client: MockClient((request) async {
+          final prompt =
+              jsonDecode(request.body)['messages'][0]['content'] as String;
+          expect(RegExp('"merchant":"盖饭店"').allMatches(prompt), hasLength(8));
+          expect(prompt, contains('微信余额'));
+          expect(prompt, isNot(contains('无关的工资单位')));
+          return completion({
+            'intent': 'record',
+            'proposals': [proposal()],
+          });
+        }),
+      );
+      await service.recognizeInput(
+        {'text': '盖饭店午饭12元'},
+        snapshot(
+          transactions: [
+            for (var i = 0; i < 14; i++)
+              LedgerTransaction(
+                id: i + 1,
+                amountFen: 1200,
+                type: TxType.expense,
+                categoryId: 1,
+                occurredAt: now.subtract(Duration(days: i)),
+                merchant: '盖饭店',
+                accountTag: '微信余额',
+              ),
+            LedgerTransaction(
+              id: 100,
+              amountFen: 1000000,
+              type: TxType.income,
+              categoryId: 1,
+              occurredAt: now,
+              merchant: '无关的工资单位',
+            ),
+          ],
+        ),
+      );
       await service.dispose();
     },
   );
@@ -259,7 +418,9 @@ void main() {
           changed = true;
           return completion({
             'intent': 'record',
-            'proposals': [proposal(type: 'UNKNOWN')],
+            'proposals': [
+              {...proposal(), 'amount': null},
+            ],
           });
         }),
       );

@@ -330,6 +330,28 @@ class CrossPlatformLedgerRepository
           ledger: current,
           model: model,
           guard: guard,
+          autoRecord:
+              method != 'ask' ||
+                  current.settings['activeInputAutoSaveEnabled'] == false
+              ? null
+              : (transaction) async {
+                  await guard();
+                  final latest = await snapshot();
+                  if (latest.settings['activeInputAutoSaveEnabled'] == false) {
+                    return null;
+                  }
+                  await guard();
+                  final saved = stringMap(
+                    await _store.invoke('saveTransaction', {
+                      ...transaction,
+                      'revision': current.revision,
+                    }),
+                  );
+                  return (
+                    id: integer(saved['id'], 'id'),
+                    ledger: await snapshot(),
+                  );
+                },
         );
         // A user stop is a normal persisted outcome, not a stale-ledger result.
         await _guardAiOperation(initial, generation);

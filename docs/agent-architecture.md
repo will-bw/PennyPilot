@@ -51,7 +51,7 @@ Android/iOS、ChatGPT/DeepSeek/Qwen 使用同一循环。Android ChatGPT 仅把�
 | `search_memory` / `remember` / `forget_memory` | 检索、按语义 key 更新和删除长期记忆 |
 | `search_conversation` / `read_conversation` | 搜索历史原文、读取命中附近消息 |
 | `update_plan` | 公开的简短任务步骤与完成状态 |
-| `propose_transaction` | 准备新增/编辑账单的提案 |
+| `propose_transaction` | 新增在自动模式下经当前输入校验后直接保存；编辑或关闭自动保存时准备提案 |
 | `propose_delete_transaction` | 准备单笔删除提案 |
 | `propose_budget` | 准备月预算修改提案 |
 
@@ -68,7 +68,9 @@ Android/iOS、ChatGPT/DeepSeek/Qwen 使用同一循环。Android ChatGPT 仅把�
 
 ## 写操作、停止与恢复
 
-模型只能创建提案，不能直接提交账本写操作。确认入口只接受存储中的提案 id 与决定，不接受界面临时拼装的任意模型载荷。新增账目携带稳定 operationId，更新/删除检查目标版本。提案已处理则拒绝重复确认。
+新增收支默认由运行时复用识别协议核对本次金额依据、日期、否定及计划语义，校验后自动保存，返回实际记录 ID 与 `applied`。同轮后续查询使用刷新后的账本，同轮相同调用复用已完成结果。关闭自动保存时保留提案；编辑、删除、预算变更仍需核对。确认入口只接受存储中的提案 id 与决定。新增账目携带稳定 operationId，更新/删除检查目标版本，已处理操作不重复执行。
+
+本轮自动新增的真实 ID 随任务结果返回，后续模型失败也保留。界面据此提供撤销，只删除本轮新增且未被人工编辑的记录；撤销写入墓碑，防止迟到结果重建。自动写入仅对真实用户 `ask` 运行启用，不把提案执行后的内部回执当成新的记账授权。
 
 确认前记录 applying，成功记录 applied；进程中断留下 applying 时显示 uncertain，要求先查账核对，不假装具备跨两个数据库的原子事务，也不自动重复写入。应用重启修补未配对的工具调用为 interrupted 结果，后续消息始终保持工具协议配对。
 

@@ -14,6 +14,19 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class NotificationHelperTest {
+    @Test fun `recorded payment offers undo and edit without another confirmation`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        NotificationHelper.createChannels(context)
+        NotificationHelper.postCaptureNotification(context, 44, "automatically-recorded", "咖啡17元", "已自动记账", recorded = true)
+        val notification = manager.activeNotifications.single { it.tag == "automatically-recorded" }.notification
+        assertEquals(listOf("撤销", "修改"), notification.actions.map { it.title.toString() })
+        val undo = shadowOf(notification.actions.first().actionIntent).savedIntent
+        assertEquals(NotificationActionReceiver.ACTION_UNDO, undo.action)
+        assertEquals("automatically-recorded", undo.getStringExtra(NotificationActionReceiver.EXTRA_CAPTURE_EVENT_KEY))
+        assertEquals(com.pennypilot.app.data.db.LedgerRevision.current,
+            undo.getLongExtra(NotificationActionReceiver.EXTRA_LEDGER_REVISION, -1))
+    }
     @Test
     fun `suspected duplicate requires opening record instead of one tap confirmation`() {
         val context = ApplicationProvider.getApplicationContext<Context>()

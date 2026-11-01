@@ -3,11 +3,17 @@ import 'dart:convert';
 
 import '../ledger_repository.dart';
 import '../models.dart';
+import '../recognition/recognition_protocol.dart';
 import 'agent_context.dart';
 import 'agent_models.dart';
 import 'agent_prompt.dart';
 import 'agent_store.dart';
 import 'ledger_agent_tools.dart';
+
+typedef AgentAutoRecord =
+    Future<({int id, LedgerSnapshot ledger})?> Function(
+      Map<String, dynamic> transaction,
+    );
 
 class LedgerAgentRuntime {
   LedgerAgentRuntime({
@@ -114,6 +120,7 @@ class LedgerAgentRuntime {
     required LedgerSnapshot ledger,
     required AgentModel model,
     required Future<void> Function() guard,
+    AgentAutoRecord? autoRecord,
   }) async {
     _requireIdle();
     if (question.trim().isEmpty || question.length > 16000) {
@@ -144,6 +151,7 @@ class LedgerAgentRuntime {
     }
 
     AgentSession? session;
+    final autoSavedIds = <int>{};
     try {
       await check();
       session = await active(ledger.revision);
@@ -196,7 +204,11 @@ class LedgerAgentRuntime {
             : (b['updatedAt'] as int).compareTo(a['updatedAt'] as int);
       });
       final memories = allMemories.take(8).toList();
-      final system = ledgerAgentPrompt(ledger, started);
+      final system = ledgerAgentPrompt(
+        ledger,
+        started,
+        autoRecordEnabled: autoRecord != null,
+      );
       final cancellableModel = AgentModel(
         identity: model.identity,
         complete: (messages, tools) =>
@@ -206,6 +218,7 @@ class LedgerAgentRuntime {
       String? waitingQuestion;
       var calls = 0, correctiveAttempts = 0;
       final repeats = <String, int>{};
+      final autoRecorded = <String, Map<String, dynamic>>{};
       for (var step = 1; step <= settings.maxSteps; step++) {
         await check();
         void progress(String text) => onProgress?.call({
@@ -311,6 +324,7 @@ class LedgerAgentRuntime {
             'answer': reply.text,
             'isError': false,
             'chartData': ?chart,
+            if (autoSavedIds.isNotEmpty) 'autoSavedIds': autoSavedIds.toList(),
             ...await state(ledger.revision),
           };
         }
@@ -352,7 +366,27 @@ class LedgerAgentRuntime {
             if (repeats[signature]! > 3) {
               throw const FormatException('同一调用已重复3次，请使用已有结果或改变查询方法');
             }
-            result = await tools.execute(name, args);
+            final recorded = autoRecorded[signature];
+            result = recorded ?? await tools.execute(name, args);
+            if (recorded == null &&
+                autoRecord != null &&
+                name == 'propose_transaction' &&
+                args['transaction_id'] == null) {
+              result = await _autoRecord(
+                session: session,
+                tools: tools,
+                question: question,
+                args: args,
+                result: result,
+                now: started,
+                record: autoRecord,
+                guard: check,
+              );
+              if (result['status'] == 'applied') {
+                autoRecorded[signature] = result;
+                autoSavedIds.add(result['transaction_id'] as int);
+              }
+            }
             await check();
             trace['status'] = 'completed';
             trace['evidenceId'] = result['evidence_id'];
@@ -411,6 +445,7 @@ class LedgerAgentRuntime {
           return {
             'answer': waitingQuestion,
             'isError': false,
+            if (autoSavedIds.isNotEmpty) 'autoSavedIds': autoSavedIds.toList(),
             ...await state(ledger.revision),
           };
         }
@@ -440,6 +475,7 @@ class LedgerAgentRuntime {
       return {
         'answer': message,
         'isError': true,
+        if (autoSavedIds.isNotEmpty) 'autoSavedIds': autoSavedIds.toList(),
         ...await state(ledger.revision),
       };
     } finally {
@@ -451,7 +487,132 @@ class LedgerAgentRuntime {
     }
   }
 
-  /// Only this method can apply a stored proposal. UI sends its id and decision,
+  Future<Map<String, dynamic>> _autoRecord({
+    required AgentSession session,
+    required LedgerAgentTools tools,
+    required String question,
+    required Map<String, dynamic> args,
+    required Map<String, dynamic> result,
+    required DateTime now,
+    required AgentAutoRecord record,
+    required Future<void> Function() guard,
+  }) async {
+    final action = session.actions.singleWhere(
+      (a) => a['id'] == result['action_id'],
+    );
+    final payload = agentMap(agentMap(action['payload'])['transaction']);
+    final evidence = args['evidence'] as String;
+    final amountEvidence = _amountEvidence(evidence, payload['amount'] as int);
+    final category = tools.ledger.categories.singleWhere(
+      (c) => c.id == payload['categoryId'],
+    );
+    final queryOnly =
+        RegExp(r'^(?:帮我)?(?:查|看|分析|统计|对比|预算)|[?？吗么]\s*$').hasMatch(question) &&
+        !RegExp(r'记一笔|记下|记账|帮我记|补记|录入|新增|添加').hasMatch(question);
+    final checked = RecognitionProtocol.validate(
+      {
+        'intent': queryOnly ? 'query' : 'record',
+        'proposals': [
+          {
+            'amount': payload['amount'],
+            'currency': 'CNY',
+            'type': payload['type'],
+            'businessKind': payload['businessKind'],
+            'paymentStatus': 'declared',
+            'category': category.name,
+            'merchant': payload['merchant'],
+            'accountTag': payload['accountTag'],
+            'note': payload['note'],
+            'occurred_at': LedgerAgentTools.day(
+              DateTime.fromMillisecondsSinceEpoch(payload['occurredAt'] as int),
+            ),
+            'fieldEvidence': {
+              'amount': {'quote': amountEvidence, 'source': 'user'},
+              'type': {'quote': evidence, 'source': 'inference'},
+            },
+          },
+        ],
+      },
+      snapshot: tools.ledger,
+      input: question,
+      source: 'AI_TEXT',
+      now: now,
+      operationId: 'agent:${action['id']}',
+    );
+    final drafts = checked['transactions'] as List;
+    if (drafts.length != 1 || (checked['questions'] as List).isNotEmpty) {
+      action['status'] = 'invalid';
+      throw FormatException((checked['questions'] as List).join('；'));
+    }
+    final draft = agentMap(drafts.single);
+    final metadata = agentMap(jsonDecode(payload['metadataJson'] as String));
+    final inferred = agentMap(jsonDecode(draft['metadataJson'] as String));
+    final transaction = {
+      ...payload,
+      ...draft,
+      'id': 0,
+      'metadataJson': jsonEncode({
+        ...inferred,
+        ...metadata,
+        'assumptions': {
+          ...inferred['assumptions'] as List,
+          ...metadata['assumptions'] as List,
+        }.toList(),
+        'autoRecorded': true,
+      }),
+    };
+    action['payload'] = {'transaction': transaction};
+    action['title'] =
+        '新增 ${LedgerAgentTools.day(DateTime.fromMillisecondsSinceEpoch(transaction['occurredAt'] as int))} ${category.name} ${formatMoney(transaction['amount'] as int)} 元';
+    action['status'] = 'applying';
+    await _save(session);
+    try {
+      await guard();
+      final saved = await record(transaction);
+      if (saved == null) {
+        action['status'] = 'pending';
+        return result;
+      }
+      tools.ledger = saved.ledger;
+      final observation = await tools.execute('get_transaction', {
+        'transaction_id': saved.id,
+      });
+      action['status'] = 'applied';
+      action['transactionId'] = saved.id;
+      await _save(session);
+      return {
+        ...result,
+        ...observation,
+        'status': 'applied',
+        'title': action['title'],
+        'transaction_id': saved.id,
+        'instruction': '已实际保存到账本，可继续查询；不要再要求确认这笔新增。',
+      };
+    } catch (_) {
+      action['status'] = 'uncertain';
+      await _save(session);
+      rethrow;
+    }
+  }
+
+  static String _amountEvidence(String evidence, int amount) {
+    final tokens = RegExp(
+      r'\d+(?:,\d{3})*(?:\.\d{1,2})?|[零〇一二两三四五六七八九十百千万]+(?:(?:元|块|点)[零〇一二两三四五六七八九]+)?',
+    );
+    for (final match in tokens.allMatches(evidence)) {
+      if (!RecognitionProtocol.amountMatchesQuote(amount, match[0]!)) continue;
+      final after = evidence.substring(match.end);
+      final before = evidence.substring(0, match.start);
+      if (RegExp(r'^\s*(?:年|月|日|号|天|点|时|分|秒|人|位|次|笔|份|[:：])').hasMatch(after) ||
+          RegExp(r'\d[:：]\s*$').hasMatch(before)) {
+        continue;
+      }
+      return match[0]!;
+    }
+    return '';
+  }
+
+  /// Applies stored changes requiring review. UI sends its id and decision,
   /// never a payload chosen by the model or UI. Ledger generation/version checks
   /// remain in the ledger repository; new records use a stable operation id.
   Future<String> resolve({

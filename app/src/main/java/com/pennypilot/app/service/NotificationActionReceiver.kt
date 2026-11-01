@@ -14,8 +14,10 @@ class NotificationActionReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_CONFIRM = "com.pennypilot.app.CONFIRM_TX"
         const val ACTION_IGNORE = "com.pennypilot.app.IGNORE_TX"
+        const val ACTION_UNDO = "com.pennypilot.app.UNDO_TX"
         const val EXTRA_TX_ID = "tx_id"
         const val EXTRA_CAPTURE_EVENT_KEY = "capture_event_key"
+        const val EXTRA_LEDGER_REVISION = "ledger_revision"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -26,6 +28,7 @@ class NotificationActionReceiver : BroadcastReceiver() {
         val status = when (intent.action) {
             ACTION_CONFIRM -> TxStatus.CONFIRMED
             ACTION_IGNORE -> TxStatus.IGNORED
+            ACTION_UNDO -> null
             else -> return
         }
 
@@ -36,7 +39,10 @@ class NotificationActionReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val updated = dao.updateCapturedStatus(txId, eventKey, status)
+                val updated = if (intent.action == ACTION_UNDO) {
+                    if (com.pennypilot.app.data.db.RecognitionSaveUndo.undoCaptured(db,
+                            intent.getLongExtra(EXTRA_LEDGER_REVISION, -1), txId, eventKey)) 1 else 0
+                } else dao.updateCapturedStatus(txId, eventKey, requireNotNull(status))
                 if (updated > 0) {
                     NotificationHelper.cancelCaptureNotification(context, txId, eventKey)
                 }

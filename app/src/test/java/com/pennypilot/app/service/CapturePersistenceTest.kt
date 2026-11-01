@@ -46,6 +46,70 @@ class CapturePersistenceTest {
         evidence: CaptureEvidence = evidence(), transaction: TransactionEntity = tx()
     ): CaptureResult = CapturePersistence.capture(db, LedgerRevision.current, transaction, evidence)
 
+    @Test fun `AI semantics enrich one event and promote the untouched pending record`() = runTest {
+        val initial = tx().copy(businessKind = "unknown", metadataJson = """{"scene":"transfer_sent"}""")
+        val inserted = capture(transaction = initial) as CaptureResult.Inserted
+        val resolved = initial.copy(categoryId = 2, businessKind = "expense", status = TxStatus.CONFIRMED,
+            accountTag = "微信", note = "晚餐", metadataJson = """{"semanticBusinessKind":"expense","assumptions":["按餐饮消费记录"]}""")
+        assertEquals(CaptureResult.Enriched(inserted.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, resolved, evidence(), enrichSemantics = true))
+        val saved = db.transactionDao().getById(inserted.transactionId)!!
+        assertEquals(1, db.backupDao().transactions().size)
+        assertEquals(1800L, saved.amount)
+        assertEquals(2L, saved.categoryId)
+        assertEquals("expense", saved.businessKind)
+        assertEquals("微信", saved.accountTag)
+        assertEquals("晚餐", saved.note)
+        assertEquals(TxStatus.CONFIRMED, saved.status)
+        assertTrue(saved.metadataJson!!.contains("transfer_sent"))
+        assertTrue(saved.metadataJson!!.contains("按餐饮消费记录"))
+    }
+
+    @Test fun `metadata only enrichment stays duplicate while preserving the new evidence`() = runTest {
+        val initial = tx().copy(businessKind = "expense", metadataJson = """{"scene":"merchant_payment"}""")
+        val first = capture(transaction = initial) as CaptureResult.Inserted
+        val incoming = initial.copy(metadataJson = """{"semanticModelApplied":true,"assumptions":["补充识别依据"]}""")
+        assertEquals(CaptureResult.Duplicate(first.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, incoming, evidence().copy(orderId = "ORDER202611010001"), enrichSemantics = true))
+        assertEquals("ORDER202611010001", db.transactionDao().captureEvidenceByKey("first")!!.orderId)
+        assertTrue(db.transactionDao().getById(first.transactionId)!!.metadataJson!!.contains("补充识别依据"))
+        assertEquals(1, db.backupDao().transactions().size)
+    }
+
+    @Test fun `AI can refine an automatically recorded transfer but cannot overwrite user decisions`() = runTest {
+        val initial = tx().copy(businessKind = "transfer", status = TxStatus.CONFIRMED)
+        val inserted = capture(transaction = initial) as CaptureResult.Inserted
+        val resolved = initial.copy(categoryId = 2, businessKind = "expense", note = "AI用途")
+        assertEquals(CaptureResult.Enriched(inserted.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, resolved, evidence(), enrichSemantics = true))
+        val updated = db.transactionDao().getById(inserted.transactionId)!!.copy(
+            categoryId = 3, note = "用户用途", editVersion = 1)
+        db.transactionDao().update(updated)
+        assertEquals(CaptureResult.Duplicate(inserted.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, resolved, evidence(), enrichSemantics = true))
+        assertEquals(updated, db.transactionDao().getById(inserted.transactionId))
+        db.transactionDao().update(updated.copy(status = TxStatus.IGNORED))
+        assertEquals(CaptureResult.Duplicate(inserted.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, resolved, evidence(), enrichSemantics = true))
+        assertEquals(TxStatus.IGNORED, db.transactionDao().getById(inserted.transactionId)!!.status)
+        db.transactionDao().deleteById(inserted.transactionId)
+        assertEquals(CaptureResult.Duplicate(inserted.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, resolved, evidence(), enrichSemantics = true))
+        assertTrue(db.backupDao().transactions().isEmpty())
+    }
+
+    @Test fun `semantic enrichment never auto confirms a weak duplicate`() = runTest {
+        capture()
+        val duplicateEvidence = evidence(event = "other-page", notificationKey = null)
+        val duplicate = capture(duplicateEvidence, tx(TxSource.ACCESSIBILITY)) as CaptureResult.Inserted
+        val before = db.transactionDao().getById(duplicate.transactionId)!!
+        assertEquals(CaptureResult.Duplicate(duplicate.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, tx(TxSource.ACCESSIBILITY).copy(categoryId = 2, businessKind = "expense",
+                status = TxStatus.CONFIRMED), duplicateEvidence, enrichSemantics = true))
+        assertEquals(before, db.transactionDao().getById(duplicate.transactionId))
+        assertEquals(TxStatus.PENDING, before.status)
+    }
+
     @Test fun `late refund identity upgrades its namespace and later notification uses the upgraded evidence`() = runTest {
         val payment=tx(TxSource.ACCESSIBILITY).copy(amount=-500,type=TxType.INCOME)
         val initial=evidence(event="refund-page",packageName="com.tencent.mm",notificationKey=null)

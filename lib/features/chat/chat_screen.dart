@@ -3,6 +3,7 @@ import '../../core/ledger_controller.dart';
 import '../../ui/common.dart';
 import 'agent_activity.dart';
 import 'agent_workspace_screen.dart';
+import '../entry/recognition_save_notice.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
@@ -109,7 +110,12 @@ class _ChatScreenState extends State<ChatScreen> {
                         itemCount: c.messages.length + 1,
                         itemBuilder: (context, index) {
                           if (index == c.messages.length) {
-                            return AgentActivity(controller: c);
+                            return Column(
+                              children: [
+                                RecognitionSaveNotice(controller: c),
+                                AgentActivity(controller: c),
+                              ],
+                            );
                           }
                           final msg = c.messages[index];
                           final user = msg.role == 'user';

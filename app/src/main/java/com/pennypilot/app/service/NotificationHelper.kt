@@ -41,8 +41,8 @@ object NotificationHelper {
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(
-            CHANNEL_CAPTURE, "记账确认", NotificationManager.IMPORTANCE_LOW
-        ).apply { description = "通知捕获后的确认提醒" })
+            CHANNEL_CAPTURE, "自动记账", NotificationManager.IMPORTANCE_LOW
+        ).apply { description = "自动记账结果与待处理账单" })
         nm.createNotificationChannel(NotificationChannel(
             CHANNEL_REPORT, "月度报告", NotificationManager.IMPORTANCE_DEFAULT
         ).apply { description = "每月账单报告" })
@@ -52,7 +52,7 @@ object NotificationHelper {
     }
 
     fun postCaptureNotification(context: Context, txId: Long, captureEventKey: String, title: String, text: String,
-        allowQuickConfirm: Boolean = true) {
+        allowQuickConfirm: Boolean = true, recorded: Boolean = false) {
         val nm = context.getSystemService(NotificationManager::class.java)
 
         // Confirm action
@@ -67,10 +67,11 @@ object NotificationHelper {
 
         // Ignore action
         val ignoreIntent = Intent(context, NotificationActionReceiver::class.java).apply {
-            action = NotificationActionReceiver.ACTION_IGNORE
-            data = captureActionUri(captureEventKey, "ignore")
+            action = if (recorded) NotificationActionReceiver.ACTION_UNDO else NotificationActionReceiver.ACTION_IGNORE
+            data = captureActionUri(captureEventKey, if (recorded) "undo" else "ignore")
             putExtra(NotificationActionReceiver.EXTRA_TX_ID, txId)
             putExtra(NotificationActionReceiver.EXTRA_CAPTURE_EVENT_KEY, captureEventKey)
+            putExtra(NotificationActionReceiver.EXTRA_LEDGER_REVISION, com.pennypilot.app.data.db.LedgerRevision.current)
         }
         val ignorePi = PendingIntent.getBroadcast(context, txId.toInt() * 3 + 1, ignoreIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -92,9 +93,9 @@ object NotificationHelper {
             .setContentIntent(editPi)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
-        if (allowQuickConfirm) builder.addAction(0, "记入", confirmPi)
-        builder.addAction(0, "忽略", ignorePi)
-            .addAction(0, if (allowQuickConfirm) "编辑" else "核对记录", editPi)
+        if (allowQuickConfirm && !recorded) builder.addAction(0, "记入", confirmPi)
+        builder.addAction(0, if (recorded) "撤销" else "忽略", ignorePi)
+            .addAction(0, if (recorded || allowQuickConfirm) "修改" else "核对记录", editPi)
         val notification = builder.build()
 
         nm.notify(captureEventKey, txId.toInt(), notification)
