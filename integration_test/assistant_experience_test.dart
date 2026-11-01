@@ -286,7 +286,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(ChatScreen), findsOneWidget);
       expect(find.byTooltip('语音输入'), findsOneWidget);
-      expect(find.byTooltip('添加记账图片'), findsOneWidget);
+      expect(find.byTooltip('发送消息'), findsNothing);
+      expect(find.text('添加记账图片'), findsNothing);
+      await tester.tap(find.byTooltip('添加附件和更多'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(ListTile, '添加记账图片'), findsOneWidget);
+      expect(find.widgetWithText(ListTile, '语音输入'), findsOneWidget);
       expect(
         tester
             .widget<FilterChip>(
@@ -295,6 +300,10 @@ void main() {
             .selected,
         isTrue,
       );
+      expect(controller.isAsking, isFalse);
+      expect(ai.observedCalls, isEmpty);
+      await tester.tap(find.byTooltip('关闭输入选项'));
+      await tester.pumpAndSettle();
 
       final operation = controller.ask(
         '分析2026年10月支出，展示分类图、预算进度、交互报告和预算模拟，再画一张流程图。',

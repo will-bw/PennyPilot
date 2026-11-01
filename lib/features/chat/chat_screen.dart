@@ -53,6 +53,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     super.initState();
     input.text = widget.controller.assistantDraft;
     input.addListener(_inputChanged);
+    focus.addListener(_focusChanged);
     scroll.addListener(_scrollChanged);
     _listen();
     WidgetsBinding.instance.addObserver(this);
@@ -77,7 +78,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _listen();
       _controllerChanged();
     }
-    if (oldWidget.active && !widget.active) _cancelRecording();
+    if (oldWidget.active && !widget.active) {
+      focus.unfocus();
+      _cancelRecording();
+    }
     if (!oldWidget.active && widget.active && followingLatest) {
       _scheduleScroll();
     }
@@ -86,6 +90,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void _inputChanged() {
     if (!syncingDraft) widget.controller.setAssistantDraft(input.text);
   }
+
+  void _focusChanged() => setState(() {});
 
   void _setDraft(String text) {
     input.value = TextEditingValue(
@@ -127,7 +133,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _scrollChanged() {
-    if (!scroll.hasClients || programmaticScroll) return;
+    // Layout changes (keyboard, composer height) are not a reading gesture.
+    if (!scroll.hasClients ||
+        programmaticScroll ||
+        !scroll.position.isScrollingNotifier.value) {
+      return;
+    }
     final nearEnd = scroll.position.extentAfter < 80;
     if (followingLatest != nearEnd || showLatest && nearEnd) {
       setState(() {
@@ -177,6 +188,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       outgoingRecognitionAttachment = attachment;
     }
     _setDraft('');
+    focus.unfocus();
     c.setAssistantAttachment(null);
     dictated = false;
     _latest();
@@ -224,7 +236,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'name': data['name'] ?? '记账图片',
       });
       setState(() => continueRecognition = false);
-      focus.requestFocus();
+      focus.unfocus();
     });
   }
 
@@ -270,6 +282,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         debugPrint('取消助手录音失败：$error');
       }),
     );
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (followingLatest) _scheduleScroll();
   }
 
   @override
@@ -390,13 +407,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ],
         ),
         body: ContentWidth(
-          child: SizedBox(
-            width: 760,
-            child: Column(
-              children: [
-                Expanded(child: _conversation(c)),
-                _composer(c),
-              ],
+          child: SizedBox(width: 760, child: _conversation(c)),
+        ),
+        // Scaffold reserves this space for the composer and positions saved /
+        // error SnackBars above it, so feedback cannot cover the send button.
+        bottomNavigationBar: Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          child: Align(
+            heightFactor: 1,
+            child: SizedBox(
+              width: 760,
+              child: _composer(
+                c,
+                maxLines: MediaQuery.viewInsetsOf(context).bottom > 0 ? 2 : 4,
+              ),
             ),
           ),
         ),
@@ -406,41 +432,48 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Widget _conversation(LedgerController c) => Stack(
     children: [
-      NotificationListener<UserScrollNotification>(
+      NotificationListener<ScrollMetricsNotification>(
         onNotification: (notification) {
-          if (notification.direction != ScrollDirection.idle &&
-              scroll.hasClients &&
-              scroll.position.extentAfter >= 80) {
-            followingLatest = false;
-          }
+          if (notification.depth == 0 && followingLatest) _scheduleScroll();
           return false;
         },
-        child: ListView.builder(
-          key: const ValueKey('assistant-conversation'),
-          controller: scroll,
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-          itemCount: c.messages.isEmpty ? 2 : c.messages.length + 1,
-          itemBuilder: (context, index) {
-            if (c.messages.isEmpty && index == 0) {
-              return c.busyFor('assistantInput')
-                  ? const SizedBox.shrink()
-                  : _suggestions();
+        child: NotificationListener<UserScrollNotification>(
+          onNotification: (notification) {
+            if (notification.direction != ScrollDirection.idle &&
+                scroll.hasClients &&
+                scroll.position.extentAfter >= 80) {
+              followingLatest = false;
             }
-            if (c.messages.isEmpty || index == c.messages.length) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (c.busyFor('assistantInput')) _recognitionProgress(c),
-                  if (!c.messages.any(
-                    (message) => c.canUndoAssistantRun(message.runId),
-                  ))
-                    RecognitionSaveNotice(controller: c, titlePrefix: '已记下'),
-                  AssistantRecognition(controller: c),
-                ],
-              );
-            }
-            return _message(c, c.messages[index], index);
+            return false;
           },
+          child: ListView.builder(
+            key: const ValueKey('assistant-conversation'),
+            controller: scroll,
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+            itemCount: c.messages.isEmpty ? 2 : c.messages.length + 1,
+            itemBuilder: (context, index) {
+              if (c.messages.isEmpty && index == 0) {
+                return c.busyFor('assistantInput')
+                    ? const SizedBox.shrink()
+                    : _suggestions();
+              }
+              if (c.messages.isEmpty || index == c.messages.length) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (c.busyFor('assistantInput')) _recognitionProgress(c),
+                    if (!c.messages.any(
+                      (message) => c.canUndoAssistantRun(message.runId),
+                    ))
+                      RecognitionSaveNotice(controller: c, titlePrefix: '已记下'),
+                    AssistantRecognition(controller: c),
+                  ],
+                );
+              }
+              return _message(c, c.messages[index], index);
+            },
+          ),
         ),
       ),
       if (c.messages.isNotEmpty && (showLatest || !followingLatest))
@@ -699,7 +732,103 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _composer(LedgerController c) {
+  Future<void> _more() async {
+    focus.unfocus();
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * .8,
+        maxWidth: 760,
+      ),
+      builder: (sheetContext) => SafeArea(
+        top: false,
+        child: ListenableBuilder(
+          listenable: updates,
+          builder: (context, _) {
+            final c = widget.controller;
+            return SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '输入与附件',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '关闭输入选项',
+                        onPressed: () => Navigator.pop(sheetContext),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.add_photo_alternate_outlined),
+                    title: const Text('添加记账图片'),
+                    subtitle: const Text('选择账单或支付截图'),
+                    enabled: !c.isBusy,
+                    onTap: () => Navigator.pop(sheetContext, 'image'),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.mic_none),
+                    title: const Text('语音输入'),
+                    subtitle: const Text('转写成文字，修改后再发送'),
+                    enabled: !c.isBusy,
+                    onTap: () => Navigator.pop(sheetContext, 'voice'),
+                  ),
+                  const Divider(),
+                  const SizedBox(height: 16),
+                  Text('思考设置', style: Theme.of(context).textTheme.titleMedium),
+                  Text(
+                    c.assistantReasoningOptions.model,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ReasoningControls(
+                    keyPrefix: 'assistant',
+                    compact: true,
+                    options: c.assistantReasoningOptions,
+                    enabled: !c.isBusy,
+                    onEnabledChanged: (enabled) => runUi(
+                      context,
+                      () => c.setAssistantReasoning(enabled: enabled),
+                    ),
+                    onEffortChanged: (effort) => runUi(
+                      context,
+                      () => c.setAssistantReasoning(effort: effort),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '发送消息会将对话与必要账本数据交给所选 AI 服务。图片需开启识别；语音会发送至转写服务，转写后可编辑。',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'image') await _image();
+    if (action == 'voice') await _voice();
+  }
+
+  Widget _composer(LedgerController c, {required int maxLines}) {
     final colors = Theme.of(context).colorScheme;
     final supplement =
         c.pendingRecognition &&
@@ -709,30 +838,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return SafeArea(
       top: false,
       child: Padding(
+        key: const ValueKey('assistant-composer'),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ReasoningControls(
-              keyPrefix: 'assistant',
-              compact: true,
-              options: c.assistantReasoningOptions,
-              enabled: !c.isBusy,
-              onEnabledChanged: (enabled) => runUi(
-                context,
-                () => c.setAssistantReasoning(enabled: enabled),
-              ),
-              onEffortChanged: (effort) =>
-                  runUi(context, () => c.setAssistantReasoning(effort: effort)),
-            ),
-            if (c.pendingRecognition)
+            if (c.pendingRecognition && c.assistantAttachment == null)
               Row(
                 children: [
                   Expanded(
                     child: Text(
                       supplement ? '补充这次识别' : '正在输入新问题',
-                      style: TextStyle(
-                        fontSize: 12,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: colors.onSurfaceVariant,
                       ),
                     ),
@@ -770,13 +888,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             ? '正在转写成文字…'
                             : c.speechState == 'preparing'
                             ? '正在准备麦克风…'
-                            : '正在录音，结束后可修改文字再发送。',
+                            : '正在录音，结束后可修改再发送。',
                       ),
                     ),
                     TextButton(
-                      onPressed: () {
-                        _cancelRecording();
-                      },
+                      onPressed: _cancelRecording,
                       child: const Text('取消'),
                     ),
                   ],
@@ -785,52 +901,95 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             DecoratedBox(
               decoration: BoxDecoration(
                 color: colors.surfaceContainerLow,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: colors.outlineVariant),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: focus.hasFocus
+                      ? colors.primary
+                      : colors.outlineVariant,
+                  width: 1.5,
+                ),
               ),
-              child: Column(
-                children: [
-                  Semantics(
-                    label: '消息',
-                    child: TextField(
-                      key: const ValueKey('assistant-input'),
-                      controller: input,
-                      focusNode: focus,
-                      enabled: !recording,
-                      minLines: 1,
-                      maxLines: 4,
-                      maxLength: 4000,
-                      textInputAction: TextInputAction.newline,
-                      decoration: InputDecoration(
-                        hintText: supplement ? '补充日期、用途或金额…' : '记一笔、问账，或分析收支…',
-                        counterText: '',
-                        filled: false,
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        contentPadding: const EdgeInsets.fromLTRB(
-                          14,
-                          12,
-                          14,
-                          4,
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    IconButton(
+                      tooltip: '添加附件和更多',
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 48,
+                      ),
+                      onPressed: c.isBusy || recording ? null : _more,
+                      icon: const Icon(Icons.add),
+                    ),
+                    Expanded(
+                      child: Semantics(
+                        label: '消息',
+                        child: TextField(
+                          key: const ValueKey('assistant-input'),
+                          controller: input,
+                          focusNode: focus,
+                          enabled: !recording,
+                          minLines: 1,
+                          maxLines: maxLines,
+                          maxLength: 4000,
+                          textInputAction: TextInputAction.newline,
+                          onTapOutside: (_) => focus.unfocus(),
+                          decoration: InputDecoration(
+                            hintText: supplement
+                                ? '补充识别信息…'
+                                : c.isAsking
+                                ? '可先写下一条消息…'
+                                : '记一笔，或问问账本…',
+                            hintMaxLines: 1,
+                            counterText: '',
+                            filled: false,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 12,
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(2, 0, 4, 2),
-                    child: Row(
-                      children: [
-                        IconButton(
-                          tooltip: '添加记账图片',
-                          onPressed: c.isBusy ? null : _image,
-                          icon: const Icon(
-                            Icons.add_photo_alternate_outlined,
-                            size: 22,
-                          ),
-                        ),
-                        IconButton(
+                    ValueListenableBuilder<TextEditingValue>(
+                      valueListenable: input,
+                      builder: (context, value, _) {
+                        final hasDraft =
+                            value.text.trim().isNotEmpty ||
+                            c.assistantAttachment != null;
+                        if (c.isAsking || hasDraft && !recording) {
+                          return IconButton.filled(
+                            tooltip: c.isAsking
+                                ? '停止任务'
+                                : supplement
+                                ? '发送补充'
+                                : '发送消息',
+                            constraints: const BoxConstraints(
+                              minWidth: 48,
+                              minHeight: 48,
+                            ),
+                            onPressed: c.isAsking
+                                ? () => runUi(context, c.stopAgent)
+                                : c.isBusy
+                                ? null
+                                : _send,
+                            icon: Icon(
+                              c.isAsking ? Icons.stop : Icons.arrow_upward,
+                              size: 22,
+                            ),
+                          );
+                        }
+                        return IconButton(
                           tooltip: c.isRecording ? '结束录音' : '语音输入',
+                          constraints: const BoxConstraints(
+                            minWidth: 48,
+                            minHeight: 48,
+                          ),
                           onPressed:
                               c.isTranscribing ||
                                   c.isRecording &&
@@ -844,42 +1003,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                 : Icons.mic_none,
                             size: 22,
                           ),
-                        ),
-                        const Spacer(),
-                        ValueListenableBuilder<TextEditingValue>(
-                          valueListenable: input,
-                          builder: (context, value, _) => IconButton.filled(
-                            tooltip: c.isAsking
-                                ? '停止任务'
-                                : supplement
-                                ? '发送补充'
-                                : '发送消息',
-                            onPressed: c.isAsking
-                                ? () => runUi(context, c.stopAgent)
-                                : c.isBusy ||
-                                      value.text.trim().isEmpty &&
-                                          c.assistantAttachment == null
-                                ? null
-                                : _send,
-                            icon: Icon(
-                              c.isAsking ? Icons.stop : Icons.arrow_upward,
-                              size: 21,
-                            ),
-                          ),
-                        ),
-                      ],
+                        );
+                      },
                     ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '对话与必要账本数据发送至所选 AI 服务。图片需开启识别；语音先转写。',
-              style: TextStyle(
-                fontSize: 11,
-                height: 1.4,
-                color: colors.onSurfaceVariant,
+                  ],
+                ),
               ),
             ),
           ],
@@ -914,6 +1042,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         onPressed: widget.onSettings,
         icon: const Icon(Icons.tune, size: 18),
         label: const Text('连接或切换 AI 服务'),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        '发送后，消息与必要账本数据会交给所选 AI 服务。',
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
       ),
     ],
   );

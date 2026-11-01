@@ -91,6 +91,11 @@ class _AppHome extends StatefulWidget {
 class _AppHomeState extends State<_AppHome> {
   int selected = 0;
   bool _permissionSetup = false;
+  void _selectDestination(int value) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (selected != value) setState(() => selected = value);
+  }
+
   static const destinations = [
     NavigationDestination(
       icon: Icon(Icons.receipt_long_outlined),
@@ -133,7 +138,7 @@ class _AppHomeState extends State<_AppHome> {
             );
           }
         } else if (launch['route'] == 'recognition_image') {
-          setState(() => selected = 2);
+          _selectDestination(2);
           runUi(context, () async {
             final raw = await c.command(
               'consumeSharedImage',
@@ -144,18 +149,18 @@ class _AppHomeState extends State<_AppHome> {
             }
           });
         } else if (launch['route'] == 'assistant') {
-          setState(() => selected = 2);
+          _selectDestination(2);
         } else if (launch['route'] == 'ledger') {
-          setState(() => selected = 0);
+          _selectDestination(0);
         } else if (launch['route'] == 'coloros_guide') {
-          setState(() => selected = 3);
+          _selectDestination(3);
           Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => CaptureSettingsScreen(controller: c),
             ),
           );
         } else if (launch['route'] == 'report') {
-          setState(() => selected = 1);
+          _selectDestination(1);
         }
       });
     }
@@ -199,15 +204,22 @@ class _AppHomeState extends State<_AppHome> {
         onBudget: () => showBudgetSettings(context, c),
       ),
       ReportsScreen(controller: c),
-      ChatScreen(
-        controller: c,
-        active: selected == 2,
-        onSettings: () => setState(() => selected = 3),
+      ScaffoldMessenger(
+        child: ChatScreen(
+          controller: c,
+          active: selected == 2,
+          onSettings: () => _selectDestination(3),
+        ),
       ),
       SettingsScreen(controller: c),
     ];
     final wide = MediaQuery.sizeOf(context).width >= 840;
+    final editingChat =
+        selected == 2 && MediaQuery.viewInsetsOf(context).bottom > 0;
     return Scaffold(
+      // Chat handles the keyboard in its own Scaffold and needs the original
+      // insets to adapt its composer. Other pages keep the shell's resizing.
+      resizeToAvoidBottomInset: selected != 2,
       body: SafeArea(
         bottom: false,
         child: Row(
@@ -215,7 +227,7 @@ class _AppHomeState extends State<_AppHome> {
             if (wide)
               NavigationRail(
                 selectedIndex: selected,
-                onDestinationSelected: (v) => setState(() => selected = v),
+                onDestinationSelected: _selectDestination,
                 labelType: NavigationRailLabelType.all,
                 destinations: destinations
                     .map(
@@ -234,7 +246,7 @@ class _AppHomeState extends State<_AppHome> {
           ],
         ),
       ),
-      bottomNavigationBar: wide
+      bottomNavigationBar: wide || editingChat
           ? null
           : DecoratedBox(
               decoration: BoxDecoration(
@@ -247,7 +259,7 @@ class _AppHomeState extends State<_AppHome> {
               ),
               child: NavigationBar(
                 selectedIndex: selected,
-                onDestinationSelected: (v) => setState(() => selected = v),
+                onDestinationSelected: _selectDestination,
                 destinations: destinations,
               ),
             ),

@@ -199,7 +199,12 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byTooltip('添加记账图片'), findsOneWidget);
+      await tester.tap(find.byTooltip('添加附件和更多'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(ListTile, '添加记账图片'), findsOneWidget);
+      expect(repo.calls.where((call) => call.method == 'ask'), isEmpty);
+      await tester.tap(find.byTooltip('关闭输入选项'));
+      await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('更多操作'));
       await tester.pumpAndSettle();
       expect(find.text('导入账单'), findsOneWidget);
