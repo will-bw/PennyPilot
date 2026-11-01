@@ -163,6 +163,110 @@ void main() {
   );
 
   test(
+    'reused tool call ids fail before execution and leave replayable history',
+    () async {
+      var step = 0;
+      final result = await run((_, _) async {
+        if (++step == 1) {
+          return call('same-id', 'get_budget', {'month': '2026-10'});
+        }
+        return call('same-id', 'remember', {
+          'key': 'bad',
+          'kind': 'fact',
+          'content': '每月储蓄1000元',
+          'evidence': '每月储蓄1000元',
+        });
+      }, question: '记住每月储蓄1000元');
+      expect(result['isError'], true);
+      expect(step, 2);
+      expect(await store.scan('memory:'), isEmpty);
+      final messages = (result['session'] as Map)['messages'] as List;
+      expect(
+        messages.where((message) => message['tool_calls'] != null),
+        hasLength(1),
+      );
+      expect(
+        messages.where((message) => message['tool_call_id'] == 'same-id'),
+        hasLength(1),
+      );
+      final retry = await run((_, _) async => answer('已继续。'), question: '继续');
+      expect(retry['isError'], false);
+    },
+  );
+
+  for (final continuation in ['awaiting_input', 'internal_retry', 'new_task']) {
+    test('only a new task clears the previous plan: $continuation', () async {
+      final session = await runtime.active(0);
+      session.modelIdentity = 'test:model';
+      session.status = continuation == 'awaiting_input'
+          ? 'awaiting_input'
+          : 'failed';
+      session.messages.add({'role': 'user', 'content': '帮我规划'});
+      session.plan.add({'title': '核对偏好', 'status': 'in_progress'});
+      await store.write('session:0:${session.id}', session.toMap());
+      var step = 0;
+      final result = await runtime.run(
+        question: '继续',
+        internalQuestion: continuation == 'internal_retry',
+        ledger: ledger,
+        guard: guard,
+        model: AgentModel(
+          identity: 'test:model',
+          complete: (messages, _) async {
+            if (++step == 1) return answer('已完成。');
+            if (step == 2) {
+              expect(messages.last['content'], contains('公开计划仍有未完成步骤'));
+              return call('finish-plan', 'update_plan', {
+                'steps': [
+                  {'title': '核对偏好', 'status': 'completed'},
+                ],
+              });
+            }
+            return answer('已完成。');
+          },
+        ),
+      );
+      expect(result['isError'], false);
+      expect(step, continuation == 'new_task' ? 1 : 3);
+      final plan = (result['session'] as Map)['plan'] as List;
+      if (continuation == 'new_task') {
+        expect(plan, isEmpty);
+      } else {
+        expect(plan.single['status'], 'completed');
+      }
+    });
+  }
+
+  test('compacted call ids cannot be reused in a later tool turn', () async {
+    final session = await runtime.active(0);
+    session.modelIdentity = 'test:model';
+    session.messages.addAll([
+      {'role': 'user', 'content': '以前的问题'},
+      call('compacted-id', 'get_budget', {'month': '2026-10'}).message,
+      {'role': 'tool', 'tool_call_id': 'compacted-id', 'content': '{}'},
+      {'role': 'assistant', 'content': '以前的结果'},
+    ]);
+    session.contextStart = session.messages.length;
+    await store.write('session:0:${session.id}', session.toMap());
+    final result = await run((messages, _) async {
+      expect(
+        messages.where((message) => message['tool_calls'] != null),
+        isEmpty,
+      );
+      return call('compacted-id', 'get_budget', {'month': '2026-11'});
+    });
+    expect(result['isError'], true);
+    final restored = await LedgerAgentRuntime(store: store).active(0);
+    expect(restored.trace, isEmpty);
+    expect(
+      restored.messages
+          .skip(restored.contextStart)
+          .where((message) => message['tool_calls'] != null),
+      isEmpty,
+    );
+  });
+
+  test(
     'tool validation errors go back to model for repair, without invoking ledger mutation',
     () async {
       var step = 0;
@@ -425,6 +529,7 @@ void main() {
       );
       expect(receipt, contains('applied'));
       expect((repo.data['settings'] as Map)['budgetCents'], 300000);
+      expect(repo.calls.single.arguments['revision'], 0);
       await expectLater(
         runtime.resolve(
           revision: 0,

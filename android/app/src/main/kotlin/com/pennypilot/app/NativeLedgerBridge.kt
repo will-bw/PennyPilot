@@ -29,6 +29,7 @@ import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.llm.Message
+import com.pennypilot.app.data.llm.AgentMessageCodec
 import com.pennypilot.app.data.llm.UserFacingLlmException
 import com.pennypilot.app.data.openai.ChatGptModelRepository
 import com.pennypilot.app.data.openai.auth.ChatGptAuthManager
@@ -288,7 +289,10 @@ class NativeLedgerBridge @Inject constructor(
             database.parseRuleDao().deleteAll(); database.parseRuleDao().insertAll(AppDatabase.PRESET_RULES); null
         }
         "updateSettings" -> {
-            updateSettings(args)
+            if (args.containsKey("revision")) {
+                // Agent budget approvals must not cross a ledger restore.
+                mutate(args) { updateSettings(args) }
+            } else updateSettings(args)
             if (args.containsKey("lastBackupAt")) preferences.setLastBackupAt(args.long("lastBackupAt").also { require(it >= 0) })
             emit("changed"); null
         }
@@ -632,13 +636,7 @@ class NativeLedgerBridge @Inject constructor(
             val messagesJson = args.string("messagesJson")
             val toolsJson = args.string("toolsJson")
             require(messagesJson.length <= 4 * 1024 * 1024 && toolsJson.length <= 100_000) { "Agent 请求过大。" }
-            val rows = codec.parseToJsonElement(messagesJson) as kotlinx.serialization.json.JsonArray
-            val messages = rows.map { raw ->
-                val obj = raw as kotlinx.serialization.json.JsonObject
-                val basic = codec.decodeFromJsonElement(Message.serializer(), obj)
-                basic.copy(responsesItems = obj["responsesItems"] as? kotlinx.serialization.json.JsonArray,
-                    responsesAccountId = (obj["responsesAccountId"] as? kotlinx.serialization.json.JsonPrimitive)?.content)
-            }
+            val messages = AgentMessageCodec.decodeMessages(messagesJson)
             val tools = codec.decodeFromString(kotlinx.serialization.builtins.ListSerializer(
                 com.pennypilot.app.data.llm.ToolDefinition.serializer()), toolsJson)
             val registered = setOf("ask_user", "get_ledger_overview", "query_transactions", "get_transaction", "aggregate_by",
@@ -663,12 +661,7 @@ class NativeLedgerBridge @Inject constructor(
             }
             checkIdentity()
             val message = response.choices.firstOrNull()?.message ?: throw IllegalStateException("模型未返回有效响应。")
-            val basic = codec.encodeToJsonElement(com.pennypilot.app.data.llm.AssistantMessage.serializer(), message)
-                as kotlinx.serialization.json.JsonObject
-            val enriched = basic.toMutableMap()
-            message.responsesItems?.let { enriched["responsesItems"] = it }
-            message.responsesAccountId?.let { enriched["responsesAccountId"] = kotlinx.serialization.json.JsonPrimitive(it) }
-            return mapOf("messageJson" to kotlinx.serialization.json.JsonObject(enriched).toString())
+            return mapOf("messageJson" to AgentMessageCodec.encodeReply(message))
         } finally {
             if (agentModelJobs[requestId] === job) agentModelJobs.remove(requestId)
         }

@@ -54,7 +54,8 @@ class BillImport {
     }
 
     final result = <BillImportRow>[];
-    final seen = <String>{};
+    final seen = <String, ({int amount, TxType type})>{};
+    final conflictingIdentities = <String>{};
     for (var i = headerIndex + 1; i < rows.length; i++) {
       final row = rows[i];
       if (row.every((v) => v.trim().isEmpty) || row.first.startsWith('----')) {
@@ -135,7 +136,17 @@ class BillImport {
             ? 'duplicate'
             : 'conflict';
       }
-      if (identity != null && !seen.add(identity)) state = 'duplicate';
+      if (identity != null) {
+        final previous = seen[identity];
+        if (previous == null) {
+          seen[identity] = (amount: amount, type: type);
+        } else if (previous.amount != amount || previous.type != type) {
+          conflictingIdentities.add(identity);
+          state = 'conflict';
+        } else if (state != 'conflict') {
+          state = 'duplicate';
+        }
+      }
       final possible = snapshot.transactions.any(
         (tx) =>
             tx.amountFen == amount &&
@@ -186,6 +197,21 @@ class BillImport {
     if (result.isEmpty) throw const LedgerException('账单中没有可识别的交易行。');
     if (result.length > 10000) {
       throw const LedgerException('一次最多核对 10,000 行，请按月份导出。');
+    }
+    // Conflicting source rows must also remove the earlier row from the default
+    // selection; choosing the first occurrence would silently resolve the conflict.
+    for (var i = 0; i < result.length; i++) {
+      final row = result[i];
+      if (conflictingIdentities.contains(
+        row.transaction?.recognitionMetadata['importIdentity'],
+      )) {
+        result[i] = BillImportRow(
+          line: row.line,
+          description: row.description,
+          state: 'conflict',
+          transaction: row.transaction,
+        );
+      }
     }
     return result;
   }

@@ -61,16 +61,18 @@ class RecognitionDate {
     final clock = _clock(context);
     if (clock != null) {
       var hour = clock.hour;
+      final minute = clock.minute;
       final period =
           clock.period ?? (RegExp(r'昨晚|今晚').hasMatch(context) ? '晚上' : null);
-      if (period != null &&
+      if (hour != null &&
+          period != null &&
           RegExp(r'下午|傍晚|晚上|晚间|夜里|夜晚').hasMatch(period) &&
           hour < 12) {
         hour += 12;
       }
       if (period == '凌晨' && hour == 12) hour = 0;
-      if (period == '中午' && hour < 11) hour += 12;
-      if (hour > 23 || clock.minute > 59) {
+      if (period == '中午' && hour != null && hour < 11) hour += 12;
+      if (hour == null || minute == null || hour > 23 || minute > 59) {
         return (
           date: null,
           precision: 'exact',
@@ -78,10 +80,10 @@ class RecognitionDate {
           problem: '时间超出有效范围，请核对小时和分钟。',
         );
       }
-      final date = DateTime(day.year, day.month, day.day, hour, clock.minute);
+      final date = DateTime(day.year, day.month, day.day, hour, minute);
       if (clock.approximate) {
         assumptions.add(
-          '“${clock.quote}”按 $hour:${clock.minute.toString().padLeft(2, '0')} 左右记录',
+          '“${clock.quote}”按 $hour:${minute.toString().padLeft(2, '0')} 左右记录',
         );
       }
       if (date.isAfter(now.add(const Duration(minutes: 5)))) {
@@ -248,8 +250,8 @@ class RecognitionDate {
   }
 
   static ({
-    int hour,
-    int minute,
+    int? hour,
+    int? minute,
     String? period,
     bool approximate,
     String quote,
@@ -260,7 +262,7 @@ class RecognitionDate {
     ).allMatches(text).toList();
     final m =
         RegExp(
-          r'(凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|晚间|夜里|夜晚)?\s*([零一二两三四五六七八九十]{1,3}|[0-2]?\d)\s*(?:点|[:：])\s*(半|一刻|三刻|\d{1,2}\s*分?)?(过|多|左右)?',
+          r'(凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|晚间|夜里|夜晚)?\s*([零一二两三四五六七八九十]+|\d+)\s*(?:点|[:：])\s*(半|一刻|三刻|\d+\s*分?)?(过|多|左右)?',
         ).allMatches(text).where((clock) {
           // Spoken decimal amounts also use “点”; they provide no clock evidence.
           return !amounts.any(
@@ -272,7 +274,7 @@ class RecognitionDate {
       '半' => 30,
       '一刻' => 15,
       '三刻' => 45,
-      final value? => int.tryParse(value.replaceAll('分', '').trim()) ?? 0,
+      final value? => int.tryParse(value.replaceAll('分', '').trim()),
       _ => 0,
     };
     return (
@@ -284,7 +286,7 @@ class RecognitionDate {
     );
   }
 
-  static int _chineseHour(String value) {
+  static int? _chineseHour(String value) {
     const digits = {
       '零': 0,
       '一': 1,
@@ -298,7 +300,10 @@ class RecognitionDate {
       '八': 8,
       '九': 9,
     };
-    if (!value.contains('十')) return digits[value]!;
+    if (!value.contains('十')) return digits[value];
+    if (!RegExp(r'^[一二两三四五六七八九]?十[一二三四五六七八九]?$').hasMatch(value)) {
+      return null;
+    }
     final parts = value.split('十');
     return (parts.first.isEmpty ? 1 : digits[parts.first]!) * 10 +
         (parts.last.isEmpty ? 0 : digits[parts.last]!);

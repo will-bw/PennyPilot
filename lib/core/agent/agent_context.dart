@@ -113,7 +113,16 @@ class AgentContext {
         'content': content.length > 2000
             ? '${content.substring(0, 2000)}…[原文可检索]'
             : content,
-        if (m['tool_calls'] != null) 'tool_calls': m['tool_calls'],
+        // Arguments can contain a full generated artifact. Summarize its receipt
+        // and result instead; the original call remains available in history.
+        if (m['tool_calls'] != null)
+          'tool_calls': (m['tool_calls'] as List).map((raw) {
+            final call = agentMap(raw);
+            return {
+              'id': call['id'],
+              'name': agentMap(call['function'])['name'],
+            };
+          }).toList(),
       };
       final tokens = estimateAgentTokens(row);
       if (chunkTokens + tokens > chunkLimit && chunks.last.isNotEmpty) {

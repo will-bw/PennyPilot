@@ -118,6 +118,11 @@ class PortableLedgerStore implements LedgerRepository {
         return database.transaction(_export);
       case 'updateSettings':
         final revision = await database.transaction((transaction) async {
+          final revision = await _revision(transaction);
+          if (arguments.containsKey('revision') &&
+              _int(arguments, 'revision', min: 0) != revision) {
+            throw const LedgerException('账本已恢复，请重新核对设置。', code: 'STALE_LEDGER');
+          }
           final current = await _settings(transaction);
           _require(
             arguments['expectedBudgetCents'] == null ||
@@ -126,10 +131,12 @@ class PortableLedgerStore implements LedgerRepository {
             '预算已变化，请重新核对提案。',
           );
           final changes = _validateSettings(
-            {...arguments}..remove('expectedBudgetCents'),
+            {...arguments}
+              ..remove('expectedBudgetCents')
+              ..remove('revision'),
           );
           await _putMetadata(transaction, 'settings', {...current, ...changes});
-          return _revision(transaction);
+          return revision;
         });
         _emit('changed', revision);
         return null;
@@ -329,7 +336,11 @@ class PortableLedgerStore implements LedgerRepository {
           status != 'CONFIRMED' || row['businessKind'] != 'unknown',
           '请先选择这笔资金变动的账务用途。',
         );
-        await _writeRow(database, 'transactions', {...row, 'status': status});
+        await _writeRow(database, 'transactions', {
+          ...row,
+          'status': status,
+          'editVersion': (row['editVersion'] as int? ?? 0) + 1,
+        });
         return null;
       case 'saveCategory':
         return {'id': await _saveCategory(database, arguments)};
@@ -580,6 +591,7 @@ class PortableLedgerStore implements LedgerRepository {
         await _writeRow(database, 'transactions', {
           ...row,
           'categoryId': fallbackId,
+          'editVersion': (row['editVersion'] as int? ?? 0) + 1,
         });
       }
     }

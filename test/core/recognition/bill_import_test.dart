@@ -88,6 +88,44 @@ void main() {
       'review',
     );
   });
+  test('identical rows inside a file remain duplicate', () {
+    final rows = BillImport.parse('$header$row$row', snapshot, account: '微信');
+    expect(rows.map((row) => row.state), ['new', 'duplicate']);
+  });
+  test('conflicting source amounts block every row with the same identity', () {
+    final changed = row.replaceFirst('12.00', '13.00');
+    final rows = BillImport.parse(
+      '$header$row$row$changed$row',
+      snapshot,
+      account: '微信',
+    );
+    expect(rows.map((row) => row.state), everyElement('conflict'));
+    expect(rows.map((row) => row.transaction!.amountFen), [
+      1200,
+      1200,
+      1300,
+      1200,
+    ]);
+  });
+  test('repeated source rows cannot conceal a stored transaction conflict', () {
+    final first = BillImport.parse(
+      '$header$row',
+      snapshot,
+      account: '微信',
+    ).single.transaction!;
+    final next = LedgerSnapshot(
+      revision: 0,
+      categories: snapshot.categories,
+      transactions: [first],
+    );
+    final changed = row.replaceFirst('12.00', '13.00');
+    final rows = BillImport.parse(
+      '$header$changed$changed',
+      next,
+      account: '微信',
+    );
+    expect(rows.map((row) => row.state), everyElement('conflict'));
+  });
   test('failed and pending payments are not imported', () {
     for (final status in ['支付失败', '待收款', '退款中', '交易关闭']) {
       expect(

@@ -160,6 +160,53 @@ void main() {
     },
   );
 
+  test('compaction does not resend generated artifact arguments', () async {
+    final session = AgentSession.create(0, DateTime.now());
+    session.messages.addAll([
+      {'role': 'user', 'content': '生成说明'},
+      {
+        'role': 'assistant',
+        'tool_calls': [
+          {
+            'id': 'large-artifact',
+            'type': 'function',
+            'function': {
+              'name': 'render_artifact',
+              'arguments': jsonEncode({'content': '生成内容'.padRight(16000, '中')}),
+            },
+          },
+        ],
+      },
+      {
+        'role': 'tool',
+        'tool_call_id': 'large-artifact',
+        'content': '{"status":"presented","presentation":{"title":"说明"}}',
+      },
+      {'role': 'user', 'content': '继续解释'},
+    ]);
+    final original = jsonEncode(session.messages);
+    await AgentContext.compact(
+      session: session,
+      config: const AgentConfig(contextTokens: 8000),
+      system: '系统',
+      memories: [],
+      tools: [],
+      guard: () async {},
+      progress: (_) {},
+      model: AgentModel(
+        identity: 'test',
+        complete: (messages, _) async {
+          expect(estimateAgentTokens(messages), lessThan(2000));
+          expect(jsonEncode(messages), contains('render_artifact'));
+          expect(jsonEncode(messages), isNot(contains('生成内容')));
+          return const AgentReply(message: {'content': '已生成说明，用户要求继续解释。'});
+        },
+      ),
+    );
+    expect(jsonEncode(session.messages), original);
+    expect(session.contextStart, 3);
+  });
+
   test(
     'failed compaction keeps summary boundary intact and reports failure',
     () async {

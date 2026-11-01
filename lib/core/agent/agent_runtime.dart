@@ -477,7 +477,7 @@ class LedgerAgentRuntime {
       session.modelIdentity = model.identity;
       final continuesTask = session.status == 'awaiting_input';
       session.status = 'running';
-      session.plan.clear();
+      if (!continuesTask && !internalQuestion) session.plan.clear();
       session.messages.add({
         'id': userMessageId,
         'runId': runId,
@@ -626,7 +626,7 @@ class LedgerAgentRuntime {
           activeReasoning!['text'] = reasoning;
         }
         if (activeReasoning != null) finishReasoning('completed');
-        _validateReply(reply);
+        _validateReply(reply, session.messages);
         final assistant = {
           ...reply.message,
           'id': messageId,
@@ -1202,6 +1202,7 @@ class LedgerAgentRuntime {
           });
         case 'budget':
           await ledger.invoke('updateSettings', {
+            'revision': revision,
             'budgetCents': payload['amount'],
             'expectedBudgetCents': payload['before'] ?? 0,
           });
@@ -1360,12 +1361,19 @@ class LedgerAgentRuntime {
     }
   }
 
-  static void _validateReply(AgentReply reply) {
+  static void _validateReply(
+    AgentReply reply,
+    Iterable<Map<String, dynamic>> history,
+  ) {
     if (reply.calls.length > 16 ||
         reply.calls.isEmpty && reply.text.trim().isEmpty) {
       throw const LedgerException('模型返回了空内容或过多工具调用。', code: 'AGENT_PROTOCOL');
     }
-    final ids = <String>{};
+    final ids = <String>{
+      for (final message in history)
+        for (final call in message['tool_calls'] as List? ?? const [])
+          agentMap(call)['id'] as String,
+    };
     for (final call in reply.calls) {
       final function = agentMap(call['function']);
       if (call['id'] is! String ||

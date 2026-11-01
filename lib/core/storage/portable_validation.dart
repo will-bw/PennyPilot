@@ -253,7 +253,7 @@ Map<String, dynamic> _validateReport(
   }
   for (final category in _maps(decoded, '报告分类汇总', max: 10000)) {
     _text(category, 'name', max: 200);
-    _int(category, 'total', min: 0);
+    _int(category, 'total');
     _int(category, 'count', min: 0);
   }
   return {
