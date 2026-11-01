@@ -166,13 +166,16 @@ class LedgerAgentRuntime {
         }
       }
       session.modelIdentity = model.identity;
+      final continuesTask = session.status == 'awaiting_input';
       session.status = 'running';
       session.plan.clear();
       session.messages.add({
         'role': 'user',
         'content': question.trim(),
         'createdAt': started.millisecondsSinceEpoch,
+        if (continuesTask) 'continuesTask': true,
       });
+      final entryContext = _entryContext(session);
       if (session.title == '新对话') {
         session.title = question.trim().substring(
           0,
@@ -376,6 +379,7 @@ class LedgerAgentRuntime {
                 session: session,
                 tools: tools,
                 question: question,
+                entryContext: entryContext,
                 args: args,
                 result: result,
                 now: started,
@@ -491,6 +495,7 @@ class LedgerAgentRuntime {
     required AgentSession session,
     required LedgerAgentTools tools,
     required String question,
+    required ({List<String> turns, String operationId}) entryContext,
     required Map<String, dynamic> args,
     required Map<String, dynamic> result,
     required DateTime now,
@@ -502,16 +507,28 @@ class LedgerAgentRuntime {
     );
     final payload = agentMap(agentMap(action['payload'])['transaction']);
     final evidence = args['evidence'] as String;
-    final amountEvidence = _amountEvidence(evidence, payload['amount'] as int);
+    final input = entryContext.turns.join('\n补充：');
+    final amountEvidence = _entryAmount(
+      entryContext.turns,
+      evidence,
+      payload['amount'] as int,
+    );
+    final operationId =
+        '${entryContext.operationId}:amount@${amountEvidence.offset}';
     final category = tools.ledger.categories.singleWhere(
       (c) => c.id == payload['categoryId'],
     );
-    final queryOnly =
-        RegExp(r'^(?:帮我)?(?:查|看|分析|统计|对比|预算)|[?？吗么]\s*$').hasMatch(question) &&
-        !RegExp(r'记一笔|记下|记账|帮我记|补记|录入|新增|添加').hasMatch(question);
+    final explicitlyRecord = RegExp(r'记一笔|记下|记账|帮我记|补记|录入|新增|添加');
+    bool queryOnly(String text) =>
+        RegExp(r'^(?:帮我)?(?:查|看|分析|统计|对比|预算)|[?？吗么]\s*$').hasMatch(text) &&
+        !explicitlyRecord.hasMatch(text);
+    final isQuery =
+        queryOnly(question) ||
+        queryOnly(entryContext.turns.first) &&
+            !explicitlyRecord.hasMatch(question);
     final checked = RecognitionProtocol.validate(
       {
-        'intent': queryOnly ? 'query' : 'record',
+        'intent': isQuery ? 'query' : 'record',
         'proposals': [
           {
             'amount': payload['amount'],
@@ -527,17 +544,17 @@ class LedgerAgentRuntime {
               DateTime.fromMillisecondsSinceEpoch(payload['occurredAt'] as int),
             ),
             'fieldEvidence': {
-              'amount': {'quote': amountEvidence, 'source': 'user'},
+              'amount': {'quote': amountEvidence.quote, 'source': 'user'},
               'type': {'quote': evidence, 'source': 'inference'},
             },
           },
         ],
       },
       snapshot: tools.ledger,
-      input: question,
+      input: input,
       source: 'AI_TEXT',
       now: now,
-      operationId: 'agent:${action['id']}',
+      operationId: entryContext.operationId,
     );
     final drafts = checked['transactions'] as List;
     if (drafts.length != 1 || (checked['questions'] as List).isNotEmpty) {
@@ -554,6 +571,7 @@ class LedgerAgentRuntime {
       'metadataJson': jsonEncode({
         ...inferred,
         ...metadata,
+        'operationId': operationId,
         'assumptions': {
           ...inferred['assumptions'] as List,
           ...metadata['assumptions'] as List,
@@ -568,7 +586,12 @@ class LedgerAgentRuntime {
     await _save(session);
     try {
       await guard();
-      final saved = await record(transaction);
+      final existing = tools.ledger.transactions
+          .where((tx) => tx.recognitionMetadata['operationId'] == operationId)
+          .firstOrNull;
+      final saved = existing == null
+          ? await record(transaction)
+          : (id: existing.id, ledger: tools.ledger);
       if (saved == null) {
         action['status'] = 'pending';
         return result;
@@ -586,7 +609,9 @@ class LedgerAgentRuntime {
         'status': 'applied',
         'title': action['title'],
         'transaction_id': saved.id,
-        'instruction': '已实际保存到账本，可继续查询；不要再要求确认这笔新增。',
+        'instruction': existing == null
+            ? '已实际保存到账本，可继续查询；不要再要求确认这笔新增。'
+            : '这笔已在本次任务中保存，未重复新增；可继续查询。',
       };
     } catch (_) {
       action['status'] = 'uncertain';
@@ -595,7 +620,53 @@ class LedgerAgentRuntime {
     }
   }
 
-  static String _amountEvidence(String evidence, int amount) {
+  static ({List<String> turns, String operationId}) _entryContext(
+    AgentSession session,
+  ) {
+    final turns = <String>[];
+    var start = session.messages.length - 1;
+    // Only an outstanding ask_user links separate user messages. Completed
+    // tasks and runtime-generated corrections cannot authorize another entry.
+    for (var i = session.messages.length - 1; i >= 0; i--) {
+      final message = session.messages[i];
+      if (message['role'] != 'user' || message['internal'] == true) continue;
+      turns.insert(0, message['content'] as String);
+      start = i;
+      if (message['continuesTask'] != true) break;
+    }
+    return (turns: turns, operationId: 'agent:${session.id}:entry:$start');
+  }
+
+  static ({String quote, int offset}) _entryAmount(
+    List<String> turns,
+    String evidence,
+    int amount,
+  ) {
+    var offset = turns.join('\n补充：').length;
+    for (var i = turns.length - 1; i >= 0; i--) {
+      final turn = turns[i];
+      offset -= turn.length;
+      final quoted = i == turns.length - 1
+          ? _amountEvidence(evidence, amount)
+          : (quote: '', offset: -1);
+      final local = quoted.offset < 0
+          ? _amountEvidence(turn, amount)
+          : (
+              quote: quoted.quote,
+              offset: turn.indexOf(evidence) + quoted.offset,
+            );
+      if (local.offset >= 0) {
+        return (quote: local.quote, offset: offset + local.offset);
+      }
+      offset -= '\n补充：'.length;
+    }
+    return (quote: '', offset: -1);
+  }
+
+  static ({String quote, int offset}) _amountEvidence(
+    String evidence,
+    int amount,
+  ) {
     final tokens = RegExp(
       r'\d+(?:,\d{3})*(?:\.\d{1,2})?|[零〇一二两三四五六七八九十百千万]+(?:(?:元|块|点)[零〇一二两三四五六七八九]+)?',
     );
@@ -607,9 +678,9 @@ class LedgerAgentRuntime {
           RegExp(r'\d[:：]\s*$').hasMatch(before)) {
         continue;
       }
-      return match[0]!;
+      return (quote: match[0]!, offset: match.start);
     }
-    return '';
+    return (quote: '', offset: -1);
   }
 
   /// Applies stored changes requiring review. UI sends its id and decision,

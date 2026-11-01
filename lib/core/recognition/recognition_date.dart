@@ -255,9 +255,18 @@ class RecognitionDate {
     String quote,
   })?
   _clock(String text) {
-    final m = RegExp(
-      r'(凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|晚间|夜里|夜晚)?\s*([零一二两三四五六七八九十]{1,3}|[0-2]?\d)\s*(?:点|[:：])\s*(半|一刻|三刻|\d{1,2}\s*分?)?(过|多|左右)?',
-    ).allMatches(text).lastOrNull;
+    final amounts = RegExp(
+      r'(?:[零〇一二两三四五六七八九十百千万]+|\d+)\s*点\s*[零〇一二两三四五六七八九\d]+\s*(?:元|块|毛|角)',
+    ).allMatches(text).toList();
+    final m =
+        RegExp(
+          r'(凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|晚间|夜里|夜晚)?\s*([零一二两三四五六七八九十]{1,3}|[0-2]?\d)\s*(?:点|[:：])\s*(半|一刻|三刻|\d{1,2}\s*分?)?(过|多|左右)?',
+        ).allMatches(text).where((clock) {
+          // Spoken decimal amounts also use “点”; they provide no clock evidence.
+          return !amounts.any(
+            (amount) => clock.start < amount.end && clock.end > amount.start,
+          );
+        }).lastOrNull;
     if (m == null) return null;
     final minute = switch (m[3]?.trim()) {
       '半' => 30,

@@ -169,6 +169,198 @@ void main() {
     expect((result['session'] as Map)['status'], 'awaiting_confirmation');
   });
 
+  for (final scenario in [
+    (original: '昨天吃了午饭', reply: '17元', clarification: '午饭花了多少元？'),
+    (original: '午饭17元', reply: '昨天', clarification: '这笔午饭是哪一天？'),
+  ]) {
+    test(
+      'clarification preserves date and amount across user turns: ${scenario.reply}',
+      () async {
+        final first = await run(
+          (_, _) async => _call('clarify', 'ask_user', {
+            'question': scenario.clarification,
+          }),
+          question: scenario.original,
+        );
+        expect((first['session'] as Map)['status'], 'awaiting_input');
+        var step = 0;
+        final result = await run((messages, _) async {
+          if (++step == 1) {
+            return _call('record', 'propose_transaction', {
+              ...meal(scenario.reply),
+              'date': '2026-10-23',
+            });
+          }
+          final saved = _observation(messages);
+          expect(saved['status'], 'applied');
+          return _answer('已记昨天午饭17元。[依据 ${saved['evidence_id']}]');
+        }, question: scenario.reply);
+        expect(result['isError'], false);
+        expect(writes, 1);
+        final saved = (await ledger.snapshot()).transactions.single;
+        expect(saved.amountFen, 1700);
+        expect(saved.occurredAt, DateTime(2026, 10, 23));
+      },
+    );
+  }
+
+  test('multiple clarification replies preserve the original task', () async {
+    await run(
+      (_, _) async =>
+          _call('clarify-amount', 'ask_user', {'question': '午饭花了多少元？'}),
+      question: '昨天吃了午饭',
+    );
+    await run(
+      (_, _) async =>
+          _call('clarify-account', 'ask_user', {'question': '使用哪个账户支付？'}),
+      question: '17元',
+    );
+    var step = 0;
+    final result = await run((messages, _) async {
+      if (++step == 1) {
+        return _call('record', 'propose_transaction', {
+          ...meal('支付宝'),
+          'date': '2026-10-23',
+          'account_tag': '支付宝',
+        });
+      }
+      final saved = _observation(messages);
+      expect(saved['status'], 'applied');
+      return _answer('已记昨天午饭17元。[依据 ${saved['evidence_id']}]');
+    }, question: '支付宝');
+    expect(result['isError'], false);
+    expect(writes, 1);
+    expect(
+      (await ledger.snapshot()).transactions.single.occurredAt,
+      DateTime(2026, 10, 23),
+    );
+  });
+
+  test(
+    'clarifying a second entry does not save the completed first entry again',
+    () async {
+      var step = 0;
+      int? mealId;
+      final first = await run((messages, _) async {
+        if (++step == 1) {
+          return _call('meal', 'propose_transaction', meal('午饭17元'));
+        }
+        mealId = _observation(messages)['transaction_id'] as int;
+        return _call('clarify', 'ask_user', {'question': '地铁花了多少元？'});
+      }, question: '午饭17元，地铁多少钱忘了');
+      expect((first['session'] as Map)['status'], 'awaiting_input');
+      expect(writes, 1);
+      step = 0;
+      final result = await run((messages, _) async {
+        switch (++step) {
+          case 1:
+            return _call('repeated-meal', 'propose_transaction', meal('4元'));
+          case 2:
+            final previous = _observation(messages);
+            expect(previous['transaction_id'], mealId);
+            expect(previous['instruction'], contains('未重复新增'));
+            expect(writes, 1);
+            return _call('subway', 'propose_transaction', {
+              ...meal('4元'),
+              'amount': 400,
+            });
+          default:
+            final saved = _observation(messages);
+            expect((saved['data'] as Map)['amount'], 400);
+            return _answer('已补记地铁4元。[依据 ${saved['evidence_id']}]');
+        }
+      }, question: '4元');
+      expect(result['isError'], false);
+      expect(writes, 2);
+      expect(
+        (await ledger.snapshot()).transactions.map((tx) => tx.amountFen),
+        unorderedEquals([1700, 400]),
+      );
+    },
+  );
+
+  test(
+    'equal amounts in different user turns remain separate transactions',
+    () async {
+      var step = 0;
+      await run((messages, _) async {
+        if (++step == 1) {
+          return _call('meal', 'propose_transaction', {
+            ...meal('午饭17元'),
+            'merchant': '午饭',
+          });
+        }
+        return _call('clarify', 'ask_user', {'question': '地铁花了多少元？'});
+      }, question: '午饭17元，地铁多少钱忘了');
+      step = 0;
+      final result = await run((messages, _) async {
+        if (++step == 1) {
+          return _call('subway', 'propose_transaction', {
+            ...meal('17元'),
+            'merchant': '地铁',
+          });
+        }
+        final saved = _observation(messages);
+        return _answer('已补记地铁17元。[依据 ${saved['evidence_id']}]');
+      }, question: '17元');
+      expect(result['isError'], false);
+      expect(writes, 2);
+      final transactions = (await ledger.snapshot()).transactions;
+      expect(transactions.map((tx) => tx.amountFen), [1700, 1700]);
+      expect(
+        transactions.map((tx) => tx.merchant),
+        unorderedEquals(['午饭', '地铁']),
+      );
+      expect(
+        transactions.map((tx) => tx.recognitionMetadata['operationId']).toSet(),
+        hasLength(2),
+      );
+    },
+  );
+
+  test(
+    'completed tasks cannot supply evidence for a later new entry',
+    () async {
+      var step = 0;
+      await run((messages, _) async {
+        if (++step == 1) {
+          return _call('original', 'propose_transaction', meal('午饭17元'));
+        }
+        final saved = _observation(messages);
+        return _answer('已记17元。[依据 ${saved['evidence_id']}]');
+      });
+      step = 0;
+      final result = await run((messages, _) async {
+        if (++step == 1) {
+          return _call('unrelated', 'propose_transaction', meal('昨天'));
+        }
+        expect(_observation(messages)['error'], 'validation_error');
+        return _answer('本次没有新增账目。');
+      }, question: '昨天');
+      expect(result['isError'], false);
+      expect(writes, 1);
+      expect((await ledger.snapshot()).transactions, hasLength(1));
+    },
+  );
+
+  test('clarifying a query does not authorize a new transaction', () async {
+    await run(
+      (_, _) async => _call('clarify', 'ask_user', {'question': '要查哪一天的午饭？'}),
+      question: '查一下午饭17元',
+    );
+    var step = 0;
+    final result = await run((messages, _) async {
+      if (++step == 1) {
+        return _call('record', 'propose_transaction', meal('昨天'));
+      }
+      expect(_observation(messages)['error'], 'validation_error');
+      return _answer('本次没有新增账目。');
+    }, question: '昨天');
+    expect(result['isError'], false);
+    expect(writes, 0);
+    expect((await ledger.snapshot()).transactions, isEmpty);
+  });
+
   for (final text in [
     '明天准备午饭17元',
     '午饭17元还没支付',
