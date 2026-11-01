@@ -81,16 +81,16 @@ Flutter 检查、测试和构建须串行执行，避免生成的平台插件注
 | `ios/` | iOS 宿主、权限和 Keychain 配置 |
 | `app/` | Android Room、支付采集、原生账号等核心及回归测试 |
 | `test/`、`integration_test/` | Flutter 单元、组件与平台集成测试 |
-| `docs/` | 用户指南、架构、设计、验证与发布文档 |
+| `docs/` | 公开的用户指南与发布说明 |
 
-Android Flutter 构建会从 `app/` 同步原生核心源码，不能删除该目录。原 Compose UI 不进入 Flutter APK；根 Gradle 构建保留原生回归测试入口。Android 沿用 Room 数据库，iOS 使用 SQLite；两端使用同一 JSON 备份格式，凭据分别保存在设备安全存储。
+Android Flutter 构建会从 `app/` 同步原生核心源码，不能删除该目录。修改原始源码，不编辑构建目录中的生成副本；根 Gradle 构建保留原生回归测试入口。
 
-- [产品范围](PRODUCT.md) · [视觉规范](DESIGN.md)
-- [桥接契约](docs/flutter-bridge-contract.md) · [Agent 架构](docs/agent-architecture.md)
-- [识别系统验证](docs/testing/recognition-system.md) · [AI 记账体验验证](docs/testing/ai-entry-experience.md)
+当前图标源文件与导出操作见[品牌资源说明](assets/branding/README.md)。
 
 ## 仓库内容
 
-源码、必要资源、平台工程、依赖锁文件、Gradle wrapper、Room schema、公开签名证书指纹和长期维护文档随仓库提交。
+源码、必要资源、平台工程、依赖锁文件、Gradle wrapper、Room schema 和公开签名证书指纹随仓库提交。
 
-本机 SDK、缓存、构建包、签名私钥与密码、设备状态、真实账本和凭据不进入 Git。一次性审查记录、开发计划及本地原型分别保留在已忽略的 `docs/reviews/`、`docs/superpowers/`、`docs/ui/`；Android 安装包通过 GitHub Releases 分发。
+公开文档只保留应用介绍、使用指南、更新记录、必要的贡献与发布流程，以及当前资源维护说明。`docs/` 默认忽略，仅 `USAGE.md` 和 `RELEASING.md` 允许提交；新增公开文档时须明确其读者和用途，并调整允许列表。
+
+本机 Agent 约定、产品与视觉方案、架构取舍、调研、开发计划、测试执行记录、真机验收日志和历史设计稿仅保留本地，不进入 Git。本机 SDK、缓存、构建包、签名私钥与密码、设备状态、真实账本和凭据同样不提交；Android 安装包通过 GitHub Releases 分发。
