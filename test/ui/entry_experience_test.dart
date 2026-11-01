@@ -225,8 +225,7 @@ Finder conversationScroll() => find
 
 Future<void> sendImage(WidgetTester tester, {String text = ''}) async {
   if (text.isNotEmpty) await tester.enterText(messageInput(), text);
-  await tester.tap(find.byTooltip('添加记账图片'));
-  await tester.pumpAndSettle();
+  await chooseAssistantInputOption(tester, '添加记账图片');
   await tester.tap(find.byTooltip('发送消息'));
   await tester.pumpAndSettle();
   final controller = tester
@@ -235,10 +234,24 @@ Future<void> sendImage(WidgetTester tester, {String text = ''}) async {
   expect(controller.error, isNull, reason: '凭证识别应完整成功：${controller.error}');
 }
 
+Future<void> chooseAssistantInputOption(
+  WidgetTester tester,
+  String label,
+) async {
+  await tester.tap(find.byTooltip('添加附件和更多'));
+  await tester.pumpAndSettle();
+  final option = find.widgetWithText(ListTile, label);
+  await tester.ensureVisible(option);
+  await tester.tap(option);
+  await tester.pumpAndSettle();
+}
+
 Future<void> supplement(WidgetTester tester, String text) async {
   await tester.enterText(messageInput(), text);
   await tester.pump();
-  await tester.tap(find.byTooltip('发送补充'));
+  final send = find.byTooltip('发送补充');
+  expect(send.hitTestable(), findsOneWidget);
+  await tester.tap(send.hitTestable());
   await tester.pumpAndSettle();
 }
 
@@ -260,7 +273,7 @@ void main() {
           )
           .controller!;
       expect(scroll.offset, 0);
-      expect(find.text('记一笔、问账，或分析收支…'), findsOneWidget);
+      expect(find.text('记一笔，或问问账本…'), findsOneWidget);
       expect(
         tester.widget<TextField>(messageInput()).decoration!.labelText,
         isNull,
@@ -282,8 +295,7 @@ void main() {
     (tester) async {
       final repository = EntryRepository();
       final c = await openAssistant(tester, repository);
-      await tester.tap(find.byTooltip('添加记账图片'));
-      await tester.pumpAndSettle();
+      await chooseAssistantInputOption(tester, '添加记账图片');
       await tester.tap(
         find.byKey(const ValueKey('assistant-attachment-preview')),
       );
@@ -470,9 +482,15 @@ void main() {
       await tester.ensureVisible(find.text('保存这 1 笔账单'));
       await tester.tap(find.text('保存这 1 笔账单'));
       await tester.pumpAndSettle();
+      expect(find.text('已保存到账本'), findsOneWidget);
       expect(c.transactions, hasLength(1));
       expect(c.drafts, hasLength(1));
       await supplement(tester, '没有其他消费了');
+      final requests = repository.calls
+          .where((call) => call.method == 'recognizeInput')
+          .toList();
+      expect(requests, hasLength(2));
+      expect(requests.last.arguments['text'], '盖饭 17 元，地铁 4 元。\n补充：没有其他消费了');
       expect(c.transactions, hasLength(1));
       expect(c.drafts, hasLength(1));
       expect(c.drafts.single.amountFen, 500);
@@ -549,7 +567,7 @@ void main() {
         ..speech = Completer<Map<String, dynamic>>();
       await openAssistant(tester, repository);
       await tester.enterText(messageInput(), '原有草稿');
-      await tester.tap(find.byTooltip('语音输入'));
+      await chooseAssistantInputOption(tester, '语音输入');
       await tester.pump();
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);

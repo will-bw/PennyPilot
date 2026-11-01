@@ -485,7 +485,9 @@ void main() {
         expect(tester.takeException(), isNull);
         await saveScreenshot(tester, 'reports-$suffix');
         await chooseTab(tester, 'AI 助手');
-        expect(find.byTooltip('发送消息'), findsOneWidget);
+        expect(find.byTooltip('语音输入'), findsOneWidget);
+        expect(find.byTooltip('添加附件和更多'), findsOneWidget);
+        expect(find.byTooltip('发送消息'), findsNothing);
         expect(tester.takeException(), isNull);
         await saveScreenshot(tester, 'chat-$suffix');
         await chooseTab(tester, '设置');
@@ -508,6 +510,7 @@ void main() {
           '午饭 28 元，地铁 4 元',
         );
         await tester.pumpAndSettle();
+        expect(find.byTooltip('发送消息'), findsOneWidget);
         expect(
           tester
               .widget<TextField>(find.byKey(const ValueKey('assistant-input')))

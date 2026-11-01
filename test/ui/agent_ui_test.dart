@@ -453,6 +453,11 @@ void main() {
       };
       await open(tester, repository: repo);
       final toggle = find.byKey(const ValueKey('assistant-thinking-toggle'));
+      expect(toggle, findsNothing);
+      await tester.tap(find.byTooltip('添加附件和更多'));
+      await tester.pumpAndSettle();
+      expect(repo.calls.where((call) => call.method == 'ask'), isEmpty);
+      expect(tester.widget<FilterChip>(toggle).selected, isTrue);
       await tester.tap(toggle);
       await tester.pumpAndSettle();
       expect(repo.data['settings']['deepSeekThinkingEnabled'], false);
@@ -464,8 +469,15 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('assistant-thinking-effort')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('最高').last);
+      final maxEffort = find.byWidgetPredicate(
+        (widget) =>
+            widget is CheckedPopupMenuItem<String> && widget.value == 'max',
+      );
+      await tester.ensureVisible(maxEffort);
+      expect(maxEffort.hitTestable(), findsOneWidget);
+      await tester.tap(maxEffort.hitTestable());
       await tester.pumpAndSettle();
+      expect(maxEffort, findsNothing);
       expect(repo.data['settings']['deepSeekReasoningEffort'], 'max');
       expect(repo.calls.where((call) => call.method == 'ask'), isEmpty);
       expect(
