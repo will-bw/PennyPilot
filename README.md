@@ -15,7 +15,7 @@
 
 ## 安装与开始使用
 
-当前版本为 **v0.7.0**，支持 Android 8.0 及以上。从 [GitHub Releases](https://github.com/will-bw/PennyPilot/releases/latest) 下载 APK，按系统提示确认安装。目前尚无对外分发的 iOS 安装包。
+当前版本为 **v0.8.0**，支持 Android 8.0 及以上。从 [GitHub Releases](https://github.com/will-bw/PennyPilot/releases/latest) 下载 APK，按系统提示确认安装。目前尚无对外分发的 iOS 安装包。
 
 安装后即可手动记账。首次使用可按需要开启权限，也可跳过，之后从「设置 → 权限设置」继续。文字、语音、图片识别和问账需先配置对应的模型服务或登录账号，详见 [使用指南](docs/USAGE.md)。
 
