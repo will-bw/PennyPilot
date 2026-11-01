@@ -84,8 +84,8 @@ Flutter 检查、测试和构建须串行执行；并行执行可能重写平台
 
 ## 发布与核验
 
-1. 提交已通过检查的源码，确认没有密钥、账本、SDK、缓存或测试产物进入 Git；保留 `app/` 原生核心、Room schema、Gradle wrapper 和依赖锁定文件。
-2. 从该提交构建正式 APK，运行 `python tool/prepare_release.py` 生成三份发布资产。
+1. 在工作分支提交已通过检查的源码、版本号及发布文档，通过 PR 合并到 `main`，不得直接推送或强制推送主分支。确认没有密钥、账本、SDK、缓存或测试产物进入 Git；保留 `app/` 原生核心、Room schema、Gradle wrapper 和依赖锁定文件。
+2. 从 `main` 上已合并的提交构建正式 APK，运行 `python tool/prepare_release.py` 生成三份发布资产。
 3. 创建对应标签及 Release 草稿，上传所有资产；填写本版功能变化、问题修复、更新方式，以及影响使用的适用条件或已知问题。
 4. 核对 APK 签名、版本、文件大小和 SHA-256，核对远端资产与本地产物一致，再公开 Release。
 5. 从公开 Release 下载或用 GitHub API 读取资产，确认版本清单可访问。用应用手动检查一次更新，并记录结果。
