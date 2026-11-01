@@ -180,10 +180,9 @@ packages:
   fl_chart:
     dependency: "direct main"
     description:
-      name: fl_chart
-      sha256: "5ed69b8be550c6276c8f0bc25c09704fb061018ed1b1681867ad18fcf477e7b7"
-      url: "https://pub.dev"
-    source: hosted
+      path: "third_party/fl_chart"
+      relative: true
+    source: path
     version: "1.3.0"
   flutter:
     dependency: "direct main"

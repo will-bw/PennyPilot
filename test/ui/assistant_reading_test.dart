@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
@@ -84,6 +85,19 @@ class _ReadingRepository extends TestLedgerRepository
     );
   }
 
+  void chart(String id) {
+    updates.add(
+      LedgerEvent('agent', 0, {
+        'phase': 'tool_result',
+        'runId': 'live',
+        'callId': id,
+        'tool': 'present_insight',
+        'trace': {'status': 'completed'},
+        'result': {'presentation': _chart(id)},
+      }),
+    );
+  }
+
   void complete() {
     if (pending.isCompleted) return;
     (state['session'] as Map)['status'] = 'completed';
@@ -105,6 +119,28 @@ class _ReadingRepository extends TestLedgerRepository
 Finder get _input => find.byKey(const ValueKey('assistant-input'));
 Finder get _conversation =>
     find.byKey(const ValueKey('assistant-conversation'));
+
+Map<String, dynamic> _chart(String id, {String type = 'bar'}) => {
+  'id': id,
+  'type': 'chart',
+  'title': '分类支出 $id',
+  'chartType': type,
+  'metric': 'expense',
+  'data': {
+    'expense': 4000,
+    'group_by': 'category',
+    'groups': [
+      {'label': '餐饮', 'category_id': 1, 'expense': 2800},
+      {'label': '交通', 'category_id': 2, 'expense': 1200},
+    ],
+  },
+};
+
+Finder _nativePlot(String type) => switch (type) {
+  'pie' => find.byType(PieChart),
+  'line' => find.byType(LineChart),
+  _ => find.byType(BarChart),
+};
 
 Future<({LedgerController controller, ValueNotifier<bool> active})> _open(
   WidgetTester tester,
@@ -147,6 +183,149 @@ Future<void> _layout(WidgetTester tester) async {
 }
 
 void main() {
+  for (final type in ['bar', 'line', 'pie']) {
+    testWidgets(
+      'a slow vertical drag starting on a saved $type plot reads earlier messages without streaming',
+      (tester) async {
+        final repository = _ReadingRepository(withHistory: true);
+        ((repository.state['session'] as Map)['messages'] as List).addAll(
+          <Map<String, dynamic>>[
+            {
+              'id': 'chart-user',
+              'runId': 'saved-chart',
+              'role': 'user',
+              'content': '查看分类支出图',
+            },
+            {
+              'id': 'chart-answer',
+              'runId': 'saved-chart',
+              'role': 'assistant',
+              'content': '下面是分类图，前面的分析也可以向上查看。',
+              'parts': [
+                {'type': 'chart', 'spec': _chart('saved-chart', type: type)},
+              ],
+            },
+          ],
+        );
+        await _open(tester, repository);
+        final scroll = tester.widget<ListView>(_conversation).controller!;
+        final initialOffset = scroll.offset;
+        expect(scroll.position.extentAfter, lessThan(2));
+        final plot = _nativePlot(type);
+        expect(plot.hitTestable(), findsOneWidget);
+        final gesture = await tester.startGesture(tester.getCenter(plot));
+        try {
+          for (var i = 0; i < 12; i++) {
+            await gesture.moveBy(const Offset(0, 6));
+            await tester.pump(const Duration(milliseconds: 30));
+          }
+          expect(
+            scroll.offset,
+            lessThan(initialOffset - 30),
+            reason: '绘图区上的竖向拖动应滚动会话，不能被图表的 pan 手势吞掉。',
+          );
+        } finally {
+          await gesture.cancel();
+        }
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'small history drags pause following before the old 80 pixel threshold',
+    (tester) async {
+      final repository = _ReadingRepository(withHistory: true);
+      await _open(tester, repository);
+      await tester.enterText(_input, '继续分析');
+      await tester.pump();
+      await tester.tap(find.byTooltip('发送消息'));
+      await tester.pump();
+      repository.delta('正在继续分析。', start: true);
+      await _layout(tester);
+      final scroll = tester.widget<ListView>(_conversation).controller!;
+      final initialOffset = scroll.offset;
+      final viewport = tester.getRect(_conversation);
+      final gesture = await tester.startGesture(
+        Offset(viewport.left + 8, viewport.center.dy),
+      );
+      try {
+        for (var i = 0; i < 16; i++) {
+          await gesture.moveBy(const Offset(0, 6));
+          await tester.pump(const Duration(milliseconds: 30));
+          final afterDrag = scroll.offset;
+          repository.delta('继续');
+          await _layout(tester);
+          if (i >= 3) {
+            expect(
+              scroll.offset,
+              lessThanOrEqualTo(afterDrag + 1),
+              reason: '用户已经开始慢慢向上阅读，流式更新不能把小于80px的滚动拉回底部。',
+            );
+          }
+        }
+        expect(scroll.offset, lessThan(initialOffset - 30));
+        expect(find.text('回到最新'), findsOneWidget);
+      } finally {
+        await gesture.cancel();
+        repository.complete();
+        await tester.pumpAndSettle();
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'slow drags from a live chart keep their reading position across deltas and another chart insertion',
+    (tester) async {
+      final repository = _ReadingRepository(withHistory: true);
+      await _open(tester, repository);
+      await tester.enterText(_input, '继续分析');
+      await tester.pump();
+      await tester.tap(find.byTooltip('发送消息'));
+      await tester.pump();
+      repository.delta('已经生成第一张分类图。', start: true);
+      repository.chart('first-chart');
+      await _layout(tester);
+      final scroll = tester.widget<ListView>(_conversation).controller!;
+      final initialOffset = scroll.offset;
+      expect(scroll.position.extentAfter, lessThan(2));
+      final plot = _nativePlot('bar');
+      expect(plot.hitTestable(), findsOneWidget);
+      final gesture = await tester.startGesture(tester.getCenter(plot));
+      var dragging = true;
+      try {
+        for (var i = 0; i < 16; i++) {
+          await gesture.moveBy(const Offset(0, 6));
+          await tester.pump(const Duration(milliseconds: 30));
+          final afterDrag = scroll.offset;
+          repository.delta('继续');
+          if (i == 7) repository.chart('second-chart');
+          await _layout(tester);
+          if (i >= 3) {
+            expect(
+              scroll.offset,
+              lessThanOrEqualTo(afterDrag + 1),
+              reason: '持续拖动中，文字和新图表导致的高度变化不能抢走用户的阅读位置。',
+            );
+          }
+        }
+        expect(scroll.offset, lessThan(initialOffset - 30));
+        expect(find.text('回到最新'), findsOneWidget);
+        await gesture.cancel();
+        dragging = false;
+        await tester.tap(find.text('回到最新'));
+        await _layout(tester);
+        expect(scroll.position.extentAfter, lessThan(2));
+      } finally {
+        if (dragging) await gesture.cancel();
+        repository.complete();
+        await tester.pumpAndSettle();
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'reading history survives keyboard resizing and streamed updates until return to latest',
     (tester) async {

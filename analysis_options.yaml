@@ -5,3 +5,5 @@ analyzer:
     - legacy/**
     - android/**
     - ios/**
+    # Vendored dependency; compiled and exercised by the app's chart tests.
+    - third_party/fl_chart/**

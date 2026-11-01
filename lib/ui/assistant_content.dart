@@ -354,6 +354,7 @@ class _AssistantVisualizationState extends State<AssistantVisualization> {
                 ),
             ],
             pieTouchData: PieTouchData(
+              panEnabled: false,
               touchCallback: (event, response) {
                 final index = response?.touchedSection?.touchedSectionIndex;
                 if (index != null &&
@@ -462,6 +463,7 @@ class _AssistantVisualizationState extends State<AssistantVisualization> {
                           ),
                         ],
                         lineTouchData: LineTouchData(
+                          panEnabled: false,
                           touchCallback: (event, response) {
                             final spots = response?.lineBarSpots;
                             if (spots != null && spots.isNotEmpty) {
@@ -496,6 +498,7 @@ class _AssistantVisualizationState extends State<AssistantVisualization> {
                             ),
                         ],
                         barTouchData: BarTouchData(
+                          panEnabled: false,
                           touchCallback: (event, response) {
                             final index = response?.spot?.touchedBarGroupIndex;
                             if (index != null) {

@@ -38,6 +38,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final input = TextEditingController();
   final scroll = ScrollController();
   final focus = FocusNode();
+  final scrollPointers = <int>{};
   late Listenable updates;
   bool syncingDraft = false, followingLatest = true, scrollScheduled = false;
   bool showLatest = false, programmaticScroll = false;
@@ -54,7 +55,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     input.text = widget.controller.assistantDraft;
     input.addListener(_inputChanged);
     focus.addListener(_focusChanged);
-    scroll.addListener(_scrollChanged);
     _listen();
     WidgetsBinding.instance.addObserver(this);
     _scheduleScroll();
@@ -132,20 +132,40 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _scrollChanged() {
-    // Layout changes (keyboard, composer height) are not a reading gesture.
-    if (!scroll.hasClients ||
-        programmaticScroll ||
-        !scroll.position.isScrollingNotifier.value) {
-      return;
+  bool _conversationScrolled(ScrollNotification notification) {
+    // Child charts can scroll horizontally. Only the conversation's own
+    // scrolling changes whether new output should follow the reader.
+    if (notification.depth != 0 || programmaticScroll) return false;
+    if (notification is ScrollStartNotification &&
+            notification.dragDetails != null ||
+        notification is UserScrollNotification &&
+            notification.direction != ScrollDirection.idle) {
+      // Stop at the start of the gesture, before the first scroll delta. Waiting
+      // until 80px away lets a queued jumpTo cancel small drags at the bottom.
+      if (followingLatest) {
+        _followLatest(false);
+      }
+    } else if (notification is ScrollEndNotification &&
+        notification.metrics.extentAfter <= 1 &&
+        (!followingLatest || showLatest)) {
+      _followLatest(true);
     }
-    final nearEnd = scroll.position.extentAfter < 80;
-    if (followingLatest != nearEnd || showLatest && nearEnd) {
-      setState(() {
-        followingLatest = nearEnd;
-        if (nearEnd) showLatest = false;
-      });
-    }
+    return false;
+  }
+
+  void _followLatest(bool follow) {
+    followingLatest = follow;
+    showLatest = !follow;
+    // Scroll notifications can arrive during layout. Update the intent now so
+    // queued output cannot move the reader, and rebuild after this frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _releaseScrollPointer(int pointer) {
+    scrollPointers.remove(pointer);
+    if (scrollPointers.isEmpty && followingLatest) _scheduleScroll();
   }
 
   void _scheduleScroll() {
@@ -156,6 +176,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (!mounted ||
           !followingLatest ||
           !scroll.hasClients ||
+          scrollPointers.isNotEmpty ||
           !widget.active ||
           widget.controller.messages.isEmpty &&
               !widget.controller.busyFor('assistantInput')) {
@@ -437,42 +458,43 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           if (notification.depth == 0 && followingLatest) _scheduleScroll();
           return false;
         },
-        child: NotificationListener<UserScrollNotification>(
-          onNotification: (notification) {
-            if (notification.direction != ScrollDirection.idle &&
-                scroll.hasClients &&
-                scroll.position.extentAfter >= 80) {
-              followingLatest = false;
-            }
-            return false;
-          },
-          child: ListView.builder(
-            key: const ValueKey('assistant-conversation'),
-            controller: scroll,
-            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-            itemCount: c.messages.isEmpty ? 2 : c.messages.length + 1,
-            itemBuilder: (context, index) {
-              if (c.messages.isEmpty && index == 0) {
-                return c.busyFor('assistantInput')
-                    ? const SizedBox.shrink()
-                    : _suggestions();
-              }
-              if (c.messages.isEmpty || index == c.messages.length) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (c.busyFor('assistantInput')) _recognitionProgress(c),
-                    if (!c.messages.any(
-                      (message) => c.canUndoAssistantRun(message.runId),
-                    ))
-                      RecognitionSaveNotice(controller: c, titlePrefix: '已记下'),
-                    AssistantRecognition(controller: c),
-                  ],
-                );
-              }
-              return _message(c, c.messages[index], index);
-            },
+        child: NotificationListener<ScrollNotification>(
+          onNotification: _conversationScrolled,
+          child: Listener(
+            onPointerDown: (event) => scrollPointers.add(event.pointer),
+            onPointerUp: (event) => _releaseScrollPointer(event.pointer),
+            onPointerCancel: (event) => _releaseScrollPointer(event.pointer),
+            child: ListView.builder(
+              key: const ValueKey('assistant-conversation'),
+              controller: scroll,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+              itemCount: c.messages.isEmpty ? 2 : c.messages.length + 1,
+              itemBuilder: (context, index) {
+                if (c.messages.isEmpty && index == 0) {
+                  return c.busyFor('assistantInput')
+                      ? const SizedBox.shrink()
+                      : _suggestions();
+                }
+                if (c.messages.isEmpty || index == c.messages.length) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (c.busyFor('assistantInput')) _recognitionProgress(c),
+                      if (!c.messages.any(
+                        (message) => c.canUndoAssistantRun(message.runId),
+                      ))
+                        RecognitionSaveNotice(
+                          controller: c,
+                          titlePrefix: '已记下',
+                        ),
+                      AssistantRecognition(controller: c),
+                    ],
+                  );
+                }
+                return _message(c, c.messages[index], index);
+              },
+            ),
           ),
         ),
       ),
