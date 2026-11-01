@@ -499,37 +499,60 @@ class ChatCompletionStreamDecoder {
     if (indices.asMap().entries.any((entry) => entry.key != entry.value)) {
       aiFailure('模型工具调用不完整。');
     }
-    final ids = <String>{};
-    for (final call in _calls.values) {
-      final function = call['function'] as Map<String, dynamic>;
-      if ((call['id'] as String).isEmpty ||
-          !ids.add(call['id'] as String) ||
-          !allowedTools.contains(function['name'])) {
-        aiFailure('模型工具调用无效。');
-      }
-      if ((function['arguments'] as String).length >
-          (function['name'] == 'render_artifact' ? 96 * 1024 : 16000)) {
-        aiFailure('模型工具参数过长。');
-      }
-      decodeAiObject(function['arguments'] as String);
-    }
-    if (_calls.isNotEmpty && _finish != 'tool_calls' ||
-        _calls.isEmpty && _finish == 'tool_calls') {
-      aiFailure('模型工具完成状态不一致。');
-    }
-    if (_calls.isEmpty && _text.toString().trim().isEmpty) {
-      aiFailure('模型没有返回有效内容。');
-    }
-    return {
-      'message': {
-        'role': 'assistant',
-        'content': _text.toString(),
-        if (_calls.isNotEmpty)
-          'tool_calls': indices.map((index) => _calls[index]).toList(),
-        if (_reasoning.isNotEmpty) 'reasoning_content': _reasoning.toString(),
-      },
-      'usage': _usage,
+    final message = <String, dynamic>{
+      'role': 'assistant',
+      'content': _text.toString(),
+      if (_calls.isNotEmpty)
+        'tool_calls': indices.map((index) => _calls[index]).toList(),
+      if (_reasoning.isNotEmpty) 'reasoning_content': _reasoning.toString(),
     };
+    validateChatCompletionMessage(message, _finish!, allowedTools);
+    return {'message': message, 'usage': _usage};
+  }
+}
+
+/// Both complete JSON responses and assembled streams must pass the same tool
+/// checks before the runtime receives executable calls.
+void validateChatCompletionMessage(
+  Map<String, dynamic> message,
+  String finishReason,
+  Set<String> allowedTools,
+) {
+  if (message['role'] != 'assistant' ||
+      message['content'] != null && message['content'] is! String ||
+      message['tool_calls'] != null && message['tool_calls'] is! List ||
+      message['reasoning_content'] != null &&
+          message['reasoning_content'] is! String) {
+    aiFailure('模型工具响应格式无效。');
+  }
+  final calls = message['tool_calls'] as List? ?? const [];
+  if (calls.length > 16) aiFailure('模型返回了过多工具调用。');
+  if (calls.isNotEmpty && finishReason != 'tool_calls' ||
+      calls.isEmpty && finishReason != 'stop') {
+    aiFailure('模型工具完成状态不一致。');
+  }
+  final ids = <String>{};
+  for (final raw in calls) {
+    final call = aiObject(raw);
+    final function = aiObject(call['function']);
+    final id = call['id'], arguments = function['arguments'];
+    if (id is! String ||
+        id.trim().isEmpty ||
+        id.length > 256 ||
+        !ids.add(id) ||
+        call['type'] != null && call['type'] != 'function' ||
+        !allowedTools.contains(function['name']) ||
+        arguments is! String) {
+      aiFailure('模型工具调用无效。');
+    }
+    if (arguments.length >
+        (function['name'] == 'render_artifact' ? 96 * 1024 : 16000)) {
+      aiFailure('模型工具参数过长。');
+    }
+    decodeAiObject(arguments);
+  }
+  if (calls.isEmpty && (message['content'] as String? ?? '').trim().isEmpty) {
+    aiFailure('模型没有返回有效内容。');
   }
 }
 

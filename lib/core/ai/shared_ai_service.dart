@@ -439,10 +439,13 @@ class SharedAiService {
         aiFailure('模型输出未完整完成，未执行工具。');
       }
       final message = aiObject(choice['message']);
-      if (message['content'] != null && message['content'] is! String ||
-          message['tool_calls'] != null && message['tool_calls'] is! List) {
-        aiFailure('模型工具响应格式无效。');
-      }
+      validateChatCompletionMessage(
+        message,
+        choice['finish_reason'] as String,
+        tools
+            .map((tool) => aiObject(tool['function'])['name'] as String)
+            .toSet(),
+      );
       final usage = payload['usage'] as Map?;
       return AgentReply(
         message: {

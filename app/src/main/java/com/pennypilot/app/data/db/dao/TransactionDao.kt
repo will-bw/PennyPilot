@@ -97,7 +97,7 @@ interface TransactionDao {
     suspend fun countCapturedSince(since: Long): Int
 
     /** 分类被删除时把名下交易改挂到目标分类 */
-    @Query("UPDATE transactions SET category_id = :newId WHERE category_id = :oldId")
+    @Query("UPDATE transactions SET category_id = :newId, edit_version = edit_version + 1 WHERE category_id = :oldId")
     suspend fun reassignCategory(oldId: Long, newId: Long)
 
     @Query("UPDATE transactions SET duplicate_of = NULL WHERE duplicate_of = :id")

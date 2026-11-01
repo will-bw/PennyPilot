@@ -89,6 +89,19 @@ class TransactionDaoTest {
     }
 
     @Test
+    fun `reassigning a deleted category invalidates stale transaction versions`() = runTest {
+        val changed = dao.insert(tx(1800))
+        val unchanged = dao.insert(tx(2000).copy(categoryId = 3, editVersion = 2))
+
+        dao.reassignCategory(1, 2)
+
+        assertEquals(2L, dao.getById(changed)?.categoryId)
+        assertEquals(1L, dao.getById(changed)?.editVersion)
+        assertEquals(3L, dao.getById(unchanged)?.categoryId)
+        assertEquals(2L, dao.getById(unchanged)?.editVersion)
+    }
+
+    @Test
     fun `countBySourceSince only counts matching source and window`() = runTest {
         val now = System.currentTimeMillis()
         dao.insert(tx(1800, createdAt = now, source = TxSource.NOTIFICATION, status = TxStatus.PENDING))

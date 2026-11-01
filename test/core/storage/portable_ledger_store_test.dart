@@ -352,6 +352,72 @@ void main() {
     },
   );
   test(
+    'refund-only report preserves negative category totals across restore',
+    () async {
+      const breakdown = '[{"name":"退款","total":-1234,"count":1}]';
+      await store.invoke('saveGeneratedReport', {
+        'revision': 0,
+        'yearMonth': '2026-09',
+        'totalExpense': -1234,
+        'totalIncome': 0,
+        'byCategoryJson': breakdown,
+        'llmSummary': '上月退款',
+      });
+      final backup = await export();
+      await restore(backup);
+      expect(await export(), backup);
+      final report = (await store.snapshot()).reports.single;
+      expect(report.totalExpense, -1234);
+      expect(report.byCategoryJson, breakdown);
+    },
+  );
+
+  test(
+    'processing a pending row invalidates stale edits and deletes',
+    () async {
+      await store.invoke('saveTransaction', {'revision': 0, ..._transaction()});
+      final backup = await export();
+      final original = Map<String, dynamic>.from(
+        (backup['transactions'] as List).single as Map,
+      );
+      await restore({
+        ...backup,
+        'transactions': [
+          {...original, 'status': 'PENDING'},
+        ],
+      });
+      await store.invoke('setTransactionStatus', {
+        'revision': 1,
+        'id': original['id'],
+        'status': 'IGNORED',
+      });
+      final processed = (await store.snapshot()).transactions.single;
+      expect(processed.status, TxStatus.ignored);
+      expect(processed.editVersion, 1);
+      await expectLater(
+        store.invoke('saveTransaction', {
+          'revision': 1,
+          ..._transaction(),
+          'id': processed.id,
+          'editVersion': 0,
+        }),
+        throwsA(_error('STALE_TRANSACTION')),
+      );
+      await expectLater(
+        store.invoke('deleteTransaction', {
+          'revision': 1,
+          'id': processed.id,
+          'editVersion': 0,
+        }),
+        throwsA(_error('INVALID_ARGUMENT')),
+      );
+      expect(
+        (await store.snapshot()).transactions.single.status,
+        TxStatus.ignored,
+      );
+    },
+  );
+  test(
     'imported unknown facts remain pending and unknown model drafts cannot bypass review',
     () async {
       for (final source in ['AI_TEXT', 'AI_VOICE', 'AI_IMAGE']) {
@@ -642,6 +708,27 @@ void main() {
     },
   );
 
+  test('stale budget proposal cannot change a restored ledger', () async {
+    await store.invoke('updateSettings', {'budgetCents': 10000});
+    final backup = await export();
+    await restore(backup);
+    await expectLater(
+      store.invoke('updateSettings', {
+        'revision': 0,
+        'budgetCents': 20000,
+        'expectedBudgetCents': 10000,
+      }),
+      throwsA(_error('STALE_LEDGER')),
+    );
+    expect((await store.snapshot()).settings['budgetCents'], 10000);
+    await store.invoke('updateSettings', {
+      'revision': 1,
+      'budgetCents': 20000,
+      'expectedBudgetCents': 10000,
+    });
+    expect((await store.snapshot()).settings['budgetCents'], 20000);
+  });
+
   test(
     'Android backup roundtrip retains IDs and all original capture evidence',
     () async {
@@ -793,6 +880,15 @@ void main() {
       });
       final snapshot = await store.snapshot();
       expect(snapshot.transactions.single.categoryId, 12);
+      expect(snapshot.transactions.single.editVersion, 1);
+      await expectLater(
+        store.invoke('deleteTransaction', {
+          'revision': 0,
+          'id': snapshot.transactions.single.id,
+          'editVersion': 0,
+        }),
+        throwsA(_error('INVALID_ARGUMENT')),
+      );
       expect(
         snapshot.categories.singleWhere((row) => row.id == 12).enabled,
         true,

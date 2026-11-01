@@ -17,7 +17,7 @@ class _Platform extends MobilePlatformServices {
 }
 
 class _NativeStore extends TestLedgerRepository {
-  _NativeStore() : super(populated: true) {
+  _NativeStore({this.contentEncoding = 'omitted'}) : super(populated: true) {
     data = {
       ...data,
       'settings': {
@@ -28,6 +28,7 @@ class _NativeStore extends TestLedgerRepository {
       'auth': {'activeAccountId': 'native-account'},
     };
   }
+  final String contentEncoding;
   int turns = 0;
   @override
   Future<Object?> invoke(String method, Map<String, dynamic> args) async {
@@ -48,8 +49,8 @@ class _NativeStore extends TestLedgerRepository {
     if (++turns == 1) {
       return {
         'messageJson': jsonEncode({
-          'role': 'assistant',
-          'content': '',
+          if (contentEncoding == 'empty') 'content': '',
+          if (contentEncoding == 'null') 'content': null,
           'tool_calls': [
             {
               'id': 'native-call',
@@ -64,6 +65,11 @@ class _NativeStore extends TestLedgerRepository {
       };
     }
     final messages = jsonDecode(args['messagesJson'] as String) as List;
+    final assistant = messages.singleWhere(
+      (message) => message['role'] == 'assistant',
+    );
+    expect(assistant['tool_calls'].single['id'], 'native-call');
+    expect(messages.last['tool_call_id'], 'native-call');
     final observation = jsonDecode(messages.last['content'] as String) as Map;
     expect((observation['data'] as Map)['expense'], 4000);
     return {
@@ -268,34 +274,39 @@ void main() {
       expect(result['answer'], '你好');
     },
   );
-  test(
-    'Android ChatGPT uses shared loop and native per-turn transport instead of legacy ask',
-    () async {
-      final store = _NativeStore();
-      final agentStore = MemoryAgentStore();
-      final credentials = MemoryCredentials();
-      final ai = SharedAiService(credentials: credentials);
-      final repo = CrossPlatformLedgerRepository(
-        store: store,
-        agentStore: agentStore,
-        credentials: credentials,
-        ai: ai,
-        platformServices: _Platform(),
-        android: true,
-      );
-      addTearDown(repo.close);
-      addTearDown(store.updates.close);
-      final result =
-          await repo.invoke('ask', {'revision': 0, 'question': '本月花了多少'})
-              as Map;
-      expect(result['isError'], false);
-      expect(store.turns, 2);
-      expect(store.calls.map((c) => c.method), everyElement('agentModelTurn'));
-      expect((result['session'] as Map)['messages'], hasLength(4));
-      final state = await repo.agentState();
-      expect((state['session'] as Map)['status'], 'completed');
-    },
-  );
+  for (final encoding in ['omitted', 'null', 'empty']) {
+    test(
+      'Android native tool-only reply continues with $encoding content',
+      () async {
+        final store = _NativeStore(contentEncoding: encoding);
+        final agentStore = MemoryAgentStore();
+        final credentials = MemoryCredentials();
+        final ai = SharedAiService(credentials: credentials);
+        final repo = CrossPlatformLedgerRepository(
+          store: store,
+          agentStore: agentStore,
+          credentials: credentials,
+          ai: ai,
+          platformServices: _Platform(),
+          android: true,
+        );
+        addTearDown(repo.close);
+        addTearDown(store.updates.close);
+        final result =
+            await repo.invoke('ask', {'revision': 0, 'question': '本月花了多少'})
+                as Map;
+        expect(result['isError'], false);
+        expect(store.turns, 2);
+        expect(
+          store.calls.map((c) => c.method),
+          everyElement('agentModelTurn'),
+        );
+        expect((result['session'] as Map)['messages'], hasLength(4));
+        final state = await repo.agentState();
+        expect((state['session'] as Map)['status'], 'completed');
+      },
+    );
+  }
   for (final automatic in [true, false]) {
     test(
       'repository wires chat new-entry saving according to user preference: $automatic',
