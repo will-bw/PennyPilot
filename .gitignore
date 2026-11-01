@@ -17,10 +17,14 @@ local.properties
 .codex/
 .impeccable/
 
-# Local development notes and prototypes
-/docs/reviews/
-/docs/superpowers/
-/docs/ui/
+# Public docs are opt-in; development records stay local
+/docs/*
+!/docs/USAGE.md
+!/docs/RELEASING.md
+/AGENTS.md
+/PRODUCT.md
+/DESIGN.md
+/ios/Runner/Assets.xcassets/LaunchImage.imageset/README.md
 
 # Private configuration and signing material
 .env
