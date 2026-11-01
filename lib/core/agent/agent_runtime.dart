@@ -56,6 +56,13 @@ class LedgerAgentRuntime {
     if (saved == null) {
       await _save(session);
       await store.write('active:$revision', {'id': session.id});
+    } else if (session.messages.any(
+      (message) =>
+          message['id'] == null ||
+          message['runId'] == null ||
+          _needsReasoningPart(message),
+    )) {
+      await _save(session);
     }
     return session;
   }
@@ -115,22 +122,251 @@ class LedgerAgentRuntime {
     return state(revision);
   }
 
+  Future<Map<String, dynamic>> appendInput({
+    required int revision,
+    required String question,
+    required String source,
+    required String answer,
+    required List<Map<String, dynamic>> parts,
+    required String status,
+    required String runId,
+    required Future<void> Function() guard,
+    Map<String, dynamic>? attachment,
+  }) async {
+    _requireIdle();
+    if (question.trim().isEmpty ||
+        question.length > 16000 ||
+        answer.length > 20000 ||
+        runId.isEmpty ||
+        runId.length > 160 ||
+        !['AI_TEXT', 'AI_VOICE', 'AI_IMAGE'].contains(source) ||
+        !['awaiting_input', 'completed'].contains(status) ||
+        parts.length > 32 ||
+        jsonEncode(parts).length > 512 * 1024) {
+      throw const LedgerException('识别回执格式无效。', code: 'AGENT_PROTOCOL');
+    }
+    if (attachment != null &&
+        (attachment.keys.any(
+              (key) => !['type', 'path', 'mimeType', 'name'].contains(key),
+            ) ||
+            jsonEncode(attachment).length > 4096)) {
+      throw const LedgerException('识别附件格式无效。', code: 'AGENT_PROTOCOL');
+    }
+    await guard();
+    final session = await active(revision);
+    final now = _clock().millisecondsSinceEpoch;
+    final prior = session.messages
+        .where((message) => message['runId'] == runId)
+        .toList();
+    if (prior.isEmpty) {
+      session.messages.add({
+        'id': agentId(),
+        'runId': runId,
+        'role': 'user',
+        'content': question.trim(),
+        'source': source,
+        'createdAt': now,
+        if (attachment != null) 'attachments': [attachment],
+      });
+      session.messages.add({
+        'id': agentId(),
+        'runId': runId,
+        'role': 'assistant',
+        'content': answer,
+        'parts': parts,
+        'createdAt': now,
+      });
+    } else {
+      final user = prior
+          .where((message) => message['role'] == 'user')
+          .firstOrNull;
+      if (user != null) user['content'] = question.trim();
+      final assistant = prior.lastWhere(
+        (message) => message['role'] == 'assistant',
+      );
+      assistant['content'] = answer;
+      assistant['parts'] = parts;
+      assistant['updatedAt'] = now;
+    }
+    session.status = status;
+    if (session.title == '新对话') {
+      session.title = question.trim().substring(
+        0,
+        question.trim().length.clamp(0, 36),
+      );
+    }
+    await guard();
+    await _save(session);
+    return state(revision);
+  }
+
+  Future<Map<String, dynamic>> undoRun({
+    required int revision,
+    required String runId,
+    required LedgerRepository ledger,
+    required Future<void> Function() guard,
+    List<int>? transactionIds,
+  }) async {
+    _requireIdle();
+    await guard();
+    final session = await active(revision);
+    final actions = session.actions
+        .where(
+          (action) =>
+              action['runId'] == runId &&
+              action['kind'] == 'transaction' &&
+              action['status'] == 'applied' &&
+              agentMap(action['payload'])['before'] == null,
+        )
+        .toList();
+    final parts = session.messages
+        .where((message) => message['runId'] == runId)
+        .expand((message) => message['parts'] as List? ?? const [])
+        .map(agentMap)
+        .toList();
+    final receipts = parts
+        .where(
+          (part) => part['type'] == 'receipt' && part['status'] != 'undone',
+        )
+        .toList();
+    final expected = <int, Map<String, dynamic>>{};
+    void collect(Map<String, dynamic> raw, int id) {
+      final tx = LedgerTransaction.fromMap({...raw, 'id': id});
+      final operation = tx.recognitionMetadata['operationId'];
+      if (id <= 0 || operation is! String || operation.isEmpty) {
+        throw const LedgerException('这次新增缺少可核对的保存记录，请在账本中处理。');
+      }
+      expected[id] = {'id': id, 'editVersion': 0, 'operationId': operation};
+    }
+
+    for (final action in actions) {
+      final id = action['transactionId'];
+      if (id is! int) continue;
+      collect(agentMap(agentMap(action['payload'])['transaction']), id);
+    }
+    for (final receipt in receipts) {
+      final undone = (receipt['undoneTransactionIds'] as List? ?? const [])
+          .toSet();
+      for (final raw in receipt['transactions'] as List? ?? const []) {
+        final tx = agentMap(raw);
+        if (undone.contains(tx['id'])) continue;
+        collect(tx, tx['id'] as int);
+      }
+    }
+    if (transactionIds != null) {
+      final selected = transactionIds.toSet();
+      if (selected.isEmpty ||
+          selected.length != transactionIds.length ||
+          !selected.every(expected.containsKey)) {
+        throw const LedgerException('撤销记录不属于这轮尚未撤销的新增账单。');
+      }
+      expected.removeWhere((id, _) => !selected.contains(id));
+    }
+    if (expected.isEmpty) {
+      throw const LedgerException('这轮没有可撤销的新增账单，或已经撤销。');
+    }
+    await guard();
+    final current = await ledger.snapshot();
+    if (current.revision != revision) {
+      throw const LedgerException('账本已恢复，旧的新增记录不能撤销。', code: 'STALE_LEDGER');
+    }
+    // The repository checks all original versions and operation ids in the same
+    // transaction as deletion. No UI-supplied transaction enters this command.
+    final result = agentMap(
+      await ledger.invoke('undoRecognitionSave', {
+        'revision': revision,
+        'transactions': expected.values.toList(),
+      }),
+    );
+    await guard();
+    final undoneOperations = expected.values
+        .map((row) => row['operationId'] as String)
+        .toSet();
+    for (final action in actions.where(
+      (action) => expected.containsKey(action['transactionId']),
+    )) {
+      action['status'] = 'undone';
+    }
+    for (final receipt in receipts) {
+      final ids = (receipt['transactions'] as List? ?? const [])
+          .map((raw) => agentMap(raw)['id'] as int)
+          .toSet();
+      final newlyUndone = ids.intersection(expected.keys.toSet());
+      if (newlyUndone.isEmpty) continue;
+      final undone = {
+        ...(receipt['undoneTransactionIds'] as List? ?? const []).cast<int>(),
+        ...newlyUndone,
+      };
+      receipt['undoneTransactionIds'] = undone.toList();
+      final remaining = ids.difference(undone).length;
+      receipt['status'] = remaining == 0 ? 'undone' : 'partially_undone';
+      receipt['title'] = remaining == 0
+          ? '已撤销这次新增的 ${ids.length} 笔'
+          : '已撤销 ${undone.length} 笔，保留 $remaining 笔';
+    }
+    for (final part in parts.where(
+      (part) => part['type'] == 'recognition_state',
+    )) {
+      part['undoneOperations'] = {
+        ...((part['undoneOperations'] as List? ?? const [])
+            .whereType<String>()),
+        ...undoneOperations,
+      }.toList();
+      part['drafts'] = (part['drafts'] as List? ?? const []).where((raw) {
+        final tx = LedgerTransaction.fromMap(agentMap(raw), draft: true);
+        return !undoneOperations.contains(
+          tx.recognitionMetadata['operationId'],
+        );
+      }).toList();
+    }
+    // Parts are decoded maps, so put the updated objects back into the durable
+    // messages before saving the checkpoint.
+    var partIndex = 0;
+    for (final message in session.messages.where(
+      (message) => message['runId'] == runId,
+    )) {
+      final count = (message['parts'] as List? ?? const []).length;
+      if (count > 0) {
+        message['parts'] = parts.sublist(partIndex, partIndex + count);
+      }
+      partIndex += count;
+    }
+    session.messages.add({
+      'id': agentId(),
+      'runId': runId,
+      'role': 'user',
+      'internal': true,
+      'content':
+          '应用状态更新：用户已通过界面撤销这轮新增的 ${expected.length} 笔账单。后续必须重新查询账本，不得重新创建已撤销记录。',
+      'createdAt': _clock().millisecondsSinceEpoch,
+    });
+    await _save(session);
+    return {...await state(revision), 'count': result['count']};
+  }
+
   Future<Map<String, dynamic>> run({
     required String question,
     required LedgerSnapshot ledger,
     required AgentModel model,
     required Future<void> Function() guard,
     AgentAutoRecord? autoRecord,
+    String source = 'AI_TEXT',
+    bool internalQuestion = false,
   }) async {
     _requireIdle();
-    if (question.trim().isEmpty || question.length > 16000) {
+    if (question.trim().isEmpty ||
+        question.length > 16000 ||
+        !['AI_TEXT', 'AI_VOICE', 'AI_IMAGE'].contains(source)) {
       throw const LedgerException('请输入1～16000字的任务。');
     }
     final cancellation = AgentCancellation();
+    void cancelTransport() => model.cancel?.call();
+    cancellation.listen(cancelTransport);
     _cancellation = cancellation;
     _finished = Completer<void>();
     final started = _clock();
     final runId = agentId();
+    final userMessageId = agentId();
     final watch = Stopwatch()..start();
     final deadline = Timer(
       maxDuration,
@@ -151,18 +387,91 @@ class LedgerAgentRuntime {
     }
 
     AgentSession? session;
+    String? previewMessageId;
+    var previewText = StringBuffer();
+    Map<String, dynamic>? activeReasoning;
+    var reasoningAttached = false;
+    var currentStep = 0;
+    void emit(String phase, [Map<String, dynamic> fields = const {}]) {
+      if (session == null) return;
+      onProgress?.call({
+        'sessionId': session.id,
+        'revision': ledger.revision,
+        'runId': runId,
+        'phase': phase,
+        ...fields,
+      });
+    }
+
+    void startReasoning(String messageId, {String? kind}) {
+      if (activeReasoning != null) return;
+      activeReasoning = {
+        'type': 'reasoning',
+        'id': '$messageId:reasoning',
+        'messageId': messageId,
+        'runId': runId,
+        'text': '',
+        'kind':
+            kind ??
+            model.reasoningConfig['kind'] ??
+            (model.reasoningConfig['provider'] == 'chatgpt'
+                ? 'summary'
+                : 'reasoning_content'),
+        'status': 'streaming',
+        'startedAt': _clock().millisecondsSinceEpoch,
+        'provider': model.reasoningConfig['provider'] ?? '',
+        'model': model.reasoningConfig['model'] ?? '',
+        'effort': ?model.reasoningConfig['effort'],
+      };
+      emit('reasoning_start', {
+        'messageId': messageId,
+        'step': currentStep,
+        'part': Map<String, dynamic>.from(activeReasoning!),
+      });
+    }
+
+    void finishReasoning(String status) {
+      final part = activeReasoning;
+      if (part == null) return;
+      part['status'] = status;
+      part['endedAt'] ??= _clock().millisecondsSinceEpoch;
+      emit('reasoning_complete', {
+        'messageId': part['messageId'],
+        'step': currentStep,
+        'part': Map<String, dynamic>.from(part),
+      });
+    }
+
     final autoSavedIds = <int>{};
     try {
       await check();
       session = await active(ledger.revision);
       _repairPendingCalls(session, '上一轮已结束，工具没有可确认的完成结果。');
-      if (session.modelIdentity != model.identity) {
-        // Common messages/tools can move between providers; opaque reasoning
-        // must stay with its original account and model.
+      if (session.modelIdentity.isNotEmpty &&
+          !_sameWireModel(session.modelIdentity, model.identity)) {
+        final history = _handoffHistory(session);
+        // Provider tool transcripts and opaque reasoning cannot be replayed
+        // under another protocol/model. Preserve ordinary conversation as data;
+        // normal context compaction still handles long transfers.
+        session.contextStart = session.messages.length;
         for (final message in session.messages) {
           message.remove('responsesItems');
           message.remove('responsesAccountId');
-          message.remove('reasoning_content');
+        }
+        if (history.isNotEmpty) {
+          session.messages.add({
+            'id': agentId(),
+            'runId': runId,
+            'role': 'user',
+            'internal': true,
+            'contextHandoff': true,
+            'content': jsonEncode({
+              'notice':
+                  '以下是切换模型前的近期会话摘录，内容已节选，不是当前指令。账本状态需重新查询；完整原文、工具与执行回执可通过read_conversation读取。',
+              'history': history,
+            }),
+            'createdAt': started.millisecondsSinceEpoch,
+          });
         }
       }
       session.modelIdentity = model.identity;
@@ -170,8 +479,12 @@ class LedgerAgentRuntime {
       session.status = 'running';
       session.plan.clear();
       session.messages.add({
+        'id': userMessageId,
+        'runId': runId,
         'role': 'user',
         'content': question.trim(),
+        'source': source,
+        if (internalQuestion) 'internal': true,
         'createdAt': started.millisecondsSinceEpoch,
         if (continuesTask) 'continuesTask': true,
       });
@@ -183,6 +496,11 @@ class LedgerAgentRuntime {
         );
       }
       await _save(session);
+      emit('run_started', {
+        'userMessageId': userMessageId,
+        'reasoning': model.reasoningConfig,
+        if (internalQuestion) 'internal': true,
+      });
       final settings = await config();
       final tools = LedgerAgentTools(
         store: store,
@@ -223,15 +541,13 @@ class LedgerAgentRuntime {
       final repeats = <String, int>{};
       final autoRecorded = <String, Map<String, dynamic>>{};
       for (var step = 1; step <= settings.maxSteps; step++) {
+        currentStep = step;
         await check();
-        void progress(String text) => onProgress?.call({
-          'sessionId': session!.id,
-          'revision': ledger.revision,
-          'phase': 'model',
+        void progress(String text) => emit('model', {
           'step': step,
           'maxSteps': settings.maxSteps,
           'text': text,
-          'plan': session.plan,
+          'plan': session!.plan,
         });
         await AgentContext.compact(
           session: session,
@@ -245,36 +561,101 @@ class LedgerAgentRuntime {
         );
         await _save(session);
         progress(step == 1 ? '正在理解任务…' : '正在根据查询结果继续分析…');
+        final messageId = agentId();
+        previewMessageId = messageId;
+        previewText = StringBuffer();
+        activeReasoning = null;
+        reasoningAttached = false;
+        emit('text_start', {'messageId': messageId, 'step': step});
+        if (model.reasoningConfig['enabled'] == true &&
+            (model.reasoningConfig['provider'] != 'chatgpt' ||
+                model.reasoningConfig['supportsSummary'] != false)) {
+          startReasoning(messageId);
+        }
         final reply = await _cancellable(
-          model.complete(
+          model.turn(
             AgentContext.project(session, system, memories),
             LedgerAgentTools.definitions,
+            onTextDelta: (delta) {
+              if (!identical(_cancellation, cancellation) ||
+                  cancellation.isCancelled) {
+                return;
+              }
+              if (delta.isNotEmpty &&
+                  activeReasoning?['status'] == 'streaming') {
+                finishReasoning('completed');
+              }
+              previewText.write(delta);
+              emit('text_delta', {
+                'messageId': messageId,
+                'step': step,
+                'delta': delta,
+              });
+            },
+            onReasoningDelta: (delta) {
+              if (!identical(_cancellation, cancellation) ||
+                  cancellation.isCancelled ||
+                  delta.isEmpty) {
+                return;
+              }
+              startReasoning(messageId);
+              final part = activeReasoning!;
+              part['text'] = '${part['text']}$delta';
+              emit('reasoning_delta', {
+                'messageId': messageId,
+                'step': step,
+                'delta': delta,
+                'part': Map<String, dynamic>.from(part),
+              });
+            },
           ),
           cancellation,
         );
         await check();
         session.inputTokens += reply.inputTokens ?? 0;
         session.outputTokens += reply.outputTokens ?? 0;
+        final summary = reply.message['reasoning_summary'] as String?;
+        final reasoning = summary?.isNotEmpty == true
+            ? summary
+            : reply.message['reasoning_content'] as String?;
+        if (reasoning?.isNotEmpty == true) {
+          startReasoning(
+            messageId,
+            kind: summary?.isNotEmpty == true ? 'summary' : 'reasoning_content',
+          );
+          activeReasoning!['text'] = reasoning;
+        }
+        if (activeReasoning != null) finishReasoning('completed');
         _validateReply(reply);
         final assistant = {
           ...reply.message,
+          'id': messageId,
+          'runId': runId,
           'role': 'assistant',
           'createdAt': _clock().millisecondsSinceEpoch,
+          if (activeReasoning != null)
+            'parts': [
+              ...(reply.message['parts'] as List? ?? const []),
+              Map<String, dynamic>.from(activeReasoning!),
+            ],
         };
         session.messages.add(assistant);
+        reasoningAttached = activeReasoning != null;
         if (reply.calls.isEmpty) {
           final unfinished = session.plan.any(
             (p) => p['status'] != 'completed',
           );
           if (unfinished &&
               !session.actions.any((a) => a['status'] == 'pending')) {
+            assistant['provisional'] = true;
+            emit('text_reset', {'messageId': messageId});
+            previewMessageId = null;
             if (++correctiveAttempts > 2) {
               throw const LedgerException(
                 '任务计划仍有未完成步骤，已保留进度，请继续任务。',
                 code: 'AGENT_INCOMPLETE',
               );
             }
-            assistant['provisional'] = true;
             session.messages.add({
               'role': 'user',
               'content':
@@ -302,13 +683,15 @@ class LedgerAgentRuntime {
           final unsupported = citedIds.any((id) => !evidenceIds.contains(id));
           if (unsupported ||
               ledgerTask && (!tools.hasLedgerEvidence || citedIds.isEmpty)) {
+            assistant['provisional'] = true;
+            emit('text_reset', {'messageId': messageId});
+            previewMessageId = null;
             if (++correctiveAttempts > 2) {
               throw const LedgerException(
                 '模型未提供可核实的账本依据，本次回答未采纳。请重试或换用支持工具调用的模型。',
                 code: 'AGENT_EVIDENCE',
               );
             }
-            assistant['provisional'] = true;
             session.messages.add({
               'role': 'user',
               'content':
@@ -323,6 +706,13 @@ class LedgerAgentRuntime {
               : 'completed';
           if (chart != null) assistant['chartData'] = chart;
           await _save(session);
+          emit('text_complete', {
+            'messageId': messageId,
+            'text': reply.text,
+            'status': 'completed',
+          });
+          previewMessageId = null;
+          emit('run_finished', {'status': session.status});
           return {
             'answer': reply.text,
             'isError': false,
@@ -334,6 +724,9 @@ class LedgerAgentRuntime {
         await _save(
           session,
         ); // assistant and all call ids are durable before execution
+        // Tool preambles are transient; the durable result is the final answer.
+        emit('text_reset', {'messageId': messageId});
+        previewMessageId = null;
         for (final call in reply.calls) {
           await check();
           final function = agentMap(call['function']);
@@ -348,17 +741,17 @@ class LedgerAgentRuntime {
             'startedAt': _clock().millisecondsSinceEpoch,
           };
           session.trace.add(trace);
-          onProgress?.call({
-            'sessionId': session.id,
-            'revision': ledger.revision,
-            'phase': 'tool',
+          emit('tool', {
             'step': step,
             'maxSteps': settings.maxSteps,
             'text': toolLabel(name),
             'tool': name,
+            'callId': call['id'],
+            'trace': Map<String, dynamic>.from(trace),
             'plan': session.plan,
           });
           Map<String, dynamic> result;
+          final priorActions = session.actions.length;
           try {
             if (++calls > settings.maxToolCalls) {
               throw const FormatException('本轮工具调用预算已用完，请总结当前进度');
@@ -371,6 +764,9 @@ class LedgerAgentRuntime {
             }
             final recorded = autoRecorded[signature];
             result = recorded ?? await tools.execute(name, args);
+            for (final action in session.actions.skip(priorActions)) {
+              action['runId'] = runId;
+            }
             if (recorded == null &&
                 autoRecord != null &&
                 name == 'propose_transaction' &&
@@ -385,6 +781,7 @@ class LedgerAgentRuntime {
                 now: started,
                 record: autoRecord,
                 guard: check,
+                source: source,
               );
               if (result['status'] == 'applied') {
                 autoRecorded[signature] = result;
@@ -428,7 +825,12 @@ class LedgerAgentRuntime {
             trace['status'] = 'error';
           }
           trace['finishedAt'] = _clock().millisecondsSinceEpoch;
+          for (final action in session.actions.skip(priorActions)) {
+            action['runId'] = runId;
+          }
           session.messages.add({
+            'id': agentId(),
+            'runId': runId,
             'role': 'tool',
             'tool_call_id': call['id'],
             'content': jsonEncode(result),
@@ -437,15 +839,34 @@ class LedgerAgentRuntime {
           await _save(
             session,
           ); // side effects/results are never replayed on restart
+          emit('tool_result', {
+            'callId': call['id'],
+            'tool': name,
+            'result': result,
+            'trace': Map<String, dynamic>.from(trace),
+            'actions': session.actions
+                .map((action) => Map<String, dynamic>.from(action))
+                .toList(),
+            'plan': session.plan,
+          });
         }
         if (waitingQuestion != null) {
           session.status = 'awaiting_input';
+          final waitingId = agentId();
           session.messages.add({
+            'id': waitingId,
+            'runId': runId,
             'role': 'assistant',
             'content': waitingQuestion,
             'createdAt': _clock().millisecondsSinceEpoch,
           });
           await _save(session);
+          emit('text_complete', {
+            'messageId': waitingId,
+            'text': waitingQuestion,
+            'status': 'completed',
+          });
+          emit('run_finished', {'status': session.status});
           return {
             'answer': waitingQuestion,
             'isError': false,
@@ -461,21 +882,52 @@ class LedgerAgentRuntime {
       );
     } catch (error) {
       if (session == null) rethrow;
+      // Aborting the HTTP request can settle before the cancellation future.
+      // The explicit stop/deadline owns the run's outcome in either ordering.
+      final failure = cancellation.reason ?? error;
+      if (activeReasoning?['status'] == 'streaming') {
+        finishReasoning(
+          failure is LedgerException && failure.code == 'AGENT_CANCELLED'
+              ? 'cancelled'
+              : 'error',
+        );
+      }
+      final partialParts = <Map<String, dynamic>>[
+        if (activeReasoning != null && !reasoningAttached)
+          Map<String, dynamic>.from(activeReasoning!),
+        if (previewMessageId != null && previewText.isNotEmpty)
+          {'type': 'interrupted_text', 'text': previewText.toString()},
+      ];
+      if (previewMessageId != null) {
+        emit('text_reset', {'messageId': previewMessageId});
+      }
       _repairPendingCalls(session, '本次工具执行被停止或未能确认完成，请重新查询。');
-      final message = error is LedgerException
-          ? error.message
+      final message = failure is LedgerException
+          ? failure.message
           : '任务未完成，已保留执行记录，请重试。';
       session.status =
-          error is LedgerException && error.code == 'AGENT_CANCELLED'
+          failure is LedgerException && failure.code == 'AGENT_CANCELLED'
           ? 'cancelled'
           : 'failed';
+      final errorMessageId = agentId();
       session.messages.add({
+        'id': errorMessageId,
+        'runId': runId,
         'role': 'assistant',
         'content': message,
         'isError': true,
+        if (partialParts.isNotEmpty) 'parts': partialParts,
         'createdAt': _clock().millisecondsSinceEpoch,
       });
       await _save(session);
+      emit('text_complete', {
+        'messageId': errorMessageId,
+        'text': message,
+        'isError': true,
+        'status': session.status,
+        if (partialParts.isNotEmpty) 'parts': partialParts,
+      });
+      emit('run_finished', {'status': session.status});
       return {
         'answer': message,
         'isError': true,
@@ -483,6 +935,8 @@ class LedgerAgentRuntime {
         ...await state(ledger.revision),
       };
     } finally {
+      cancellation.unlisten(cancelTransport);
+      cancelTransport();
       _cancellation = null;
       _finished?.complete();
       _finished = null;
@@ -501,6 +955,7 @@ class LedgerAgentRuntime {
     required DateTime now,
     required AgentAutoRecord record,
     required Future<void> Function() guard,
+    required String source,
   }) async {
     final action = session.actions.singleWhere(
       (a) => a['id'] == result['action_id'],
@@ -552,7 +1007,7 @@ class LedgerAgentRuntime {
       },
       snapshot: tools.ledger,
       input: input,
-      source: 'AI_TEXT',
+      source: source,
       now: now,
       operationId: entryContext.operationId,
     );
@@ -566,6 +1021,7 @@ class LedgerAgentRuntime {
     final inferred = agentMap(jsonDecode(draft['metadataJson'] as String));
     final transaction = {
       ...payload,
+      'source': source,
       ...draft,
       'id': 0,
       'metadataJson': jsonEncode({
@@ -731,10 +1187,13 @@ class LedgerAgentRuntime {
       await guard();
       switch (action['kind']) {
         case 'transaction':
-          await ledger.invoke('saveTransaction', {
-            ...agentMap(payload['transaction']),
-            'revision': revision,
-          });
+          final result = agentMap(
+            await ledger.invoke('saveTransaction', {
+              ...agentMap(payload['transaction']),
+              'revision': revision,
+            }),
+          );
+          if (payload['before'] == null) action['transactionId'] = result['id'];
         case 'delete':
           await ledger.invoke('deleteTransaction', {
             'id': payload['transactionId'],
@@ -763,7 +1222,110 @@ class LedgerAgentRuntime {
     if (running) throw const LedgerException('请先停止或等待当前任务完成。');
   }
 
+  static bool _sameWireModel(String previous, String next) {
+    final old = previous.split(':'), current = next.split(':');
+    if (old.length >= 4 &&
+        current.length >= 4 &&
+        const {'deepseek', 'qwen'}.contains(old.first)) {
+      // Only the final component is a key fingerprint. A different endpoint may
+      // implement another replay protocol even when it accepts the same model id.
+      return previous.substring(0, previous.lastIndexOf(':')) ==
+          next.substring(0, next.lastIndexOf(':'));
+    }
+    // GPT reasoning is bound to both its account and model.
+    return previous == next;
+  }
+
+  static List<Map<String, dynamic>> _handoffHistory(AgentSession session) {
+    final history = <Map<String, dynamic>>[];
+    for (final message in session.messages.skip(session.contextStart)) {
+      if (message['contextHandoff'] == true) {
+        final data = agentMap(jsonDecode(message['content'] as String));
+        history.addAll((data['history'] as List).map(agentMap));
+        continue;
+      }
+      if (message['internal'] == true ||
+          message['provisional'] == true ||
+          !const {'user', 'assistant'}.contains(message['role'])) {
+        continue;
+      }
+      final content = message['content'] as String? ?? '';
+      if (content.isNotEmpty) {
+        history.add({'role': message['role'], 'content': content});
+      }
+    }
+    final recent = <Map<String, dynamic>>[];
+    var characters = 2;
+    const shortened = '…[原文可检索]';
+    for (final row in history.reversed) {
+      final original = row['content'] as String;
+      final content = original.length <= 2000
+          ? original
+          : '${original.substring(0, 2000 - shortened.length)}$shortened';
+      final excerpt = {'role': row['role'], 'content': content};
+      final size = jsonEncode(excerpt).length + (recent.isEmpty ? 0 : 1);
+      if (characters + size > 6000) break;
+      recent.add(excerpt);
+      characters += size;
+    }
+    return recent.reversed.toList();
+  }
+
+  static bool _needsReasoningPart(Map<String, dynamic> message) =>
+      message['role'] == 'assistant' &&
+      ((message['reasoning_summary'] is String &&
+              (message['reasoning_summary'] as String).isNotEmpty) ||
+          (message['reasoning_content'] is String &&
+              (message['reasoning_content'] as String).isNotEmpty)) &&
+      !(message['parts'] as List? ?? const []).any(
+        (part) => part is Map && part['type'] == 'reasoning',
+      );
+
   Future<void> _save(AgentSession session) async {
+    String? runId;
+    for (final message in session.messages) {
+      message['id'] ??= agentId();
+      if (message['role'] == 'user' && message['internal'] != true) {
+        runId = message['runId'] as String? ?? 'legacy:${message['id']}';
+      }
+      message['runId'] ??= runId ?? 'legacy:${session.id}';
+      if (_needsReasoningPart(message)) {
+        final summary = message['reasoning_summary'] as String?;
+        message['parts'] = [
+          ...(message['parts'] as List? ?? const []),
+          {
+            'type': 'reasoning',
+            'id': '${message['id']}:reasoning',
+            'messageId': message['id'],
+            'runId': message['runId'],
+            'text': summary?.isNotEmpty == true
+                ? summary
+                : message['reasoning_content'],
+            'kind': summary?.isNotEmpty == true
+                ? 'summary'
+                : 'reasoning_content',
+            'status': 'completed',
+            'provider': session.modelIdentity.split(':').first,
+            'model': '',
+          },
+        ];
+      }
+    }
+    for (final action in session.actions.where(
+      (action) => action['runId'] == null,
+    )) {
+      final createdAt = action['createdAt'] as int? ?? session.createdAt;
+      final owner = session.messages
+          .where(
+            (message) =>
+                message['role'] == 'user' &&
+                message['internal'] != true &&
+                (message['createdAt'] as int? ?? session.createdAt) <=
+                    createdAt,
+          )
+          .lastOrNull;
+      action['runId'] = owner?['runId'] ?? 'legacy:${session.id}';
+    }
     session.updatedAt = _clock().millisecondsSinceEpoch;
     await store.write(
       'session:${session.revision}:${session.id}',
@@ -811,7 +1373,8 @@ class LedgerAgentRuntime {
           !ids.add(call['id'] as String) ||
           function['name'] is! String ||
           function['arguments'] is! String ||
-          (function['arguments'] as String).length > 16000) {
+          (function['arguments'] as String).length >
+              (function['name'] == 'render_artifact' ? 96 * 1024 : 16000)) {
         throw const LedgerException('模型工具调用格式无效。', code: 'AGENT_PROTOCOL');
       }
     }
@@ -856,6 +1419,8 @@ class LedgerAgentRuntime {
         'aggregate_by': '正在汇总收支',
         'compare_periods': '正在比较时间段',
         'get_budget': '正在检查预算',
+        'present_insight': '正在绘制账本图表',
+        'render_artifact': '正在生成交互内容',
         'ask_user': '正在整理需要补充的信息',
         'search_memory': '正在查找记忆',
         'remember': '正在保存偏好',

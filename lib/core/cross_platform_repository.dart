@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'ai/shared_ai_service.dart';
+import 'ai/model_reasoning.dart';
 import 'agent/agent_models.dart';
 import 'agent/agent_runtime.dart';
 import 'agent/agent_store.dart';
@@ -56,6 +57,18 @@ class CrossPlatformLedgerRepository
     _storeEvents = _store.events.listen(
       (event) {
         _revision = event.revision;
+        if (event.type == 'agentModelText' ||
+            event.type == 'agentModelReasoning') {
+          final requestId = event.data['requestId'] as String?;
+          final delta = event.data['delta'] as String?;
+          if (requestId != null && delta != null) {
+            (event.type == 'agentModelText'
+                    ? _nativeTurns
+                    : _nativeReasoningTurns)[requestId]
+                ?.call(delta);
+          }
+          return;
+        }
         if (!_events.isClosed) _events.add(event);
       },
       onError: (Object error) {
@@ -109,6 +122,10 @@ class CrossPlatformLedgerRepository
   String? _authIdentity;
   bool _closed = false;
   final Set<String> _reports = {};
+  final _nativeTurns = <String, void Function(String)>{};
+  final _nativeReasoningTurns = <String, void Function(String)>{};
+  String? _modelCatalogAccount;
+  List<AiModel> _modelCatalog = [];
 
   @override
   Stream<LedgerEvent> get events => _events.stream;
@@ -251,7 +268,47 @@ class CrossPlatformLedgerRepository
       case 'cancelAgent':
         _agentInvocation++;
         _agent.cancel();
+        final turns = _nativeTurns.keys.toList();
+        _nativeTurns.clear();
+        _nativeReasoningTurns.clear();
+        if (_android) {
+          for (final requestId in turns) {
+            await _store.invoke('cancelAgentModelTurn', {
+              'requestId': requestId,
+            });
+          }
+        }
         return null;
+      case 'agentAppendInput':
+        final state = await _current(arguments);
+        final generation = _settingsGeneration;
+        return _agent.appendInput(
+          revision: state.revision,
+          question: arguments['question'] as String,
+          source: arguments['source'] as String? ?? 'AI_TEXT',
+          answer: arguments['answer'] as String,
+          parts: (arguments['parts'] as List? ?? []).map(agentMap).toList(),
+          status: arguments['status'] as String? ?? 'completed',
+          runId: arguments['runId'] as String,
+          attachment: arguments['attachment'] == null
+              ? null
+              : agentMap(arguments['attachment']),
+          guard: () => _guardAiOperation(state, generation),
+        );
+      case 'agentUndoRun':
+        final state = await _current(arguments);
+        final generation = _settingsGeneration;
+        return _agent.undoRun(
+          revision: state.revision,
+          runId: arguments['runId'] as String,
+          ledger: _store,
+          guard: () => _guardAiOperation(state, generation),
+          transactionIds: arguments['transactionIds'] == null
+              ? null
+              : (arguments['transactionIds'] as List)
+                    .map((id) => integer(id, 'transactionId'))
+                    .toList(),
+        );
       case 'agentState':
       case 'agentNewSession':
       case 'agentSelectSession':
@@ -291,6 +348,11 @@ class CrossPlatformLedgerRepository
           await _guardAiOperation(initial, generation);
         }
         var question = arguments['question'] as String? ?? '';
+        final retry = arguments['retry'] == true;
+        if (retry) {
+          question =
+              '继续完成上一轮任务。原始问题：$question。已执行的账本变更保留，先重新查询当前数据，不得重复新增；补完未完成的分析。';
+        }
         if (method == 'agentResolveAction') {
           question = await _agent.resolve(
             revision: initial.revision,
@@ -304,24 +366,49 @@ class CrossPlatformLedgerRepository
             ? await snapshot()
             : initial;
         await guard();
+        final catalogModel =
+            _modelCatalogAccount == current.auth['activeAccountId']
+            ? _modelCatalog
+                  .where((m) => m.slug == current.settings['chatGptModel'])
+                  .firstOrNull
+            : null;
+        final reasoning = resolveReasoningOptions(
+          current.settings,
+          catalogModel: catalogModel,
+        );
         final model = await _ai.openAgentModel(
           current,
           guard: guard,
-          nativeTurn:
+          catalogModel: catalogModel,
+          nativeReasoningTurn:
               _android && current.settings['activeProvider'] == 'chatgpt'
-              ? (messages, tools) async {
-                  final raw = agentMap(
-                    await _store.invoke('agentModelTurn', {
-                      'revision': current.revision,
-                      'messagesJson': jsonEncode(messages),
-                      'toolsJson': jsonEncode(tools),
-                      'expectedAccountId': current.auth['activeAccountId'],
-                      'expectedModel': current.settings['chatGptModel'],
-                    }),
-                  );
-                  return AgentReply(
-                    message: agentMap(jsonDecode(raw['messageJson'] as String)),
-                  );
+              ? (messages, tools, onTextDelta, onReasoningDelta) async {
+                  final requestId = agentId();
+                  _nativeTurns[requestId] = onTextDelta;
+                  _nativeReasoningTurns[requestId] = onReasoningDelta;
+                  try {
+                    final raw = agentMap(
+                      await _store.invoke('agentModelTurn', {
+                        'revision': current.revision,
+                        'requestId': requestId,
+                        'messagesJson': jsonEncode(messages),
+                        'toolsJson': jsonEncode(tools),
+                        'expectedAccountId': current.auth['activeAccountId'],
+                        'expectedModel': current.settings['chatGptModel'],
+                        if (reasoning.responseEffort != null)
+                          'reasoningEffort': reasoning.responseEffort,
+                        'requestReasoningSummary': reasoning.requestSummary,
+                      }),
+                    );
+                    return AgentReply(
+                      message: agentMap(
+                        jsonDecode(raw['messageJson'] as String),
+                      ),
+                    );
+                  } finally {
+                    _nativeTurns.remove(requestId);
+                    _nativeReasoningTurns.remove(requestId);
+                  }
                 }
               : null,
         );
@@ -330,8 +417,11 @@ class CrossPlatformLedgerRepository
           ledger: current,
           model: model,
           guard: guard,
+          source: arguments['source'] as String? ?? 'AI_TEXT',
+          internalQuestion: method == 'agentResolveAction' || retry,
           autoRecord:
               method != 'ask' ||
+                  retry ||
                   current.settings['activeInputAutoSaveEnabled'] == false
               ? null
               : (transaction) async {
@@ -353,6 +443,18 @@ class CrossPlatformLedgerRepository
                   );
                 },
         );
+        // Deadlines can end the runtime while its native HTTP request is still
+        // pending. Stop that transport before accepting another run.
+        final pendingTurns = _nativeTurns.keys.toList();
+        _nativeTurns.clear();
+        _nativeReasoningTurns.clear();
+        if (_android) {
+          for (final requestId in pendingTurns) {
+            await _store.invoke('cancelAgentModelTurn', {
+              'requestId': requestId,
+            });
+          }
+        }
         // A user stop is a normal persisted outcome, not a stale-ledger result.
         await _guardAiOperation(initial, generation);
         return result;
@@ -475,11 +577,15 @@ class CrossPlatformLedgerRepository
         await _ai.auth.cancel();
         return null;
       case 'selectAccount':
+        _modelCatalogAccount = null;
+        _modelCatalog = [];
         _settingsGeneration++;
         if (_android) return _store.invoke(method, arguments);
         await _ai.auth.select(arguments['id'] as String);
         return null;
       case 'signOut':
+        _modelCatalogAccount = null;
+        _modelCatalog = [];
         _settingsGeneration++;
         if (_android) return _store.invoke(method, arguments);
         await _ai.auth.signOut(arguments['id'] as String);
@@ -489,8 +595,17 @@ class CrossPlatformLedgerRepository
         await _ai.auth.dismissWelcome();
         return null;
       case 'listModels':
-        if (_android) return _store.invoke(method, arguments);
-        return _ai.auth.listModels();
+        final account = (await snapshot()).auth['activeAccountId'] as String?;
+        final result = _android
+            ? await _store.invoke(method, arguments)
+            : await _ai.auth.listModels();
+        if ((await snapshot()).auth['activeAccountId'] == account) {
+          _modelCatalogAccount = account;
+          _modelCatalog = (result as List)
+              .map((m) => AiModel.fromMap(stringMap(m)))
+              .toList();
+        }
+        return result;
       case 'pickRecognitionImage':
         if (_android) return _store.invoke(method, arguments);
         return _platform.pickRecognitionImage();
@@ -576,6 +691,14 @@ class CrossPlatformLedgerRepository
     if (_closed) return;
     _closed = true;
     await _agent.shutdown();
+    final pendingTurns = _nativeTurns.keys.toList();
+    _nativeTurns.clear();
+    _nativeReasoningTurns.clear();
+    if (_android) {
+      for (final requestId in pendingTurns) {
+        await _store.invoke('cancelAgentModelTurn', {'requestId': requestId});
+      }
+    }
     await _storeEvents.cancel();
     await _speechEvents?.cancel();
     await _voiceEvents.cancel();

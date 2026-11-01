@@ -63,16 +63,35 @@ class SecureKeyStore(context: Context) {
         set(value) = write("active_provider", value)
 
     var qwenBaseUrl: String
-        get() = read("qwen_base_url", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+        get() = read("qwen_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         set(value) = write("qwen_base_url", value)
 
     var qwenModel: String
-        get() = read("qwen_model", "qwen-plus")
+        get() = read("qwen_model", "qwen3.8-flash")
         set(value) = write("qwen_model", value)
 
     var deepSeekModel: String
-        get() = read("deepseek_model", "deepseek-chat")
+        get() = read("deepseek_model", "deepseek-flash")
         set(value) = write("deepseek_model", value)
+
+    var chatGptThinkingEnabled: Boolean
+        get() = read("chatgpt_thinking_enabled", "true").toBoolean()
+        set(value) = write("chatgpt_thinking_enabled", value.toString())
+    var chatGptReasoningEffort: String
+        get() = read("chatgpt_reasoning_effort", "medium")
+        set(value) = write("chatgpt_reasoning_effort", value)
+    var deepSeekThinkingEnabled: Boolean
+        get() = read("deepseek_thinking_enabled", "true").toBoolean()
+        set(value) = write("deepseek_thinking_enabled", value.toString())
+    var deepSeekReasoningEffort: String
+        get() = read("deepseek_reasoning_effort", "high")
+        set(value) = write("deepseek_reasoning_effort", value)
+    var qwenThinkingEnabled: Boolean
+        get() = read("qwen_thinking_enabled", "true").toBoolean()
+        set(value) = write("qwen_thinking_enabled", value.toString())
+    var qwenReasoningEffort: String
+        get() = read("qwen_reasoning_effort", "xhigh")
+        set(value) = write("qwen_reasoning_effort", value)
 
     var recognitionTextProvider: String
         get() = read("recognition_text_provider", "")

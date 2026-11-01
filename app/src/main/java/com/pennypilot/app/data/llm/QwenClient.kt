@@ -16,8 +16,8 @@ import java.util.concurrent.TimeUnit
 
 class QwenClient(
     private val apiKey: String,
-    private val baseUrl: String = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-    private val model: String = "qwen-plus",
+    private val baseUrl: String = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    private val model: String = "qwen3.8-flash",
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)

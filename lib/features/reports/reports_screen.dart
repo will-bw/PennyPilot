@@ -4,6 +4,7 @@ import '../../core/ledger_controller.dart';
 import '../../core/models.dart';
 import '../../ui/common.dart';
 import '../../ui/theme.dart';
+import '../../ui/assistant_content.dart';
 import '../entry/entry_screen.dart';
 import '../ledger/ledger_screen.dart';
 
@@ -36,7 +37,21 @@ class ReportsScreen extends StatelessWidget {
       'BLOCKED',
     ].contains(c.reportStates[monthKey]);
     return Scaffold(
-      appBar: AppBar(title: const Text('收支统计')),
+      appBar: AppBar(
+        title: const Text('收支统计'),
+        actions: [
+          IconButton(
+            tooltip: '让助手分析这个月',
+            onPressed: () => c.openAssistant(
+              prompt:
+                  '请分析 $monthKey 的收支、分类和预算。先查询真实账本，'
+                  '${currentMonth ? '与上月同期比较，注明本月尚未结束。' : '与上月比较。'}'
+                  '用图表呈现关键变化，并给出可追溯的明细。',
+            ),
+            icon: const Icon(Icons.chat_bubble_outline),
+          ),
+        ],
+      ),
       body: ContentWidth(
         child: RefreshIndicator(
           onRefresh: c.refresh,
@@ -126,11 +141,10 @@ class ReportsScreen extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     if (report != null) ...[
-                      SelectableText(
-                        report.llmSummary?.isNotEmpty == true
+                      AssistantMarkdown(
+                        text: report.llmSummary?.isNotEmpty == true
                             ? report.llmSummary!
                             : '本月支出 ${money(report.totalExpense)}，收入 ${money(report.totalIncome)}。',
-                        style: const TextStyle(height: 1.7),
                       ),
                       const SizedBox(height: 12),
                       Text(
@@ -535,7 +549,24 @@ class _CategoryDetail extends StatelessWidget {
               .toList()
             ..sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
       return Scaffold(
-        appBar: AppBar(title: Text('${category.name} · ${month.month}月')),
+        appBar: AppBar(
+          title: Text('${category.name} · ${month.month}月'),
+          actions: [
+            IconButton(
+              tooltip: '让助手分析这个分类',
+              icon: const Icon(Icons.chat_bubble_outline),
+              onPressed: () {
+                controller.openAssistant(
+                  prompt:
+                      '请分析 ${month.year}-${month.month.toString().padLeft(2, '0')} '
+                      '的${category.name}支出（分类 ID ${category.id}），'
+                      '查询账本后画图说明变化，提供对应明细。',
+                );
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
         body: ContentWidth(
           child: ListView(
             children: [

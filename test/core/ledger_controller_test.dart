@@ -512,7 +512,7 @@ void main() {
   });
 
   test(
-    'failed ask retry excludes error message and duplicate question from history',
+    'retry preserves the failed attempt and continues without a duplicate user turn',
     () async {
       await controller.init();
       repository.handler = (_, _) async => {'answer': '暂时不可用', 'isError': true};
@@ -524,7 +524,10 @@ void main() {
       };
       await controller.retryAsk();
       expect(repository.calls.last.args.containsKey('history'), isFalse);
-      expect(controller.messages.length, 2);
+      expect(controller.messages.length, 3);
+      expect(controller.messages.where((m) => m.role == 'user'), hasLength(1));
+      expect(controller.messages[1].isError, true);
+      expect(repository.calls.last.args['retry'], true);
       expect(controller.messages.first.text, '花了多少');
       expect(controller.messages.last.isError, false);
       expect(controller.retryQuestion, isNull);

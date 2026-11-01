@@ -105,7 +105,7 @@ class _AppHomeState extends State<_AppHome> {
     NavigationDestination(
       icon: Icon(Icons.chat_bubble_outline),
       selectedIcon: Icon(Icons.chat_bubble),
-      label: '问账',
+      label: 'AI 助手',
     ),
     NavigationDestination(
       icon: Icon(Icons.tune_outlined),
@@ -133,15 +133,20 @@ class _AppHomeState extends State<_AppHome> {
             );
           }
         } else if (launch['route'] == 'recognition_image') {
-          Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => EntryScreen(
-                controller: c,
-                initialAi: true,
-                sharedImage: true,
-              ),
-            ),
-          );
+          setState(() => selected = 2);
+          runUi(context, () async {
+            final raw = await c.command(
+              'consumeSharedImage',
+              refreshAfter: false,
+            );
+            if (raw != null) {
+              c.setAssistantAttachment(Map<String, dynamic>.from(raw as Map));
+            }
+          });
+        } else if (launch['route'] == 'assistant') {
+          setState(() => selected = 2);
+        } else if (launch['route'] == 'ledger') {
+          setState(() => selected = 0);
         } else if (launch['route'] == 'coloros_guide') {
           setState(() => selected = 3);
           Navigator.of(context).push(
@@ -194,7 +199,11 @@ class _AppHomeState extends State<_AppHome> {
         onBudget: () => showBudgetSettings(context, c),
       ),
       ReportsScreen(controller: c),
-      ChatScreen(controller: c, onSettings: () => setState(() => selected = 3)),
+      ChatScreen(
+        controller: c,
+        active: selected == 2,
+        onSettings: () => setState(() => selected = 3),
+      ),
       SettingsScreen(controller: c),
     ];
     final wide = MediaQuery.sizeOf(context).width >= 840;

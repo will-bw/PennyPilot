@@ -11,6 +11,7 @@ import '../recognition/recognition_protocol.dart';
 import 'ai_transport.dart';
 import 'shared_credentials.dart';
 import 'shared_chatgpt_auth.dart';
+import 'model_reasoning.dart';
 
 export 'shared_credentials.dart';
 export 'shared_chatgpt_auth.dart';
@@ -269,119 +270,214 @@ class SharedAiService {
 
   Future<AgentModel> openAgentModel(
     LedgerSnapshot snapshot, {
-    Future<AgentReply> Function(
-      List<Map<String, dynamic>>,
-      List<Map<String, dynamic>>,
-    )?
-    nativeTurn,
+    AgentStreamComplete? nativeTurn,
+    AgentReasoningStreamComplete? nativeReasoningTurn,
+    AiModel? catalogModel,
     required Future<void> Function() guard,
   }) async {
     final settings = snapshot.settings;
     final provider = settings['activeProvider'];
+    final aborted = Completer<void>();
+    void cancel() {
+      if (!aborted.isCompleted) aborted.complete();
+    }
+
     if (provider == 'chatgpt') {
-      final account = nativeTurn != null
+      final account = nativeTurn != null || nativeReasoningTurn != null
           ? snapshot.auth['activeAccountId'] as String?
           : (await auth.snapshot())['activeAccountId'] as String?;
       if (account == null) aiFailure('请先登录ChatGPT。');
       final model = checkedModel(settings['chatGptModel']);
+      final reasoning = resolveReasoningOptions(
+        settings,
+        provider: 'chatgpt',
+        model: model,
+        catalogModel: catalogModel,
+      );
+      Future<AgentReply> complete(
+        List<Map<String, dynamic>> messages,
+        List<Map<String, dynamic>> tools,
+        void Function(String)? onDelta,
+        void Function(String)? onReasoningDelta,
+      ) async {
+        await guard();
+        final reply = nativeReasoningTurn != null
+            ? await nativeReasoningTurn(
+                messages,
+                tools,
+                onDelta ?? (_) {},
+                onReasoningDelta ?? (_) {},
+              )
+            : nativeTurn != null
+            ? await nativeTurn(messages, tools, onDelta ?? (_) {})
+            : await auth.agentTurn(
+                model,
+                messages,
+                tools,
+                expectedAccountId: account,
+                beforeRequest: guard,
+                onTextDelta: onDelta,
+                onReasoningDelta: onReasoningDelta,
+                reasoningEffort: reasoning.responseEffort,
+                requestReasoningSummary: reasoning.requestSummary,
+                abortTrigger: aborted.future,
+              );
+        await guard();
+        return reply;
+      }
+
       return AgentModel(
         identity: 'chatgpt:$account:$model',
-        complete: (messages, tools) async {
-          await guard();
-          final reply = nativeTurn != null
-              ? await nativeTurn(messages, tools)
-              : await auth.agentTurn(
-                  model,
-                  messages,
-                  tools,
-                  expectedAccountId: account,
-                  beforeRequest: guard,
-                );
-          await guard();
-          return reply;
-        },
+        complete: (messages, tools) => complete(messages, tools, null, null),
+        stream: (messages, tools, delta) =>
+            complete(messages, tools, delta, null),
+        reasoningStream: complete,
+        reasoningConfig: {...reasoning.toMap(), 'kind': 'summary'},
+        cancel: cancel,
       );
     }
     if (provider != 'deepseek' && provider != 'qwen') aiFailure('请先配置AI服务。');
     final credentialName = provider == 'deepseek' ? 'deepSeekKey' : 'qwenKey';
     final expectedKey = checkedBearer(await credentials.get(credentialName));
     final model = checkedModel(
-      settings[provider == 'deepseek' ? 'deepSeekModel' : 'qwenModel'],
+      settings[provider == 'deepseek' ? 'deepSeekModel' : 'qwenModel'] ??
+          (provider == 'deepseek' ? defaultDeepSeekModel : defaultQwenModel),
     );
     final base = provider == 'deepseek'
         ? 'https://api.deepseek.com'
-        : settings['qwenBaseUrl'] as String? ??
-              'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+        : settings['qwenBaseUrl'] as String? ?? defaultQwenBaseUrl;
+    final reasoning = resolveReasoningOptions(
+      settings,
+      provider: provider as String,
+      model: model,
+    );
     final uri = secureAiEndpoint(
       '${base.replaceFirst(RegExp(r'/+$'), '')}/chat/completions',
     );
-    return AgentModel(
-      identity:
-          '$provider:$model:$base:${sha256.convert(utf8.encode(expectedKey)).toString().substring(0, 12)}',
-      complete: (messages, tools) async {
-        if (_disposed) aiFailure('AI服务已关闭。');
+    Future<AgentReply> complete(
+      List<Map<String, dynamic>> messages,
+      List<Map<String, dynamic>> tools,
+      void Function(String)? onDelta,
+      void Function(String)? onReasoningDelta,
+    ) async {
+      if (_disposed) aiFailure('AI服务已关闭。');
+      await guard();
+      if (await credentials.get(credentialName) != expectedKey) {
+        aiFailure('AI凭据已切换，任务已停止。');
+      }
+      final request =
+          http.AbortableRequest('POST', uri, abortTrigger: aborted.future)
+            ..headers.addAll({
+              'Authorization': 'Bearer $expectedKey',
+              'Content-Type': 'application/json',
+            })
+            ..body = jsonEncode({
+              'model': model,
+              ...reasoning.chatParameters,
+              if (provider == 'qwen' &&
+                  RegExp(r'^qwen3\.8-(?:flash|max)(?:-\d+)?$').hasMatch(model))
+                'preserve_thinking': true,
+              'messages': messages
+                  .map(
+                    (m) => {
+                      for (final key in [
+                        'role',
+                        'content',
+                        'tool_calls',
+                        'tool_call_id',
+                        'reasoning_content',
+                      ])
+                        if (m[key] != null) key: m[key],
+                    },
+                  )
+                  .toList(),
+              if (tools.isNotEmpty) 'tools': tools,
+              if (tools.isNotEmpty) 'tool_choice': 'auto',
+              if (onDelta != null) 'stream': true,
+              if (onDelta != null) 'stream_options': {'include_usage': true},
+            });
+      if (request.bodyBytes.length > 4 * 1024 * 1024) aiFailure('Agent请求过大。');
+      await guard();
+      if (onDelta != null) {
+        final decoder = ChatCompletionStreamDecoder(
+          onTextDelta: onDelta,
+          onReasoningDelta: onReasoningDelta,
+        );
+        await aiSseRequest(
+          _client,
+          request,
+          onEvent: decoder.accept,
+          guard: guard,
+        );
         await guard();
         if (await credentials.get(credentialName) != expectedKey) {
           aiFailure('AI凭据已切换，任务已停止。');
         }
-        final request = http.Request('POST', uri)
-          ..headers.addAll({
-            'Authorization': 'Bearer $expectedKey',
-            'Content-Type': 'application/json',
-          })
-          ..body = jsonEncode({
-            'model': model,
-            'messages': messages
-                .map(
-                  (m) => {
-                    for (final key in [
-                      'role',
-                      'content',
-                      'tool_calls',
-                      'tool_call_id',
-                      'reasoning_content',
-                    ])
-                      if (m[key] != null) key: m[key],
-                  },
-                )
-                .toList(),
-            if (tools.isNotEmpty) 'tools': tools,
-            if (tools.isNotEmpty) 'tool_choice': 'auto',
-          });
-        if (request.bodyBytes.length > 4 * 1024 * 1024) aiFailure('Agent请求过大。');
-        await guard();
-        final response = await aiRequest(_client, request);
-        await guard();
-        if (await credentials.get(credentialName) != expectedKey) {
-          aiFailure('AI凭据已切换，任务已停止。');
-        }
-        final payload = decodeAiObject(response.body);
-        final choices = payload['choices'];
-        if (choices is! List || choices.isEmpty) aiFailure('模型未返回有效响应。');
-        final choice = aiObject(choices.first);
-        if (choice['finish_reason'] != 'stop' &&
-            choice['finish_reason'] != 'tool_calls') {
-          aiFailure('模型输出未完整完成，未执行工具。');
-        }
-        final message = aiObject(choice['message']);
-        if (message['content'] != null && message['content'] is! String ||
-            message['tool_calls'] != null && message['tool_calls'] is! List) {
-          aiFailure('模型工具响应格式无效。');
-        }
-        final usage = payload['usage'] as Map?;
+        final result = decoder.finish(
+          tools
+              .map((tool) => aiObject(tool['function'])['name'] as String)
+              .toSet(),
+        );
+        final usage = result['usage'] as Map?;
         return AgentReply(
-          message: {
-            'role': 'assistant',
-            'content': message['content'] ?? '',
-            if (message['tool_calls'] != null)
-              'tool_calls': message['tool_calls'],
-            if (message['reasoning_content'] is String)
-              'reasoning_content': message['reasoning_content'],
-          },
+          message: aiObject(result['message']),
           inputTokens: usage?['prompt_tokens'] as int?,
           outputTokens: usage?['completion_tokens'] as int?,
         );
-      },
+      }
+      final response = await aiRequest(_client, request);
+      await guard();
+      if (await credentials.get(credentialName) != expectedKey) {
+        aiFailure('AI凭据已切换，任务已停止。');
+      }
+      final payload = decodeAiObject(response.body);
+      final choices = payload['choices'];
+      if (choices is! List || choices.isEmpty) aiFailure('模型未返回有效响应。');
+      final choice = aiObject(choices.first);
+      if (choice['finish_reason'] != 'stop' &&
+          choice['finish_reason'] != 'tool_calls') {
+        aiFailure('模型输出未完整完成，未执行工具。');
+      }
+      final message = aiObject(choice['message']);
+      if (message['content'] != null && message['content'] is! String ||
+          message['tool_calls'] != null && message['tool_calls'] is! List) {
+        aiFailure('模型工具响应格式无效。');
+      }
+      final usage = payload['usage'] as Map?;
+      return AgentReply(
+        message: {
+          'role': 'assistant',
+          'content': message['content'] ?? '',
+          if (message['tool_calls'] != null)
+            'tool_calls': message['tool_calls'],
+          if (message['reasoning_content'] is String)
+            'reasoning_content': message['reasoning_content'],
+        },
+        inputTokens: usage?['prompt_tokens'] as int?,
+        outputTokens: usage?['completion_tokens'] as int?,
+      );
+    }
+
+    return AgentModel(
+      identity:
+          '$provider:$model:$base:${sha256.convert(utf8.encode(expectedKey)).toString().substring(0, 12)}',
+      // Several Qwen thinking models only support streaming. Compaction uses
+      // complete(), so it must consume that same stream even without a preview.
+      complete: (messages, tools) => complete(
+        messages,
+        tools,
+        provider == 'qwen' &&
+                reasoning.enabled &&
+                reasoning.capability.supported
+            ? (_) {}
+            : null,
+        null,
+      ),
+      stream: (messages, tools, delta) =>
+          complete(messages, tools, delta, null),
+      reasoningStream: complete,
+      reasoningConfig: {...reasoning.toMap(), 'kind': 'reasoning_content'},
+      cancel: cancel,
     );
   }
 
@@ -499,12 +595,17 @@ class SharedAiService {
               : settings[provider == 'deepseek'
                     ? 'deepSeekModel'
                     : 'qwenModel']) ??
-          (provider == 'deepseek' ? 'deepseek-chat' : 'qwen-plus'),
+          (provider == 'deepseek' ? defaultDeepSeekModel : defaultQwenModel),
     );
     final base = provider == 'deepseek'
         ? 'https://api.deepseek.com'
-        : settings['qwenBaseUrl'] as String? ??
-              'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+        : settings['qwenBaseUrl'] as String? ?? defaultQwenBaseUrl;
+    final capability = reasoningCapabilityFor(
+      provider: provider as String,
+      model: model,
+    );
+    final thinkingStream =
+        provider == 'qwen' && capability.mode == ReasoningMode.required;
     final uri = secureAiEndpoint(
       '${base.replaceFirst(RegExp(r'/+$'), '')}/chat/completions',
     );
@@ -516,20 +617,46 @@ class SharedAiService {
       })
       ..body = jsonEncode({
         'model': model,
+        // Recognition and scheduled reports have separate model roles; chat
+        // thinking preferences must not turn a synchronous JSON task into a
+        // streaming-only reasoning request.
+        if (capability.canToggle && provider == 'deepseek')
+          'thinking': {'type': 'disabled'},
+        if (capability.canToggle && provider == 'qwen')
+          'enable_thinking': false,
         'temperature': 0.1,
         'messages': messages,
-        if (jsonMode) 'response_format': {'type': 'json_object'},
+        // Older open Qwen thinking models cannot combine thinking with JSON
+        // response_format. Their explicit JSON prompt is still parsed strictly.
+        if (jsonMode && (!thinkingStream || model.startsWith('qwen3.8-')))
+          'response_format': {'type': 'json_object'},
+        if (thinkingStream) 'stream': true,
       });
     if (request.bodyBytes.length > 8 * 1024 * 1024) aiFailure('请求内容过大，请缩小范围。');
     await beforeRequest?.call();
-    final response = await aiRequest(_client, request);
-    final choices = decodeAiObject(response.body)['choices'];
-    if (choices is! List || choices.isEmpty) aiFailure('AI 没有返回回答，请重试。');
-    final choice = aiObject(choices.first);
-    if (choice['finish_reason'] != null && choice['finish_reason'] != 'stop') {
-      aiFailure('AI 回答未完整完成，请重试。');
+    final Object? content;
+    if (thinkingStream) {
+      // Thinking-only Qwen models require SSE even for a background JSON role.
+      // Consume their exposed reasoning privately and return only final content.
+      final decoder = ChatCompletionStreamDecoder();
+      await aiSseRequest(
+        _client,
+        request,
+        onEvent: decoder.accept,
+        guard: beforeRequest,
+      );
+      content = aiObject(decoder.finish({})['message'])['content'];
+    } else {
+      final response = await aiRequest(_client, request);
+      final choices = decodeAiObject(response.body)['choices'];
+      if (choices is! List || choices.isEmpty) aiFailure('AI 没有返回回答，请重试。');
+      final choice = aiObject(choices.first);
+      if (choice['finish_reason'] != null &&
+          choice['finish_reason'] != 'stop') {
+        aiFailure('AI 回答未完整完成，请重试。');
+      }
+      content = aiObject(choice['message'])['content'];
     }
-    final content = aiObject(choice['message'])['content'];
     if (content is! String || content.trim().isEmpty) {
       aiFailure('AI 没有返回有效文本，请重试。');
     }

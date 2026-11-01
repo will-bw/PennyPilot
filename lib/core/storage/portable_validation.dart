@@ -425,10 +425,15 @@ const _defaultSettings = <String, dynamic>{
   'budgetCents': 0,
   'themeMode': 'system',
   'activeProvider': 'deepseek',
-  'deepSeekModel': 'deepseek-chat',
-  'qwenModel': 'qwen-plus',
-  'qwenBaseUrl':
-      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  'deepSeekModel': defaultDeepSeekModel,
+  'qwenModel': defaultQwenModel,
+  'qwenBaseUrl': defaultQwenBaseUrl,
+  'chatGptThinkingEnabled': true,
+  'chatGptReasoningEffort': 'medium',
+  'deepSeekThinkingEnabled': true,
+  'deepSeekReasoningEffort': 'high',
+  'qwenThinkingEnabled': true,
+  'qwenReasoningEffort': 'xhigh',
   'chatGptModel': '',
   'recognitionTextModel': '',
   'recognitionTextProvider': '',
@@ -464,7 +469,24 @@ Map<String, dynamic> _validateSettings(Map<String, dynamic> arguments) {
       case 'captureAutoRecordEnabled':
       case 'activeInputAutoSaveEnabled':
       case 'cloudImageParsingEnabled':
+      case 'chatGptThinkingEnabled':
+      case 'deepSeekThinkingEnabled':
+      case 'qwenThinkingEnabled':
         validated[key] = _bool(arguments, key);
+      case 'chatGptReasoningEffort':
+        validated[key] = _choice(
+          arguments,
+          key,
+          responsesReasoningEfforts.difference({'none'}),
+        );
+      case 'deepSeekReasoningEffort':
+        validated[key] = _choice(arguments, key, const {'low', 'high', 'max'});
+      case 'qwenReasoningEffort':
+        validated[key] = _choice(arguments, key, const {
+          'low',
+          'medium',
+          'xhigh',
+        });
       case 'recognitionTextModel':
       case 'recognitionVisionModel':
       case 'recognitionReviewModel':

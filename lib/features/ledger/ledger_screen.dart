@@ -50,7 +50,10 @@ class _LedgerScreenState extends State<LedgerScreen> {
         actions: [
           IconButton(
             tooltip: searching ? '收起搜索' : '搜索账单',
-            onPressed: () => setState(() => searching = !searching),
+            onPressed: () => setState(() {
+              searching = !searching;
+              if (searching) search.text = c.keyword;
+            }),
             icon: Icon(
               searching ? Icons.close : Icons.search,
               color: c.keyword.isNotEmpty ? colors.primary : null,
@@ -263,6 +266,38 @@ class _LedgerScreenState extends State<LedgerScreen> {
                           ),
                         ),
                       const SizedBox(height: 18),
+                      if (c.rangeStart != null ||
+                          c.categoryFilter != null ||
+                          c.includesAllStatuses)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 4,
+                            children: [
+                              if (c.includesAllStatuses)
+                                InputChip(
+                                  label: const Text('全部状态'),
+                                  onDeleted: () => c.setStatusFilter(null),
+                                ),
+                              if (c.rangeStart != null)
+                                InputChip(
+                                  label: Text(
+                                    '${dateLabel(c.rangeStart!)} — ${dateLabel(c.rangeEnd!.subtract(const Duration(days: 1)))}',
+                                  ),
+                                  onDeleted: c.clearFilters,
+                                ),
+                              if (c.categoryFilter != null)
+                                InputChip(
+                                  label: Text(
+                                    c.categoryById(c.categoryFilter!)?.name ??
+                                        '所选分类',
+                                  ),
+                                  onDeleted: () => c.setCategoryFilter(null),
+                                ),
+                            ],
+                          ),
+                        ),
                       if (searching) ...[
                         TextField(
                           controller: search,

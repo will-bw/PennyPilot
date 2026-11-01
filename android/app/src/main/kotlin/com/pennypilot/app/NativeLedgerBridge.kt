@@ -61,6 +61,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
@@ -102,6 +103,7 @@ class NativeLedgerBridge @Inject constructor(
     private var sharedImageUri: Uri? = null
     private var launchJob: Job? = null
     private val reportJobs = mutableMapOf<String, Job>()
+    private val agentModelJobs = mutableMapOf<String, Job>()
 
     @OptIn(FlowPreview::class)
     fun attach(activity: MainActivity, messenger: BinaryMessenger) {
@@ -144,6 +146,7 @@ class NativeLedgerBridge @Inject constructor(
         events = null
         sink = null
         reportJobs.clear()
+        agentModelJobs.clear()
     }
 
     fun onResume() {
@@ -297,6 +300,7 @@ class NativeLedgerBridge @Inject constructor(
         "clearCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.clear()
         "recognitionChat" -> recognitionChat(args)
         "agentModelTurn" -> agentModelTurn(args)
+        "cancelAgentModelTurn" -> { agentModelJobs.remove(args.string("requestId"))?.cancel(); null }
         "parseText" -> parse(args)
         "ask" -> ask(args)
         "exportBackup" -> exportBackup()
@@ -319,7 +323,12 @@ class NativeLedgerBridge @Inject constructor(
         "selectAccount" -> { auth.selectAccount(args.string("id")); null }
         "signOut" -> { auth.signOut(args.string("id")); null }
         "dismissWelcome" -> { auth.dismissWelcome(); null }
-        "listModels" -> modelRepository.listModels().map { mapOf("slug" to it.slug, "displayName" to it.displayName) }
+        "listModels" -> modelRepository.listModels().map { mapOf(
+            "slug" to it.slug, "displayName" to it.displayName,
+            "reasoningEfforts" to it.reasoningEfforts,
+            "defaultReasoningEffort" to it.defaultReasoningEffort,
+            "supportsReasoningSummaries" to it.supportsReasoningSummaries
+        ) }
         "generateReport" -> generateReport(args)
         else -> throw UnsupportedOperationException(method)
     }
@@ -365,6 +374,12 @@ class NativeLedgerBridge @Inject constructor(
                 "deepSeekModel" to keyStore.deepSeekModel,
                 "qwenModel" to keyStore.qwenModel,
                 "qwenBaseUrl" to keyStore.qwenBaseUrl,
+                "chatGptThinkingEnabled" to keyStore.chatGptThinkingEnabled,
+                "chatGptReasoningEffort" to keyStore.chatGptReasoningEffort,
+                "deepSeekThinkingEnabled" to keyStore.deepSeekThinkingEnabled,
+                "deepSeekReasoningEffort" to keyStore.deepSeekReasoningEffort,
+                "qwenThinkingEnabled" to keyStore.qwenThinkingEnabled,
+                "qwenReasoningEffort" to keyStore.qwenReasoningEffort,
                 "hasDeepSeekKey" to keyStore.deepSeekKey.isNotBlank(),
                 "hasQwenKey" to keyStore.qwenKey.isNotBlank(),
                 "needsReconfiguration" to keyStore.needsReconfiguration,
@@ -594,44 +609,69 @@ class NativeLedgerBridge @Inject constructor(
 
     private suspend fun agentModelTurn(args: Map<String, Any?>): Map<String, Any?> {
         val revision = checkRevision(args)
-        auth.awaitReady()
-        val expectedAccount = args.string("expectedAccountId")
-        val expectedModel = args.string("expectedModel")
-        fun checkIdentity() {
-            require(keyStore.activeProvider == "chatgpt" && auth.state.value.activeAccount?.id == expectedAccount &&
-                keyStore.chatGptModel(expectedAccount) == expectedModel) { "AI 服务、账号或模型已切换，本次任务已停止。" }
-            if (revision != LedgerRevision.current) throw StaleLedgerException()
+        val requestId = args.string("requestId")
+        require(requestId.isNotBlank() && requestId.length <= 160) { "Agent 请求标识无效。" }
+        val job = requireNotNull(currentCoroutineContext()[Job])
+        require(requestId !in agentModelJobs) { "Agent 请求标识重复。" }
+        agentModelJobs[requestId] = job
+        try {
+            auth.awaitReady()
+            val expectedAccount = args.string("expectedAccountId")
+            val expectedModel = args.string("expectedModel")
+            val reasoningEffort = args.optionalString("reasoningEffort")
+            val requestReasoningSummary = args["requestReasoningSummary"] as? Boolean ?: true
+            fun currentConfiguration() = keyStore.activeProvider == "chatgpt" &&
+                auth.state.value.activeAccount?.id == expectedAccount &&
+                keyStore.chatGptModel(expectedAccount) == expectedModel
+            fun checkIdentity() {
+                require(currentConfiguration()) { "AI 服务、账号或模型已切换，本次任务已停止。" }
+                if (revision != LedgerRevision.current) throw StaleLedgerException()
+            }
+            checkIdentity()
+            val codec = Json { ignoreUnknownKeys = true }
+            val messagesJson = args.string("messagesJson")
+            val toolsJson = args.string("toolsJson")
+            require(messagesJson.length <= 4 * 1024 * 1024 && toolsJson.length <= 100_000) { "Agent 请求过大。" }
+            val rows = codec.parseToJsonElement(messagesJson) as kotlinx.serialization.json.JsonArray
+            val messages = rows.map { raw ->
+                val obj = raw as kotlinx.serialization.json.JsonObject
+                val basic = codec.decodeFromJsonElement(Message.serializer(), obj)
+                basic.copy(responsesItems = obj["responsesItems"] as? kotlinx.serialization.json.JsonArray,
+                    responsesAccountId = (obj["responsesAccountId"] as? kotlinx.serialization.json.JsonPrimitive)?.content)
+            }
+            val tools = codec.decodeFromString(kotlinx.serialization.builtins.ListSerializer(
+                com.pennypilot.app.data.llm.ToolDefinition.serializer()), toolsJson)
+            val registered = setOf("ask_user", "get_ledger_overview", "query_transactions", "get_transaction", "aggregate_by",
+                "compare_periods", "get_budget", "search_memory", "remember", "forget_memory", "search_conversation",
+                "read_conversation", "update_plan", "propose_transaction", "propose_delete_transaction", "propose_budget",
+                "present_insight", "render_artifact")
+            require(tools.size <= registered.size && tools.all { it.function.name in registered }) { "Agent 工具定义无效。" }
+            val operation = llmClient.forOperation()
+            fun emitDelta(event: String, delta: String) {
+                scope.launch {
+                    if (agentModelJobs[requestId] === job && job.isActive && revision == LedgerRevision.current && currentConfiguration()) {
+                        emit(event, mapOf("requestId" to requestId, "delta" to delta))
+                    }
+                }
+            }
+            val response = kotlinx.coroutines.withTimeout(8 * 60_000L) {
+                operation.chatWithReasoning(messages, tools,
+                    onReasoningDelta = { delta -> emitDelta("agentModelReasoning", delta) },
+                    onTextDelta = { delta -> emitDelta("agentModelText", delta) },
+                    reasoningEffort = reasoningEffort,
+                    requestReasoningSummary = requestReasoningSummary)
+            }
+            checkIdentity()
+            val message = response.choices.firstOrNull()?.message ?: throw IllegalStateException("模型未返回有效响应。")
+            val basic = codec.encodeToJsonElement(com.pennypilot.app.data.llm.AssistantMessage.serializer(), message)
+                as kotlinx.serialization.json.JsonObject
+            val enriched = basic.toMutableMap()
+            message.responsesItems?.let { enriched["responsesItems"] = it }
+            message.responsesAccountId?.let { enriched["responsesAccountId"] = kotlinx.serialization.json.JsonPrimitive(it) }
+            return mapOf("messageJson" to kotlinx.serialization.json.JsonObject(enriched).toString())
+        } finally {
+            if (agentModelJobs[requestId] === job) agentModelJobs.remove(requestId)
         }
-        checkIdentity()
-        val codec = Json { ignoreUnknownKeys = true }
-        val messagesJson = args.string("messagesJson")
-        val toolsJson = args.string("toolsJson")
-        require(messagesJson.length <= 4 * 1024 * 1024 && toolsJson.length <= 100_000) { "Agent 请求过大。" }
-        val rows = codec.parseToJsonElement(messagesJson) as kotlinx.serialization.json.JsonArray
-        val messages = rows.map { raw ->
-            val obj = raw as kotlinx.serialization.json.JsonObject
-            val basic = codec.decodeFromJsonElement(Message.serializer(), obj)
-            basic.copy(responsesItems = obj["responsesItems"] as? kotlinx.serialization.json.JsonArray,
-                responsesAccountId = (obj["responsesAccountId"] as? kotlinx.serialization.json.JsonPrimitive)?.content)
-        }
-        val tools = codec.decodeFromString(kotlinx.serialization.builtins.ListSerializer(
-            com.pennypilot.app.data.llm.ToolDefinition.serializer()), toolsJson)
-        val registered = setOf("ask_user", "get_ledger_overview", "query_transactions", "get_transaction", "aggregate_by",
-            "compare_periods", "get_budget", "search_memory", "remember", "forget_memory", "search_conversation",
-            "read_conversation", "update_plan", "propose_transaction", "propose_delete_transaction", "propose_budget")
-        require(tools.size <= registered.size && tools.all { it.function.name in registered }) { "Agent 工具定义无效。" }
-        val operation = llmClient.forOperation()
-        val response = kotlinx.coroutines.withTimeout(90_000) {
-            operation.chatWithTools(messages, tools)
-        }
-        checkIdentity()
-        val message = response.choices.firstOrNull()?.message ?: throw IllegalStateException("模型未返回有效响应。")
-        val basic = codec.encodeToJsonElement(com.pennypilot.app.data.llm.AssistantMessage.serializer(), message)
-            as kotlinx.serialization.json.JsonObject
-        val enriched = basic.toMutableMap()
-        message.responsesItems?.let { enriched["responsesItems"] = it }
-        message.responsesAccountId?.let { enriched["responsesAccountId"] = kotlinx.serialization.json.JsonPrimitive(it) }
-        return mapOf("messageJson" to kotlinx.serialization.json.JsonObject(enriched).toString())
     }
 
     private suspend fun ask(args: Map<String, Any?>): Map<String, Any?> {
@@ -656,8 +696,15 @@ class NativeLedgerBridge @Inject constructor(
             require(it == uiPreferences.getLong("budget_cents", 0)) { "预算已变化，请重新核对提案。" }
         }
         // Validate everything before any writes. Omitted keys preserve existing secrets.
-        listOf("onboardingDone", "notificationCaptureEnabled", "screenCaptureEnabled", "notificationCloudParsingEnabled", "screenCloudParsingEnabled", "screenVisualCaptureEnabled", "captureAutoRecordEnabled", "activeInputAutoSaveEnabled", "cloudImageParsingEnabled")
+        listOf("onboardingDone", "notificationCaptureEnabled", "screenCaptureEnabled", "notificationCloudParsingEnabled", "screenCloudParsingEnabled", "screenVisualCaptureEnabled", "captureAutoRecordEnabled", "activeInputAutoSaveEnabled", "cloudImageParsingEnabled", "chatGptThinkingEnabled", "deepSeekThinkingEnabled", "qwenThinkingEnabled")
             .filter(args::containsKey).forEach { args.boolean(it) }
+        mapOf(
+            "chatGptReasoningEffort" to setOf("minimal", "low", "medium", "high", "xhigh", "max"),
+            "deepSeekReasoningEffort" to setOf("low", "high", "max"),
+            "qwenReasoningEffort" to setOf("low", "medium", "xhigh")
+        ).forEach { (key, levels) ->
+            if (args.containsKey(key)) require(args.string(key) in levels) { "思考深度无效。" }
+        }
         args["activeProvider"]?.let { require(it in setOf("", "chatgpt", "deepseek", "qwen")) { "请选择有效的 AI 服务。" } }
         args["themeMode"]?.let { require(it in setOf("system", "light", "dark")) { "主题设置无效。" } }
         val budget = args.optionalLong("budgetCents")
@@ -685,12 +732,18 @@ class NativeLedgerBridge @Inject constructor(
             auth.awaitReady()
             requireNotNull(auth.state.value.activeAccount?.takeIf { it.isSignedIn }?.id) { "请先登录 ChatGPT 账号。" }
         } else null
-        val secureFields = listOf("deepSeekKey", "qwenKey", "deepSeekModel", "qwenModel", "qwenBaseUrl", "activeProvider", "chatGptModel", "recognitionTextModel", "recognitionVisionModel", "recognitionReviewModel", "recognitionTextProvider", "recognitionVisionProvider", "recognitionReviewProvider")
+        val secureFields = listOf("deepSeekKey", "qwenKey", "deepSeekModel", "qwenModel", "qwenBaseUrl", "activeProvider", "chatGptModel", "recognitionTextModel", "recognitionVisionModel", "recognitionReviewModel", "recognitionTextProvider", "recognitionVisionProvider", "recognitionReviewProvider", "chatGptThinkingEnabled", "chatGptReasoningEffort", "deepSeekThinkingEnabled", "deepSeekReasoningEffort", "qwenThinkingEnabled", "qwenReasoningEffort")
         if (secureFields.any(args::containsKey)) withContext(Dispatchers.IO) {
             args.optionalString("deepSeekKey")?.let { keyStore.deepSeekKey = it.trim() }
             args.optionalString("qwenKey")?.let { keyStore.qwenKey = it.trim() }
             args.optionalString("deepSeekModel")?.let { keyStore.deepSeekModel = it.trim() }
             args.optionalString("qwenModel")?.let { keyStore.qwenModel = it.trim() }
+            if (args.containsKey("chatGptThinkingEnabled")) keyStore.chatGptThinkingEnabled = args.boolean("chatGptThinkingEnabled")
+            if (args.containsKey("deepSeekThinkingEnabled")) keyStore.deepSeekThinkingEnabled = args.boolean("deepSeekThinkingEnabled")
+            if (args.containsKey("qwenThinkingEnabled")) keyStore.qwenThinkingEnabled = args.boolean("qwenThinkingEnabled")
+            args.optionalString("chatGptReasoningEffort")?.let { keyStore.chatGptReasoningEffort = it }
+            args.optionalString("deepSeekReasoningEffort")?.let { keyStore.deepSeekReasoningEffort = it }
+            args.optionalString("qwenReasoningEffort")?.let { keyStore.qwenReasoningEffort = it }
             args.optionalString("qwenBaseUrl")?.let { keyStore.qwenBaseUrl = it.trim().trimEnd('/') }
             args.optionalString("chatGptModel")?.let { keyStore.setChatGptModel(requireNotNull(modelAccount), it.trim()) }
             args.optionalString("activeProvider")?.let { keyStore.activeProvider = it }

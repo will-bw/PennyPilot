@@ -68,12 +68,32 @@ void main() {
     AgentComplete complete, {
     String question = '午饭17元',
     bool auto = true,
+    String source = 'AI_TEXT',
   }) async => runtime.run(
     question: question,
     ledger: await ledger.snapshot(),
     model: AgentModel(identity: 'test:auto-record', complete: complete),
     guard: () async {},
     autoRecord: auto ? record : null,
+    source: source,
+  );
+
+  test(
+    'voice recording source survives the shared agent and ledger save',
+    () async {
+      var turn = 0;
+      await run((messages, _) async {
+        if (++turn == 1) {
+          return _call('voice-record', 'propose_transaction', meal('午饭17元'));
+        }
+        final result = _observation(messages);
+        return _answer('已记下。[依据 ${result['evidence_id']}]');
+      }, source: 'AI_VOICE');
+      expect(
+        (await ledger.snapshot()).transactions.single.source,
+        TxSource.aiVoice,
+      );
+    },
   );
 
   test(

@@ -655,38 +655,75 @@ class SharedChatGptAuth {
     List<Map<String, dynamic>> tools, {
     required String expectedAccountId,
     Future<void> Function()? beforeRequest,
+    void Function(String delta)? onTextDelta,
+    String? reasoningEffort,
+    bool requestReasoningSummary = true,
+    void Function(String delta)? onReasoningDelta,
+    Future<void>? abortTrigger,
   }) async {
+    if (reasoningEffort != null &&
+        !const {
+          'none',
+          'minimal',
+          'low',
+          'medium',
+          'high',
+          'xhigh',
+          'max',
+        }.contains(reasoningEffort)) {
+      aiFailure('当前推理强度不适用于 Responses 接口，请重新选择。');
+    }
     final access = await _access();
     if (access.accountId != expectedAccountId) {
       aiFailure('ChatGPT账号已切换，本次任务已停止。');
     }
-    final request = http.Request('POST', Uri.parse('$_resource/responses'))
-      ..headers.addAll({
-        'Authorization': 'Bearer ${access.token}',
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-      })
-      ..body = jsonEncode({
-        'model': checkedModel(model),
-        'stream': true,
-        'store': false,
-        'include': ['reasoning.encrypted_content'],
-        'input': responsesAgentInput(messages, access.accountId),
-        if (tools.isNotEmpty) 'tools': responsesAgentTools(tools),
-      });
+    final request =
+        http.AbortableRequest(
+            'POST',
+            Uri.parse('$_resource/responses'),
+            abortTrigger: abortTrigger,
+          )
+          ..headers.addAll({
+            'Authorization': 'Bearer ${access.token}',
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
+          })
+          ..body = jsonEncode({
+            'model': checkedModel(model),
+            'stream': true,
+            'store': false,
+            'include': ['reasoning.encrypted_content'],
+            if (reasoningEffort != null || requestReasoningSummary)
+              'reasoning': {
+                'effort': ?reasoningEffort,
+                if (requestReasoningSummary) 'summary': 'auto',
+              },
+            'input': responsesAgentInput(messages, access.accountId),
+            if (tools.isNotEmpty) 'tools': responsesAgentTools(tools),
+          });
     if (request.bodyBytes.length > 4 * 1024 * 1024) {
       aiFailure('Agent请求过大，请缩小范围。');
     }
     await beforeRequest?.call();
     _sameAccount(access.accountId);
-    final response = await aiRequest(_client, request);
+    final decoder = ResponsesStreamDecoder(
+      onTextDelta: onTextDelta,
+      onReasoningDelta: onReasoningDelta,
+    );
+    await aiSseRequest(
+      _client,
+      request,
+      guard: beforeRequest,
+      isComplete: () => decoder.isComplete,
+      onEvent: (event) {
+        _sameAccount(access.accountId);
+        decoder.accept(event);
+      },
+    );
     _sameAccount(access.accountId);
     await beforeRequest?.call();
-    final output = decodeResponsesOutput(
-      response.body,
-      contentType: response.contentType,
-    );
-    return agentReplyFromResponses(
+    final output = decoder.output;
+    final reply = agentReplyFromResponses(
       (output['items'] as List).map(agentMap).toList(),
       access.accountId,
       usage: output['usage'] == null ? null : agentMap(output['usage']),
@@ -694,6 +731,11 @@ class SharedChatGptAuth {
           .map((t) => agentMap(t['function'])['name'] as String)
           .toSet(),
     );
+    if (reply.message['reasoning_summary'] == null &&
+        output['reasoning_summary'] is String) {
+      reply.message['reasoning_summary'] = output['reasoning_summary'];
+    }
+    return reply;
   }
 
   Future<Map<String, dynamic>> _metadata() async {
@@ -884,7 +926,46 @@ List<Map<String, dynamic>> parseChatGptModels(String body) {
         !seen.add(slug)) {
       continue;
     }
-    models.add({'slug': slug, 'displayName': label});
+    final levels =
+        raw['supported_reasoning_levels'] ?? raw['supported_reasoning_efforts'];
+    final parsedEfforts = levels is List
+        ? levels
+              .map(
+                (entry) => entry is Map
+                    ? entry['effort'] ?? entry['reasoning_effort']
+                    : entry,
+              )
+              .whereType<String>()
+              .where(
+                (effort) =>
+                    effort.isNotEmpty &&
+                    effort.length <= 32 &&
+                    !RegExp(r'[^a-z_]').hasMatch(effort),
+              )
+              .toSet()
+              .toList()
+        : null;
+    final efforts =
+        parsedEfforts != null &&
+            parsedEfforts.isEmpty &&
+            levels is List &&
+            levels.isNotEmpty
+        ? null
+        : parsedEfforts;
+    final defaultEffort =
+        raw['default_reasoning_level'] ?? raw['default_reasoning_effort'];
+    final summaries = raw['supports_reasoning_summaries'];
+    models.add({
+      'slug': slug,
+      'displayName': label,
+      'reasoningEfforts': ?efforts,
+      if (defaultEffort is String &&
+          defaultEffort.isNotEmpty &&
+          defaultEffort.length <= 32 &&
+          !RegExp(r'[^a-z_]').hasMatch(defaultEffort))
+        'defaultReasoningEffort': defaultEffort,
+      if (summaries is bool) 'supportsReasoningSummaries': summaries,
+    });
   }
   return models;
 }

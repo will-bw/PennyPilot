@@ -36,6 +36,11 @@ class _Repository implements LedgerRepository {
   );
   @override
   Future<Object?> invoke(String method, Map<String, dynamic> arguments) async {
+    if (method == 'listModels') {
+      return [
+        {'slug': '${auth['activeAccountId']}-model', 'displayName': '测试模型'},
+      ];
+    }
     changes.add((method, Map.of(arguments)));
     if (method == 'updateSettings') {
       if (failSettings) throw const LedgerException('保存失败，请重试。');
@@ -48,11 +53,6 @@ class _Repository implements LedgerRepository {
     if (method == 'selectAccount') {
       auth = {...auth, 'activeAccountId': arguments['id']};
       settings = {...settings, 'chatGptModel': ''};
-    }
-    if (method == 'listModels') {
-      return [
-        {'slug': '${auth['activeAccountId']}-model', 'displayName': '测试模型'},
-      ];
     }
     return null;
   }
@@ -299,6 +299,166 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('请先刷新此账号的模型列表。'), findsOneWidget);
       expect(repository.changes.last.$1, 'selectAccount');
+    },
+  );
+
+  testWidgets(
+    'thinking preferences and depths stay independent while editing both API providers',
+    (tester) async {
+      final repository = _Repository();
+      repository.settings = {
+        ...repository.settings,
+        'deepSeekModel': 'deepseek-flash',
+        'deepSeekThinkingEnabled': true,
+        'deepSeekReasoningEffort': 'high',
+        'qwenModel': 'qwen3.8-flash',
+        'qwenBaseUrl': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        'hasQwenKey': true,
+        'qwenThinkingEnabled': true,
+        'qwenReasoningEffort': 'xhigh',
+      };
+      final controller = await _controller(repository);
+      addTearDown(controller.dispose);
+      await _show(tester, AiSettingsScreen(controller: controller));
+      final deepDepth = find.byKey(
+        const ValueKey('settings-deepseek-thinking-effort-high'),
+      );
+      await tester.ensureVisible(deepDepth);
+      await tester.tap(deepDepth);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('最高').last);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('settings-deepseek-thinking-toggle')),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('DeepSeek'));
+      await tester.tap(find.text('DeepSeek'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('通义千问 / 百炼').last);
+      await tester.pumpAndSettle();
+      final qwenDepth = find.byKey(
+        const ValueKey('settings-qwen-thinking-effort-xhigh'),
+      );
+      await tester.ensureVisible(qwenDepth);
+      await tester.tap(qwenDepth);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('低').last);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('settings-qwen-thinking-toggle')),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('保存配置'));
+      await tester.tap(find.text('保存配置'));
+      await tester.pumpAndSettle();
+      final saved = repository.changes.single.$2;
+      expect(saved['deepSeekThinkingEnabled'], false);
+      expect(saved['deepSeekReasoningEffort'], 'max');
+      expect(saved['qwenThinkingEnabled'], false);
+      expect(saved['qwenReasoningEffort'], 'low');
+      expect(saved.containsKey('chatGptThinkingEnabled'), false);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'unsaved model changes refresh optional required and unknown thinking controls',
+    (tester) async {
+      final repository = _Repository();
+      repository.settings = {
+        ...repository.settings,
+        'deepSeekModel': 'deepseek-flash',
+      };
+      final controller = await _controller(repository);
+      addTearDown(controller.dispose);
+      await _show(tester, AiSettingsScreen(controller: controller));
+      await tester.tap(
+        find.byKey(const ValueKey('settings-deepseek-thinking-toggle')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('settings-deepseek-thinking-toggle')),
+            )
+            .value,
+        false,
+      );
+      await tester.enterText(_field('模型名称'), 'deepseek-reasoner');
+      await tester.pumpAndSettle();
+      expect(find.text('思考已启用'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('settings-deepseek-thinking-toggle')),
+        findsNothing,
+      );
+      await tester.enterText(_field('模型名称'), 'custom-model-for-test');
+      await tester.pumpAndSettle();
+      expect(find.text('当前模型的思考选项尚未确认。'), findsOneWidget);
+      await tester.enterText(_field('模型名称'), 'deepseek-flash');
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('settings-deepseek-thinking-toggle')),
+            )
+            .value,
+        false,
+      );
+      expect(repository.changes, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'retired DeepSeek model replacement edits only the draft and preserves the other provider draft',
+    (tester) async {
+      final repository = _Repository();
+      final controller = await _controller(repository);
+      addTearDown(controller.dispose);
+      await _show(tester, AiSettingsScreen(controller: controller));
+      expect(find.text('此模型已停用，请改用 deepseek-flash。'), findsOneWidget);
+      await tester.tap(find.text('DeepSeek'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('通义千问 / 百炼').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(_field('API Key'), 'qwen-draft-key');
+      await tester.enterText(_field('模型名称'), 'qwen-custom-draft');
+      await tester.ensureVisible(find.text('通义千问 / 百炼'));
+      await tester.tap(find.text('通义千问 / 百炼'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('DeepSeek').last);
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('使用 deepseek-flash'));
+      await tester.tap(find.text('使用 deepseek-flash'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(_field('模型名称')).controller!.text,
+        'deepseek-flash',
+      );
+      expect(find.text('此模型已停用，请改用 deepseek-flash。'), findsNothing);
+      expect(repository.settings['deepSeekModel'], 'deepseek-chat');
+      expect(repository.changes, isEmpty);
+      await tester.ensureVisible(find.text('DeepSeek'));
+      await tester.tap(find.text('DeepSeek'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('通义千问 / 百炼').last);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(_field('API Key')).controller!.text,
+        'qwen-draft-key',
+      );
+      expect(
+        tester.widget<TextField>(_field('模型名称')).controller!.text,
+        'qwen-custom-draft',
+      );
+      await tester.ensureVisible(find.text('保存配置'));
+      await tester.tap(find.text('保存配置'));
+      await tester.pumpAndSettle();
+      expect(repository.changes.single.$2['deepSeekModel'], 'deepseek-flash');
+      expect(repository.changes.single.$2['qwenModel'], 'qwen-custom-draft');
+      expect(repository.changes.single.$2['qwenKey'], 'qwen-draft-key');
+      expect(tester.takeException(), isNull);
     },
   );
 

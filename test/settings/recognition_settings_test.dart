@@ -4,6 +4,7 @@ import 'package:pennypilot/core/ledger_controller.dart';
 import 'package:pennypilot/core/models.dart';
 import 'package:pennypilot/features/settings/recognition_settings_screen.dart';
 import 'package:pennypilot/features/entry/entry_screen.dart';
+import 'package:pennypilot/features/chat/chat_screen.dart';
 import 'package:pennypilot/features/ledger/ledger_screen.dart';
 import '../ui/test_ledger_repository.dart';
 
@@ -76,8 +77,7 @@ void main() {
               body: TextButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) =>
-                        EntryScreen(controller: controller, initialAi: false),
+                    builder: (_) => EntryScreen(controller: controller),
                   ),
                 ),
                 child: const Text('打开'),
@@ -184,7 +184,7 @@ void main() {
     },
   );
   testWidgets(
-    'entry offers images and local CSV without overflow at narrow width',
+    'assistant offers images and local CSV without overflow at narrow width',
     (tester) async {
       tester.view.physicalSize = const Size(320, 640);
       tester.view.devicePixelRatio = 1;
@@ -194,10 +194,14 @@ void main() {
       final controller = LedgerController(repository: repo);
       await controller.init();
       await tester.pumpWidget(
-        MaterialApp(home: EntryScreen(controller: controller, initialAi: true)),
+        MaterialApp(
+          home: ChatScreen(controller: controller, onSettings: () {}),
+        ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('图片记账'), findsOneWidget);
+      expect(find.byTooltip('添加记账图片'), findsOneWidget);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
       expect(find.text('导入账单'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());

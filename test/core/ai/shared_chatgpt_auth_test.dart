@@ -139,6 +139,227 @@ void main() {
     );
   });
   test(
+    'model capabilities distinguish unknown, disabled and raw account levels',
+    () {
+      final models = parseChatGptModels(
+        jsonEncode({
+          'models': [
+            {
+              'slug': 'selected',
+              'display_name': '自选模型',
+              'visibility': 'list',
+              'supported_reasoning_levels': [
+                {'effort': 'low'},
+                {'effort': 'medium'},
+                {'effort': 'ultra'},
+                {'effort': 'medium'},
+              ],
+              'default_reasoning_level': 'low',
+              'supports_reasoning_summaries': true,
+            },
+            {
+              'slug': 'none',
+              'display_name': '无推理',
+              'visibility': 'list',
+              'supported_reasoning_efforts': [],
+              'supports_reasoning_summaries': false,
+            },
+            {
+              'slug': 'unknown',
+              'display_name': '未知',
+              'visibility': 'list',
+              'supports_reasoning_summaries': 'false',
+            },
+            {
+              'slug': 'efforts',
+              'display_name': '另一目录格式',
+              'visibility': 'list',
+              'supported_reasoning_efforts': [
+                'none',
+                {'effort': 'high'},
+              ],
+              'default_reasoning_effort': 'high',
+            },
+            {
+              'slug': 'malformed',
+              'display_name': '无效元数据',
+              'visibility': 'list',
+              'supported_reasoning_levels': [42, {}],
+            },
+          ],
+        }),
+      );
+      expect(models[0]['reasoningEfforts'], ['low', 'medium', 'ultra']);
+      expect(models[0]['defaultReasoningEffort'], 'low');
+      expect(models[0]['supportsReasoningSummaries'], isTrue);
+      expect(models[1]['reasoningEfforts'], isEmpty);
+      expect(models[1]['supportsReasoningSummaries'], isFalse);
+      expect(models[2].containsKey('reasoningEfforts'), isFalse);
+      expect(models[2].containsKey('supportsReasoningSummaries'), isFalse);
+      expect(models[3]['reasoningEfforts'], ['none', 'high']);
+      expect(models[3]['defaultReasoningEffort'], 'high');
+      expect(models[4].containsKey('reasoningEfforts'), isFalse);
+    },
+  );
+  test(
+    'agent reasoning options preserve selected model and separate public summaries',
+    () async {
+      final requests = <Map<String, dynamic>>[];
+      final summary = <String>[];
+      final text = <String>[];
+      final auth = SharedChatGptAuth(
+        credentials: stored(),
+        now: () => now,
+        client: MockClient((request) async {
+          expect(request.url.toString(), 'https://api.openai.com/v1/responses');
+          requests.add(jsonDecode(request.body) as Map<String, dynamic>);
+          final output = [
+            {
+              'id': 'rs_1',
+              'type': 'reasoning',
+              'summary': [
+                {'type': 'summary_text', 'text': '先核对账本'},
+              ],
+              'encrypted_content': 'never-display-opaque',
+            },
+            {
+              'id': 'msg_1',
+              'type': 'message',
+              'role': 'assistant',
+              'status': 'completed',
+              'content': [
+                {'type': 'output_text', 'text': '本月支出已核对。'},
+              ],
+            },
+          ];
+          return http.Response(
+            'data: ${jsonEncode({'type': 'response.reasoning_summary_text.delta', 'item_id': 'rs_1', 'output_index': 0, 'summary_index': 0, 'delta': '先核对账本'})}\n\n'
+            'data: ${jsonEncode({'type': 'response.output_text.delta', 'delta': '本月支出'})}\n\n'
+            'data: ${jsonEncode({
+              'type': 'response.completed',
+              'response': {'status': 'completed', 'output': output},
+            })}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream; charset=utf-8'},
+          );
+        }),
+      );
+      addTearDown(auth.dispose);
+      final reply = await auth.agentTurn(
+        'user-selected-model',
+        [
+          {'role': 'user', 'content': '分析本月支出'},
+        ],
+        [],
+        expectedAccountId: 'one',
+        reasoningEffort: 'high',
+        requestReasoningSummary: true,
+        onReasoningDelta: summary.add,
+        onTextDelta: text.add,
+      );
+      expect(requests.single['model'], 'user-selected-model');
+      expect(requests.single['reasoning'], {
+        'effort': 'high',
+        'summary': 'auto',
+      });
+      expect(requests.single['store'], isFalse);
+      expect(summary.join(), '先核对账本');
+      expect(text.join(), '本月支出');
+      expect(reply.message['content'], '本月支出已核对。');
+      expect(reply.message['reasoning_summary'], '先核对账本');
+      expect(
+        jsonEncode(reply.message['responsesItems']),
+        contains('never-display-opaque'),
+      );
+      expect(
+        '${summary.join()}${text.join()}${reply.message['reasoning_summary']}',
+        isNot(contains('never-display')),
+      );
+      await auth.agentTurn(
+        'user-selected-model',
+        [
+          {'role': 'user', 'content': '直接回答'},
+        ],
+        [],
+        expectedAccountId: 'one',
+        reasoningEffort: 'none',
+        requestReasoningSummary: false,
+      );
+      expect(requests.last['reasoning'], {'effort': 'none'});
+      await auth.agentTurn(
+        'unknown-model',
+        [
+          {'role': 'user', 'content': '直接回答'},
+        ],
+        [],
+        expectedAccountId: 'one',
+        requestReasoningSummary: false,
+      );
+      expect(requests.last.containsKey('reasoning'), isFalse);
+      await expectLater(
+        auth.agentTurn(
+          'user-selected-model',
+          [
+            {'role': 'user', 'content': '分析'},
+          ],
+          [],
+          expectedAccountId: 'one',
+          reasoningEffort: 'ultra',
+        ),
+        throwsA(isA<LedgerException>()),
+      );
+      expect(requests, hasLength(3));
+    },
+  );
+  test(
+    'summary done without deltas persists even if terminal output omits reasoning',
+    () async {
+      final deltas = <String>[];
+      final auth = SharedChatGptAuth(
+        credentials: stored(),
+        now: () => now,
+        client: MockClient(
+          (_) async => http.Response(
+            'data: ${jsonEncode({'type': 'response.reasoning_summary_text.done', 'item_id': 'rs_1', 'summary_index': 0, 'text': '已核对账本与预算'})}\n\n'
+            'data: ${jsonEncode({
+              'type': 'response.completed',
+              'response': {
+                'status': 'completed',
+                'output': [
+                  {
+                    'id': 'msg_1',
+                    'type': 'message',
+                    'role': 'assistant',
+                    'status': 'completed',
+                    'content': [
+                      {'type': 'output_text', 'text': '最终答案'},
+                    ],
+                  },
+                ],
+              },
+            })}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream; charset=utf-8'},
+          ),
+        ),
+      );
+      addTearDown(auth.dispose);
+      final reply = await auth.agentTurn(
+        'selected-model',
+        [
+          {'role': 'user', 'content': '分析'},
+        ],
+        [],
+        expectedAccountId: 'one',
+        reasoningEffort: 'medium',
+        onReasoningDelta: deltas.add,
+      );
+      expect(deltas, ['已核对账本与预算']);
+      expect(reply.message['reasoning_summary'], '已核对账本与预算');
+      expect(reply.message['content'], '最终答案');
+    },
+  );
+  test(
     'refresh rotates credentials once before using model endpoint',
     () async {
       var refreshCalls = 0;

@@ -526,7 +526,7 @@ void main() {
   );
 
   test(
-    'changing model removes account-bound reasoning while retaining tool transcript',
+    'changing model sends ordinary history data without account-bound reasoning',
     () async {
       final session = await runtime.active(0);
       session.modelIdentity = 'old-account:model';
@@ -549,7 +549,8 @@ void main() {
           ),
           false,
         );
-        expect(messages.any((m) => m['content'] == '旧回答'), true);
+        expect(jsonEncode(messages), contains('旧回答'));
+        expect(jsonEncode(messages), isNot(contains('opaque')));
         return answer('你好');
       }, question: '你好');
     },

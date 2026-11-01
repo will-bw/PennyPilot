@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
 import 'package:pennypilot/core/models.dart';
+import '../../core/ai/model_reasoning.dart';
 import '../../ui/common.dart';
+import '../../ui/reasoning_controls.dart';
 
 import 'settings_widgets.dart';
 
@@ -21,6 +23,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
   late String _provider;
   late String _selectedModel;
   late Map<String, String> _savedFields;
+  late Map<String, dynamic> _thinking, _savedThinking;
   String? _observedAccountId, _catalogAccountId;
   List<AiModel> _models = [];
   bool _busy = false, _loadingModels = false, _dirty = false, _canPop = false;
@@ -29,6 +32,10 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
   String? get _accountId =>
       widget.controller.auth['activeAccountId'] as String?;
   bool get _authorizing => widget.controller.auth['isAuthorizing'] == true;
+  bool get _taskActive =>
+      widget.controller.isAsking ||
+      widget.controller.isParsing ||
+      widget.controller.busyFor('assistantInput');
   List<Map<String, dynamic>> get _accounts =>
       (widget.controller.auth['accounts'] as List? ?? [])
           .map(stringMap)
@@ -51,14 +58,31 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
     _deepSeekKey = TextEditingController();
     _qwenKey = TextEditingController();
     _deepSeekModel = TextEditingController(
-      text: settings['deepSeekModel'] as String? ?? 'deepseek-chat',
+      text: settings['deepSeekModel'] as String? ?? defaultDeepSeekModel,
     );
     _qwenModel = TextEditingController(
-      text: settings['qwenModel'] as String? ?? 'qwen-plus',
+      text: settings['qwenModel'] as String? ?? defaultQwenModel,
     );
     _qwenUrl = TextEditingController(
-      text: settings['qwenBaseUrl'] as String? ?? '',
+      text: settings['qwenBaseUrl'] as String? ?? defaultQwenBaseUrl,
     );
+    _thinking = {
+      for (final provider in const ['chatgpt', 'deepseek', 'qwen']) ...{
+        '${reasoningSettingsPrefix(provider)}ThinkingEnabled':
+            settings['${reasoningSettingsPrefix(provider)}ThinkingEnabled']
+                as bool? ??
+            true,
+        '${reasoningSettingsPrefix(provider)}ReasoningEffort':
+            settings['${reasoningSettingsPrefix(provider)}ReasoningEffort']
+                as String? ??
+            const {
+              'chatgpt': 'medium',
+              'deepseek': 'high',
+              'qwen': 'xhigh',
+            }[provider]!,
+      },
+    };
+    _savedThinking = Map.of(_thinking);
     _savedFields = _configurationFields;
     _selectedModel = settings['chatGptModel'] as String? ?? '';
     _observedAccountId = _accountId;
@@ -70,7 +94,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
       _qwenUrl,
     ]) {
       controller.addListener(() {
-        if (!_dirty && mounted) setState(() => _dirty = true);
+        if (mounted) setState(() => _dirty = true);
       });
     }
     widget.controller.addListener(_onControllerChanged);
@@ -257,6 +281,11 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
       }
       changes[entry.key] = entry.value;
     }
+    for (final entry in _thinking.entries) {
+      if (entry.value != _savedThinking[entry.key]) {
+        changes[entry.key] = entry.value;
+      }
+    }
     if (validation != null) {
       setState(() => _error = validation);
       return;
@@ -268,6 +297,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
           _deepSeekKey.clear();
           _qwenKey.clear();
           _savedFields = _configurationFields;
+          _savedThinking = Map.of(_thinking);
           _dirty = false;
         });
       }
@@ -299,7 +329,8 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
 
   Widget _chatGpt(BuildContext context) {
     final account = _activeAccount;
-    final controlsEnabled = !_busy && !_authorizing && !_loadingModels;
+    final controlsEnabled =
+        !_busy && !_authorizing && !_loadingModels && !_taskActive;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -522,7 +553,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
       children: [
         TextField(
           controller: qwen ? _qwenKey : _deepSeekKey,
-          enabled: !_busy,
+          enabled: !_busy && !_taskActive,
           obscureText: true,
           autocorrect: false,
           enableSuggestions: false,
@@ -538,7 +569,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton(
-              onPressed: _busy ? null : () => _removeKey(qwen),
+              onPressed: _busy || _taskActive ? null : () => _removeKey(qwen),
               style: TextButton.styleFrom(
                 foregroundColor: Theme.of(context).colorScheme.error,
               ),
@@ -549,7 +580,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
         if (qwen) ...[
           TextField(
             controller: _qwenUrl,
-            enabled: !_busy,
+            enabled: !_busy && !_taskActive,
             keyboardType: TextInputType.url,
             autocorrect: false,
             decoration: const InputDecoration(
@@ -562,12 +593,76 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
         ],
         TextField(
           controller: qwen ? _qwenModel : _deepSeekModel,
-          enabled: !_busy,
+          enabled: !_busy && !_taskActive,
           autocorrect: false,
           decoration: InputDecoration(
             labelText: '模型名称',
-            helperText: qwen ? '例如 qwen-plus，需与服务地址对应。' : '例如 deepseek-chat。',
+            helperText: qwen
+                ? '例如 qwen3.8-flash，需与服务地址对应。'
+                : '例如 deepseek-flash。',
           ),
+        ),
+        if (!qwen &&
+            const {
+              'deepseek-chat',
+              'deepseek-reasoner',
+            }.contains(_deepSeekModel.text.trim())) ...[
+          const SizedBox(height: 12),
+          Text(
+            '此模型已停用，请改用 deepseek-flash。',
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: _busy || _taskActive
+                  ? null
+                  : () => _deepSeekModel.text = defaultDeepSeekModel,
+              child: const Text('使用 deepseek-flash'),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _reasoningOptions() {
+    final model = switch (_provider) {
+      'chatgpt' => _selectedModel,
+      'qwen' => _qwenModel.text.trim(),
+      _ => _deepSeekModel.text.trim(),
+    };
+    final catalogModel =
+        _provider == 'chatgpt' && _catalogAccountId == _accountId
+        ? _models.where((item) => item.slug == model).firstOrNull
+        : null;
+    final options = resolveReasoningOptions(
+      {...widget.controller.settings, ..._thinking},
+      provider: _provider,
+      model: model,
+      catalogModel: catalogModel,
+    );
+    final prefix = reasoningSettingsPrefix(_provider);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ReasoningControls(
+          keyPrefix: 'settings-$_provider',
+          options: options,
+          enabled: !_busy && !_taskActive,
+          onEnabledChanged: (enabled) => setState(() {
+            _thinking['${prefix}ThinkingEnabled'] = enabled;
+            _dirty = true;
+          }),
+          onEffortChanged: (effort) => setState(() {
+            _thinking['${prefix}ReasoningEffort'] = effort;
+            _dirty = true;
+          }),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '每家服务分别保存。聊天中的快捷调整也会保留，下一次任务生效。',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
       ],
     );
@@ -618,7 +713,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                           child: Text('通义千问 / 百炼'),
                         ),
                       ],
-                      onChanged: _busy || _authorizing
+                      onChanged: _busy || _authorizing || _taskActive
                           ? null
                           : (value) => setState(() {
                               _provider = value!;
@@ -644,6 +739,16 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                     ? _chatGpt(context)
                     : _apiConfiguration(_provider == 'qwen'),
               ),
+              const SectionTitle('思考方式'),
+              SectionSurface(
+                padding: const EdgeInsets.all(20),
+                child: _reasoningOptions(),
+              ),
+              if (_taskActive)
+                const Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: Text('任务进行中，结束后可修改 AI 配置。'),
+                ),
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 24),
@@ -659,7 +764,8 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                 ),
               const SizedBox(height: 28),
               FilledButton(
-                onPressed: _busy || _authorizing || _loadingModels
+                onPressed:
+                    _busy || _authorizing || _loadingModels || _taskActive
                     ? null
                     : _save,
                 child: _busy ? const SettingsBusy() : const Text('保存配置'),

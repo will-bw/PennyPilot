@@ -36,18 +36,35 @@ class AgentContext {
     ...session.messages.skip(session.contextStart).map(_wire),
   ];
 
-  static Map<String, dynamic> _wire(Map<String, dynamic> m) => {
-    for (final key in [
-      'role',
-      'content',
-      'tool_calls',
-      'tool_call_id',
-      'reasoning_content',
-      'responsesItems',
-      'responsesAccountId',
-    ])
-      if (m[key] != null) key: m[key],
-  };
+  static Map<String, dynamic> _wire(Map<String, dynamic> m) {
+    final wire = <String, dynamic>{
+      for (final key in [
+        'role',
+        'content',
+        'tool_calls',
+        'tool_call_id',
+        'reasoning_content',
+        'responsesItems',
+        'responsesAccountId',
+      ])
+        if (m[key] != null) key: m[key],
+    };
+    final content = wire['content'];
+    if (wire['role'] == 'tool' &&
+        content is String &&
+        content.contains('"presentation"')) {
+      final observation = agentMap(jsonDecode(content));
+      if (observation['presentation'] is Map) {
+        // The full artifact stays in the local transcript. The model only needs
+        // its receipt; queried data already has a separate evidence observation.
+        observation['presentation'] = agentMap(observation['presentation'])
+          ..remove('content')
+          ..remove('data');
+        wire['content'] = jsonEncode(observation);
+      }
+    }
+    return wire;
+  }
 
   static Future<void> compact({
     required AgentSession session,
@@ -90,7 +107,7 @@ class AgentContext {
     var chunkTokens = 0;
     final chunkLimit = (config.contextTokens ~/ 3).clamp(2000, 10000);
     for (final m in old) {
-      final content = m['content'] as String? ?? '';
+      final content = _wire(m)['content'] as String? ?? '';
       final row = {
         'role': m['role'],
         'content': content.length > 2000

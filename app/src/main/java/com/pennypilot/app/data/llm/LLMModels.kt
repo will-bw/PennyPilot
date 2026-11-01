@@ -93,6 +93,7 @@ data class AssistantMessage(
     @SerialName("role") val role: String = "assistant",
     @SerialName("content") val content: String? = null,
     @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
+    @SerialName("reasoning_summary") val reasoningSummary: String? = null,
     @Transient val responsesItems: JsonArray? = null,
     @Transient val responsesAccountId: String? = null
 )
