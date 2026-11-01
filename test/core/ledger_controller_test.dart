@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
 import 'package:pennypilot/core/ledger_repository.dart';
 import 'package:pennypilot/core/models.dart';
+import 'package:pennypilot/core/recognition/recognition_protocol.dart';
 
 class FakeRepository implements LedgerRepository {
   LedgerSnapshot value = LedgerSnapshot(revision: 0, categories: categories);
@@ -49,6 +50,38 @@ LedgerTransaction transaction({
   merchant: merchant,
 );
 
+Map<String, dynamic> autoRow(
+  String operationId,
+  int amount, {
+  bool eligible = true,
+}) => transaction(id: 0, amount: amount)
+    .copyWith(
+      source: TxSource.aiText,
+      metadataJson: jsonEncode({
+        'operationId': operationId,
+        'autoSaveEligible': eligible,
+      }),
+    )
+    .toMap();
+Map<String, dynamic> persistRows(
+  FakeRepository repository,
+  Map<String, dynamic> args,
+) {
+  final rows = args['transactions'] as List;
+  final first = repository.value.transactions.length + 1;
+  final saved = [
+    for (var i = 0; i < rows.length; i++)
+      LedgerTransaction.fromMap({...stringMap(rows[i]), 'id': first + i}),
+  ];
+  repository.value = LedgerSnapshot(
+    revision: repository.value.revision,
+    categories: categories,
+    settings: repository.value.settings,
+    transactions: [...repository.value.transactions, ...saved],
+  );
+  return {'ids': saved.map((t) => t.id).toList()};
+}
+
 void main() {
   late FakeRepository repository;
   late LedgerController controller;
@@ -90,6 +123,57 @@ void main() {
       expect(controller.categorySpending.single.amountFen, 1250);
       expect(controller.dailySpending, {23: 1250});
       expect(controller.pendingTransactions.single.id, 3);
+    },
+  );
+
+  test(
+    'chat automatic additions share a receipt and undo only their own rows',
+    () async {
+      repository.value = LedgerSnapshot(
+        revision: 0,
+        categories: categories,
+        transactions: [transaction(id: 1)],
+      );
+      repository.handler = (method, args) async {
+        if (method == 'ask') {
+          repository.value = LedgerSnapshot(
+            revision: 0,
+            categories: categories,
+            transactions: [
+              transaction(id: 1),
+              transaction(id: 42).copyWith(
+                source: TxSource.aiText,
+                businessKind: 'expense',
+                metadataJson: jsonEncode({'operationId': 'agent:auto-42'}),
+              ),
+            ],
+          );
+          return {
+            'answer': '已记下午饭。',
+            'isError': false,
+            'autoSavedIds': [42],
+          };
+        }
+        if (method == 'undoRecognitionSave') {
+          expect(args['transactions'], [
+            {'id': 42, 'editVersion': 0, 'operationId': 'agent:auto-42'},
+          ]);
+          repository.value = LedgerSnapshot(
+            revision: 0,
+            categories: categories,
+            transactions: [transaction(id: 1)],
+          );
+          return {'count': 1};
+        }
+        return null;
+      };
+      await controller.init();
+      await controller.ask('午饭12元');
+      expect(controller.transactions, hasLength(2));
+      expect(controller.lastRecognitionSave!.ids, [42]);
+      expect(controller.canUndoRecognitionSave, true);
+      expect(await controller.undoLastRecognitionSave(), 1);
+      expect(controller.transactions.single.id, 1);
     },
   );
 
@@ -222,6 +306,73 @@ void main() {
       );
     },
   );
+  test(
+    'follow-up recognition keeps saved and manually corrected session records',
+    () async {
+      Map<String, dynamic> row(int index, int amount) =>
+          transaction(id: 0, amount: amount)
+              .copyWith(
+                source: TxSource.aiText,
+                metadataJson: jsonEncode({'operationId': 'session:$index'}),
+              )
+              .toMap();
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          return {
+            'transactions': [row(0, 1200), row(1, 250)],
+            'questions': ['另一笔是多少？'],
+            'autoSaveEligible': false,
+          };
+        }
+        if (method == 'saveTransactions') {
+          repository.value = LedgerSnapshot(
+            revision: 0,
+            categories: categories,
+            transactions: [
+              for (final saved in args['transactions'] as List)
+                LedgerTransaction.fromMap({...saved, 'id': 99}),
+            ],
+          );
+          return {
+            'ids': [99],
+          };
+        }
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭12，饮料2.5', sessionId: 'session');
+      controller.updateDraft(1, controller.drafts[1].copyWith(amountFen: 300));
+      await controller.saveDrafts(items: [controller.drafts.first]);
+      await controller.recognizeInput(
+        text: '午饭12，饮料2.5。补充：另一笔3元',
+        sessionId: 'session',
+      );
+      expect(controller.transactions, hasLength(1));
+      expect(controller.drafts, hasLength(1));
+      expect(controller.drafts.single.amountFen, 300);
+      expect(controller.drafts.single.recognitionMetadata['reviewed'], true);
+    },
+  );
+
+  test('unresolved questions do not block another eligible record', () async {
+    repository.handler = (method, args) async {
+      if (method == 'recognizeInput') {
+        return {
+          'transactions': [autoRow('meal', 1200)],
+          'questions': ['另一笔金额是多少？'],
+          'autoSaveEligible': true,
+        };
+      }
+      if (method == 'saveTransactions') return persistRows(repository, args);
+      return null;
+    };
+    await controller.init();
+    await controller.recognizeInput(text: '午饭12元，咖啡忘了多少钱');
+    expect(controller.drafts, isEmpty);
+    expect(controller.transactions.single.amountFen, 1200);
+    expect(controller.recognitionQuestions, ['另一笔金额是多少？']);
+  });
+
   test(
     '101 imported records save in bounded batches without dropping the tail',
     () async {
@@ -589,6 +740,514 @@ void main() {
         ),
       );
       expect(repository.calls, isEmpty);
+    },
+  );
+  test(
+    'default active input saves the screenshot phrase with inferred date and direction',
+    () async {
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          return RecognitionProtocol.validate(
+            {
+              'intent': 'record',
+              'proposals': [
+                {
+                  'amount': 1700,
+                  'type': 'UNKNOWN',
+                  'businessKind': 'expense',
+                  'currency': 'CNY',
+                  'paymentStatus': 'unknown',
+                  'category': '餐饮',
+                  'fieldEvidence': {
+                    'amount': {'quote': '17 块钱', 'source': 'user'},
+                    'type': {'quote': '吃的盖饭', 'source': 'inference'},
+                  },
+                },
+              ],
+            },
+            snapshot: repository.value,
+            input: args['text'] as String,
+            source: args['source'] as String,
+            now: DateTime(2026, 10, 23, 13, 25),
+            operationId: args['operationId'] as String,
+          );
+        }
+        if (method == 'saveTransactions') return persistRows(repository, args);
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(
+        text: '昨天晚上 7 点过吃的盖饭，17 块钱。',
+        sessionId: 'meal',
+      );
+      expect(controller.transactions, hasLength(1));
+      expect(
+        controller.transactions.single.occurredAt,
+        DateTime(2026, 10, 22, 19),
+      );
+      expect(controller.drafts, isEmpty);
+      expect(controller.recognitionQuestions, isEmpty);
+      expect(controller.lastRecognitionSave!.count, 1);
+      expect(controller.canUndoRecognitionSave, true);
+      expect(controller.recognitionNotice, contains('已记 1 笔'));
+    },
+  );
+  test('explicitly disabled active auto-save retains drafts', () async {
+    repository.value = LedgerSnapshot(
+      revision: 0,
+      categories: categories,
+      settings: {'activeInputAutoSaveEnabled': false},
+    );
+    repository.handler = (method, args) async {
+      if (method == 'recognizeInput') {
+        return {
+          'transactions': [autoRow('meal', 1200)],
+          'autoSaveEligible': true,
+        };
+      }
+      fail('auto-save must respect the explicit setting');
+    };
+    await controller.init();
+    await controller.recognizeInput(text: '午饭12元');
+    expect(controller.drafts, hasLength(1));
+    expect(controller.lastRecognitionSave, isNull);
+  });
+  test(
+    'per-record eligibility saves clear records while another purpose remains unresolved',
+    () async {
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          return {
+            'transactions': [
+              autoRow('meal', 1200),
+              {
+                ...autoRow('transfer', 500, eligible: false),
+                'businessKind': 'unknown',
+              },
+            ],
+            'questions': ['另一笔是转账还是消费？'],
+            'autoSaveEligible': true,
+          };
+        }
+        if (method == 'saveTransactions') return persistRows(repository, args);
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭12，另一笔5');
+      expect(controller.transactions.single.amountFen, 1200);
+      expect(controller.drafts.single.amountFen, 500);
+      expect(controller.recognitionQuestions, ['另一笔是转账还是消费？']);
+    },
+  );
+  test(
+    'a missing amount does not prevent another real record from being saved',
+    () async {
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          Map<String, dynamic> proposal(
+            int? amount,
+            String quote,
+            String item,
+          ) => {
+            'amount': amount,
+            'currency': 'CNY',
+            'type': 'EXPENSE',
+            'businessKind': 'expense',
+            'paymentStatus': 'declared',
+            'category': '餐饮',
+            'fieldEvidence': {
+              'amount': {'quote': quote, 'source': 'user'},
+              'type': {'quote': item, 'source': 'user'},
+            },
+          };
+          return RecognitionProtocol.validate(
+            {
+              'intent': 'record',
+              'proposals': [
+                proposal(1200, '12元', '午饭'),
+                proposal(null, '', '咖啡'),
+              ],
+            },
+            snapshot: repository.value,
+            input: args['text'] as String,
+            source: 'AI_TEXT',
+            now: DateTime(2026, 10, 23),
+            operationId: 'batch',
+          );
+        }
+        if (method == 'saveTransactions') return persistRows(repository, args);
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭12元，咖啡忘了多少钱');
+      expect(controller.transactions.single.amountFen, 1200);
+      expect(controller.drafts, isEmpty);
+      expect(controller.recognitionQuestions, isNotEmpty);
+      expect(controller.lastRecognitionSave!.count, 1);
+    },
+  );
+  test(
+    'undo sends one guarded batch and preserves unrelated later additions',
+    () async {
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          return {
+            'transactions': [autoRow('meal', 1200), autoRow('coffee', 500)],
+            'autoSaveEligible': true,
+          };
+        }
+        if (method == 'saveTransactions') return persistRows(repository, args);
+        if (method == 'undoRecognitionSave') {
+          expect(args['revision'], 0);
+          expect(args['transactions'], [
+            {'id': 1, 'editVersion': 0, 'operationId': 'meal'},
+            {'id': 2, 'editVersion': 0, 'operationId': 'coffee'},
+          ]);
+          repository.value = LedgerSnapshot(
+            revision: 0,
+            categories: categories,
+            transactions: repository.value.transactions
+                .where((t) => t.id == 99)
+                .toList(),
+          );
+          return {'count': 2};
+        }
+        fail('unexpected method $method');
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭12元，咖啡5元');
+      repository.value = LedgerSnapshot(
+        revision: 0,
+        categories: categories,
+        transactions: [...repository.value.transactions, transaction(id: 99)],
+      );
+      await controller.refresh();
+      expect(await controller.undoLastRecognitionSave(), 2);
+      expect(controller.transactions.single.id, 99);
+      expect(controller.lastRecognitionSave, isNull);
+      expect(
+        repository.calls.where((c) => c.method == 'deleteTransaction'),
+        isEmpty,
+      );
+    },
+  );
+  test('undo refusal preserves receipt and records for correction', () async {
+    repository.handler = (method, args) async {
+      if (method == 'recognizeInput') {
+        return {
+          'transactions': [autoRow('meal', 1200)],
+          'autoSaveEligible': true,
+        };
+      }
+      if (method == 'saveTransactions') return persistRows(repository, args);
+      if (method == 'undoRecognitionSave') {
+        throw const LedgerException('账目已更新，不能撤销这次自动记账。', code: 'CONFLICT');
+      }
+      return null;
+    };
+    await controller.init();
+    await controller.recognizeInput(text: '午饭12元');
+    await expectLater(
+      controller.undoLastRecognitionSave(),
+      throwsA(isA<LedgerException>()),
+    );
+    expect(controller.transactions, hasLength(1));
+    expect(controller.lastRecognitionSave!.count, 1);
+  });
+  test(
+    'a restored ledger invalidates the previous auto-save receipt',
+    () async {
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          return {
+            'transactions': [autoRow('meal', 1200)],
+            'autoSaveEligible': true,
+          };
+        }
+        if (method == 'saveTransactions') return persistRows(repository, args);
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭12元');
+      expect(controller.canUndoRecognitionSave, true);
+      repository.value = LedgerSnapshot(
+        revision: 1,
+        categories: categories,
+        transactions: repository.value.transactions,
+      );
+      repository.updates.add(const LedgerEvent('restored', 1));
+      await controller.refresh();
+      expect(controller.lastRecognitionSave, isNull);
+      await expectLater(
+        controller.undoLastRecognitionSave(),
+        throwsA(isA<LedgerException>()),
+      );
+      expect(
+        repository.calls.where((c) => c.method == 'undoRecognitionSave'),
+        isEmpty,
+      );
+    },
+  );
+  test(
+    'partial batch failure retains an undo receipt only for newly saved records',
+    () async {
+      var writes = 0;
+      repository.handler = (method, args) async {
+        if (method == 'saveTransactions') {
+          if (++writes == 2) throw const LedgerException('磁盘空间不足');
+          return persistRows(repository, args);
+        }
+        return null;
+      };
+      await controller.init();
+      controller.addImportedDrafts(
+        List.generate(
+          101,
+          (i) =>
+              LedgerTransaction.fromMap(autoRow('batch:$i', 1200), draft: true),
+        ),
+      );
+      await expectLater(
+        controller.saveDrafts(rememberRecognitionSave: true),
+        throwsA(isA<LedgerException>()),
+      );
+      expect(controller.transactions, hasLength(100));
+      expect(controller.lastRecognitionSave!.count, 100);
+      expect(controller.drafts, hasLength(1));
+    },
+  );
+  test(
+    'existing idempotent saves are excluded from a new undo receipt',
+    () async {
+      repository.value = LedgerSnapshot(
+        revision: 0,
+        categories: categories,
+        transactions: [
+          LedgerTransaction.fromMap({...autoRow('meal', 1200), 'id': 99}),
+        ],
+      );
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          return {
+            'transactions': [autoRow('meal', 1200)],
+            'autoSaveEligible': true,
+          };
+        }
+        if (method == 'saveTransactions') {
+          return {
+            'ids': [99],
+          };
+        }
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭12元');
+      expect(controller.transactions.single.id, 99);
+      expect(controller.lastRecognitionSave, isNull);
+    },
+  );
+  test(
+    'a follow-up after undo records only the newly completed item',
+    () async {
+      var recognitions = 0;
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          recognitions++;
+          return {
+            'transactions': [
+              autoRow('session:meal', 1700),
+              if (recognitions > 1) autoRow('session:metro', 300),
+            ],
+            'questions': recognitions == 1 ? ['地铁多少钱？'] : <String>[],
+            'autoSaveEligible': true,
+          };
+        }
+        if (method == 'saveTransactions') {
+          if (recognitions > 1) {
+            expect((args['transactions'] as List).single['amount'], 300);
+          }
+          return persistRows(repository, args);
+        }
+        if (method == 'undoRecognitionSave') {
+          repository.value = LedgerSnapshot(
+            revision: 0,
+            categories: categories,
+          );
+          return {'count': 1};
+        }
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭17，地铁忘了', sessionId: 'session');
+      expect(await controller.undoLastRecognitionSave(), 1);
+      await controller.recognizeInput(
+        text: '午饭17，地铁忘了\n补充：地铁3元',
+        sessionId: 'session',
+      );
+      expect(controller.transactions.single.amountFen, 300);
+      expect(controller.lastRecognitionSave!.count, 1);
+    },
+  );
+  test(
+    'undo does not adopt an edit made between insertion and snapshot refresh',
+    () async {
+      repository.handler = (method, args) async {
+        if (method == 'recognizeInput') {
+          return {
+            'transactions': [autoRow('meal', 1200)],
+            'autoSaveEligible': true,
+          };
+        }
+        if (method == 'saveTransactions') {
+          final result = persistRows(repository, args);
+          repository.value = LedgerSnapshot(
+            revision: 0,
+            categories: categories,
+            transactions: [
+              LedgerTransaction.fromMap({
+                ...repository.value.transactions.single.toMap(),
+                'amount': 1800,
+                'editVersion': 1,
+              }),
+            ],
+          );
+          return result;
+        }
+        if (method == 'undoRecognitionSave') {
+          expect((args['transactions'] as List).single['editVersion'], 0);
+          throw const LedgerException('账目已更新', code: 'CONFLICT');
+        }
+        return null;
+      };
+      await controller.init();
+      await controller.recognizeInput(text: '午饭12元');
+      await expectLater(
+        controller.undoLastRecognitionSave(),
+        throwsA(isA<LedgerException>()),
+      );
+      expect(controller.transactions.single.amountFen, 1800);
+    },
+  );
+  test(
+    'editing an auto-saved record learns corrected category, purpose and account',
+    () async {
+      final original = LedgerTransaction.fromMap({
+        ...autoRow('meal', 1200),
+        'id': 1,
+        'merchant': '便利店',
+        'accountTag': '微信',
+      });
+      repository.value = LedgerSnapshot(
+        revision: 0,
+        categories: categories,
+        transactions: [original],
+      );
+      repository.handler = (method, args) async {
+        if (method == 'saveTransaction') {
+          return {'id': 1};
+        }
+        if (method == 'updateSettings') return null;
+        fail('unexpected method $method');
+      };
+      await controller.init();
+      expect(
+        await controller.saveTransaction(
+          original.copyWith(
+            categoryId: 3,
+            businessKind: 'transfer',
+            accountTag: '支付宝',
+          ),
+        ),
+        1,
+      );
+      final preferenceWrite = repository.calls.singleWhere(
+        (c) => c.method == 'updateSettings',
+      );
+      final preference =
+          (jsonDecode(
+                    preferenceWrite.args['recognitionPreferencesJson']
+                        as String,
+                  )
+                  as List)
+              .single;
+      expect(preference, {
+        'merchant': '便利店',
+        'type': 'EXPENSE',
+        'category': '交通',
+        'businessKind': 'transfer',
+        'accountTag': '支付宝',
+      });
+    },
+  );
+  test(
+    'a purpose or account correction in a draft updates recognition preferences',
+    () async {
+      final row = LedgerTransaction.fromMap({
+        ...autoRow('meal', 1200),
+        'merchant': '朋友小王',
+      });
+      repository.handler = (method, args) async {
+        if (method == 'parseText') {
+          return {
+            'transactions': [row.toMap()],
+          };
+        }
+        return null;
+      };
+      await controller.init();
+      await controller.parseText('给朋友小王12元');
+      controller.updateDraft(
+        0,
+        controller.drafts.single.copyWith(
+          businessKind: 'receivable',
+          accountTag: '支付宝',
+        ),
+      );
+      final preferenceWrite = repository.calls.singleWhere(
+        (c) => c.method == 'updateSettings',
+      );
+      final preference =
+          (jsonDecode(
+                    preferenceWrite.args['recognitionPreferencesJson']
+                        as String,
+                  )
+                  as List)
+              .single;
+      expect(preference['businessKind'], 'receivable');
+      expect(preference['accountTag'], '支付宝');
+    },
+  );
+  test(
+    'a preference-write failure does not turn a successful user correction into a failed save',
+    () async {
+      final original = LedgerTransaction.fromMap({
+        ...autoRow('meal', 1200),
+        'id': 1,
+        'merchant': '便利店',
+      });
+      repository.value = LedgerSnapshot(
+        revision: 0,
+        categories: categories,
+        transactions: [original],
+      );
+      repository.handler = (method, args) async {
+        if (method == 'saveTransaction') {
+          repository.value = LedgerSnapshot(
+            revision: 0,
+            categories: categories,
+            transactions: [original.copyWith(categoryId: 3)],
+          );
+          return {'id': 1};
+        }
+        if (method == 'updateSettings') throw const LedgerException('偏好存储失败');
+        return null;
+      };
+      await controller.init();
+      expect(
+        await controller.saveTransaction(original.copyWith(categoryId: 3)),
+        1,
+      );
+      expect(controller.transactions.single.categoryId, 3);
     },
   );
 }

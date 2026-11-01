@@ -23,6 +23,7 @@ data class CaptureEvidence(
 sealed interface CaptureResult {
     data class Inserted(val transactionId: Long, val duplicateOf: Long? = null) : CaptureResult
     data class Duplicate(val transactionId: Long) : CaptureResult
+    data class Enriched(val transactionId: Long) : CaptureResult
     data class Conflict(val transactionId: Long) : CaptureResult
     data object StaleRevision : CaptureResult
     data object StaleEvidence : CaptureResult
@@ -42,7 +43,8 @@ object CapturePersistence {
         expectedRevision: Long,
         transaction: TransactionEntity,
         evidence: CaptureEvidence,
-        isCurrent: () -> Boolean = { true }
+        isCurrent: () -> Boolean = { true },
+        enrichSemantics: Boolean = false
     ): CaptureResult = database.withTransaction {
         if (LedgerRevision.current != expectedRevision) return@withTransaction CaptureResult.StaleRevision
         if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
@@ -75,7 +77,8 @@ object CapturePersistence {
                 previous.orderId != null && incoming.orderId != null && previous.orderDomain != incoming.orderDomain) {
                 return@withTransaction CaptureResult.Conflict(previous.transactionId)
             }
-            // Late loading enriches source evidence only. Never replace user-edited ledger fields.
+            // The event identity fixes financial facts; semantic enrichment is only
+            // allowed while the user has never edited, confirmed or ignored it.
             if (sameFinancials(previous, incoming) && !conflictingOrders(previous, incoming)) {
                 if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
                 dao.updateCaptureEvidence(previous.copy(
@@ -86,14 +89,13 @@ object CapturePersistence {
                     metadataJson = mergeMetadata(previous.metadataJson, incoming.metadataJson)
                 ))
                 val existing = dao.getById(previous.transactionId)
-                if (existing != null && existing.editVersion == 0L && existing.status == TxStatus.PENDING) {
-                    val enriched = existing.copy(
-                        merchant = existing.merchant ?: transaction.merchant,
-                        accountTag = existing.accountTag ?: transaction.accountTag,
-                        metadataJson = mergeMetadata(existing.metadataJson, transaction.metadataJson),
-                        businessKind = if (existing.businessKind == "unknown") transaction.businessKind else existing.businessKind
-                    )
-                    if (enriched != existing) dao.update(enriched)
+                if (existing != null && existing.editVersion == 0L && existing.status != TxStatus.IGNORED && existing.duplicateOf == null) {
+                    val enriched = enrichTransaction(existing, transaction, enrichSemantics)
+                    if (enriched != existing) {
+                        dao.update(enriched)
+                        if (enrichSemantics && semanticFieldsChanged(existing, enriched))
+                            return@withTransaction CaptureResult.Enriched(existing.id)
+                    }
                 }
             }
             return@withTransaction CaptureResult.Duplicate(previous.transactionId)
@@ -126,6 +128,17 @@ object CapturePersistence {
             dao.insertCaptureEvidence(incoming.copy(
                 transactionId = duplicate.transactionId, firstObservedAt = duplicate.firstObservedAt
             ))
+            if (enrichSemantics) {
+                val existing = dao.getById(duplicate.transactionId)
+                if (existing != null && existing.editVersion == 0L && existing.status != TxStatus.IGNORED && existing.duplicateOf == null) {
+                    val enriched = enrichTransaction(existing, transaction, true)
+                    if (enriched != existing) {
+                        dao.update(enriched)
+                        if (semanticFieldsChanged(existing, enriched))
+                            return@withTransaction CaptureResult.Enriched(existing.id)
+                    }
+                }
+            }
             return@withTransaction CaptureResult.Duplicate(duplicate.transactionId)
         }
         val possibleDuplicate = if (incoming.merchantFingerprint != null) {
@@ -159,13 +172,36 @@ object CapturePersistence {
         CaptureResult.Inserted(id, duplicateOf)
     }
 
-    private fun mergeMetadata(previous: String?, incoming: String?): String? {
+    private fun enrichTransaction(existing: TransactionEntity, incoming: TransactionEntity,
+        enrichSemantics: Boolean): TransactionEntity {
+        fun modelApplied(raw: String?): Boolean = raw?.let {
+            runCatching { (kotlinx.serialization.json.Json.parseToJsonElement(it) as kotlinx.serialization.json.JsonObject)["semanticModelApplied"] == kotlinx.serialization.json.JsonPrimitive(true) }.getOrDefault(false)
+        } ?: false
+        // Replayed local callbacks can add facts, but must not replace a completed
+        // model classification with their original generic fallback category.
+        val replaceSemantics = enrichSemantics && (!modelApplied(existing.metadataJson) || modelApplied(incoming.metadataJson))
+        return existing.copy(
+            merchant = existing.merchant ?: incoming.merchant,
+            accountTag = if (replaceSemantics) incoming.accountTag ?: existing.accountTag else existing.accountTag ?: incoming.accountTag,
+            categoryId = if (replaceSemantics) incoming.categoryId else existing.categoryId,
+            note = if (replaceSemantics) incoming.note ?: existing.note else existing.note,
+            metadataJson = mergeMetadata(existing.metadataJson, incoming.metadataJson, replaceSemantics),
+            businessKind = if (replaceSemantics || existing.businessKind == "unknown") incoming.businessKind else existing.businessKind,
+            status = if (replaceSemantics && incoming.status == TxStatus.CONFIRMED) TxStatus.CONFIRMED else existing.status
+        )
+    }
+
+    private fun semanticFieldsChanged(previous: TransactionEntity, incoming: TransactionEntity): Boolean =
+        previous.categoryId != incoming.categoryId || previous.businessKind != incoming.businessKind ||
+            previous.accountTag != incoming.accountTag || previous.note != incoming.note || previous.status != incoming.status
+
+    private fun mergeMetadata(previous: String?, incoming: String?, preferIncoming: Boolean = false): String? {
         if (incoming == null) return previous
         if (previous == null) return incoming
         return runCatching {
             val old = kotlinx.serialization.json.Json.parseToJsonElement(previous) as kotlinx.serialization.json.JsonObject
             val fresh = kotlinx.serialization.json.Json.parseToJsonElement(incoming) as kotlinx.serialization.json.JsonObject
-            kotlinx.serialization.json.JsonObject(fresh + old).toString()
+            kotlinx.serialization.json.JsonObject(if (preferIncoming) old + fresh else fresh + old).toString()
         }.getOrDefault(previous)
     }
 

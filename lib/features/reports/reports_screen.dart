@@ -21,6 +21,14 @@ class ReportsScreen extends StatelessWidget {
     final report = c.reports.where((r) => r.yearMonth == monthKey).firstOrNull;
     final now = DateTime.now();
     final completed = month.isBefore(DateTime(now.year, now.month));
+    final currentMonth = month.year == now.year && month.month == now.month;
+    final comparison = previous.expenseFen <= 0
+        ? ''
+        : completed
+        ? ' · 较上月${s.expenseFen >= previous.expenseFen ? '增加' : '减少'} ${((s.expenseFen - previous.expenseFen).abs() / previous.expenseFen * 100).toStringAsFixed(1)}%'
+        : currentMonth
+        ? ' · 上月整月支出 ${money(previous.expenseFen)}'
+        : '';
     final categories = c.categorySpending;
     final generating = [
       'ENQUEUED',
@@ -52,7 +60,7 @@ class ReportsScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      '${s.count} 笔已确认账单${previous.expenseFen > 0 ? ' · 较上月${s.expenseFen >= previous.expenseFen ? '增加' : '减少'} ${((s.expenseFen - previous.expenseFen).abs() / previous.expenseFen * 100).toStringAsFixed(1)}%' : ''}',
+                      '${s.count} 笔已确认账单$comparison',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: colors.onSurfaceVariant,
                       ),

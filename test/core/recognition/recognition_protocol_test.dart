@@ -38,15 +38,27 @@ Map<String, dynamic> validate(
   String input = '帮我记午饭12元',
   String source = 'AI_TEXT',
   String intent = 'record',
+  DateTime? at,
 }) => RecognitionProtocol.validate(
   {'intent': intent, 'proposals': rows},
   snapshot: snapshot,
   input: input,
   source: source,
-  now: now,
+  now: at ?? now,
   operationId: 'request',
 );
 void main() {
+  for (final text in ['昨天午饭12元，不记得几点吃的', '昨天午饭12元，还没吃完', '昨天午饭12元，准备回宿舍']) {
+    test(
+      'nonfinancial uncertainty does not block an actual expense: $text',
+      () {
+        final result = validate([proposal()], input: text);
+        expect(result['transactions'], hasLength(1));
+        expect(result['autoSaveEligible'], true);
+        expect(result['questions'], isEmpty);
+      },
+    );
+  }
   test(
     'explicit text yields cited fen draft with stable operation identity',
     () {
@@ -57,7 +69,10 @@ void main() {
         draft: true,
       );
       expect(tx.amountFen, 1200);
-      expect(tx.recognitionMetadata['operationId'], 'request:0');
+      expect(
+        tx.recognitionMetadata['operationId'],
+        'request:${tx.recognitionMetadata['recognitionKey']}',
+      );
       expect(tx.recognitionMetadata['timePrecision'], 'user_entry_time');
     },
   );
@@ -80,13 +95,34 @@ void main() {
       expect(validate([proposal()], intent: intent)['transactions'], isEmpty);
     });
   }
-  for (final status in ['pending', 'failed', 'unknown']) {
+  for (final status in ['pending', 'failed']) {
     test('$status payment never becomes a draft', () {
       expect(validate([proposal(status: status)])['transactions'], isEmpty);
     });
   }
-  test('unknown direction is not defaulted to expense', () {
-    expect(validate([proposal(type: 'UNKNOWN')])['transactions'], isEmpty);
+  test(
+    'ordinary consumption can infer direction while unclear movement still asks',
+    () {
+      final inferred = validate([proposal(type: 'UNKNOWN')]);
+      expect(inferred['transactions'], hasLength(1));
+      expect(inferred['autoSaveEligible'], true);
+      expect(
+        validate([
+          proposal(type: 'UNKNOWN', kind: 'unknown'),
+        ], input: '记一下12元')['transactions'],
+        isEmpty,
+      );
+    },
+  );
+  test('active declarations do not require proof of payment completion', () {
+    final r = validate([proposal(status: 'unknown')]);
+    expect(r['transactions'], hasLength(1));
+    expect(
+      validate([
+        proposal(status: 'unknown'),
+      ], source: 'AI_IMAGE')['transactions'],
+      isEmpty,
+    );
   });
   test('direction and business semantics conflict is rejected', () {
     expect(validate([proposal(type: 'INCOME')])['transactions'], isEmpty);
@@ -104,7 +140,7 @@ void main() {
     expect(
       validate([
         {...proposal(), 'occurred_at': '2026-02-30T10:00:00'},
-      ])['transactions'],
+      ], input: '2026年2月30日午饭12元')['transactions'],
       isEmpty,
     );
   });
@@ -112,7 +148,7 @@ void main() {
     expect(
       validate([
         {...proposal(), 'occurred_at': '2026-10-25T10:00:00'},
-      ])['transactions'],
+      ], input: '明天午饭12元')['transactions'],
       isEmpty,
     );
   });
@@ -142,26 +178,33 @@ void main() {
   for (final date in ['2026-02-30', '2026-13-01', '2026-10-25']) {
     test('day-only $date still rejects invalid or future dates', () {
       final r = validate([
-        {...proposal(), 'occurred_at': date, 'timePrecision': 'day'},
-      ]);
+        {
+          ...proposal(status: 'completed'),
+          'occurred_at': date,
+          'timePrecision': 'day',
+        },
+      ], source: 'AI_IMAGE');
       expect(r['transactions'], isEmpty);
       expect(r['autoSaveEligible'], false);
     });
   }
-  test('day-only dates still must agree with the original relative date', () {
+  test('incorrect model day is corrected from the original relative date', () {
     final r = validate([
       {...proposal(), 'occurred_at': '2026-10-23'},
     ], input: '今天午饭12元');
-    expect(r['transactions'], isEmpty);
-    expect(r['questions'], contains(contains('模型日期与原文不一致')));
+    expect(
+      (r['transactions'] as List).single['occurredAt'],
+      DateTime(2026, 10, 24).millisecondsSinceEpoch,
+    );
+    expect(r['questions'], isEmpty);
   });
   test('format errors and future timestamps have different questions', () {
     final invalid = validate([
-      {...proposal(), 'occurred_at': '2026-02-30'},
-    ]);
+      {...proposal(status: 'completed'), 'occurred_at': '2026-02-30'},
+    ], source: 'AI_IMAGE');
     final future = validate([
-      {...proposal(), 'occurred_at': '2026-10-25T10:00:00'},
-    ]);
+      {...proposal(status: 'completed'), 'occurred_at': '2026-10-25T10:00:00'},
+    ], source: 'AI_IMAGE');
     expect(invalid['questions'], contains(contains('时间格式或日期无效')));
     expect(future['questions'], contains(contains('交易时间在未来')));
   });
@@ -178,23 +221,35 @@ void main() {
     expect(prompt, contains('不要编造具体时分'));
     expect(prompt, contains('不得把当地钟面时间直接标成Z'));
   });
-  test('image needs original transaction date and never auto saves', () {
-    expect(validate([proposal()], source: 'AI_IMAGE')['transactions'], isEmpty);
-    final r = validate([
-      {...proposal(status: 'completed'), 'occurred_at': '2026-10-23T10:00:00'},
-    ], source: 'AI_IMAGE');
-    expect((r['transactions'] as List).length, 1);
-    expect(r['autoSaveEligible'], false);
-  });
-  test('image date without a clock time retains day precision and review', () {
-    final r = validate([
-      {...proposal(status: 'completed'), 'occurred_at': '2026-10-23'},
-    ], source: 'AI_IMAGE');
-    final row = (r['transactions'] as List).single;
-    expect(row['occurredAt'], DateTime(2026, 10, 23).millisecondsSinceEpoch);
-    expect(jsonDecode(row['metadataJson'])['timePrecision'], 'day');
-    expect(r['autoSaveEligible'], false);
-  });
+  test(
+    'image needs a completed status, quoted amount and original transaction date',
+    () {
+      expect(
+        validate([proposal()], source: 'AI_IMAGE')['transactions'],
+        isEmpty,
+      );
+      final r = validate([
+        {
+          ...proposal(status: 'completed'),
+          'occurred_at': '2026-10-23T10:00:00',
+        },
+      ], source: 'AI_IMAGE');
+      expect((r['transactions'] as List).length, 1);
+      expect(r['autoSaveEligible'], true);
+    },
+  );
+  test(
+    'image date without a clock time retains day precision for automatic recording',
+    () {
+      final r = validate([
+        {...proposal(status: 'completed'), 'occurred_at': '2026-10-23'},
+      ], source: 'AI_IMAGE');
+      final row = (r['transactions'] as List).single;
+      expect(row['occurredAt'], DateTime(2026, 10, 23).millisecondsSinceEpoch);
+      expect(jsonDecode(row['metadataJson'])['timePrecision'], 'day');
+      expect(r['autoSaveEligible'], true);
+    },
+  );
   for (final phrase in [
     '前几天',
     '几天前',
@@ -202,30 +257,28 @@ void main() {
     '上个月',
     '去年',
     '那天',
-    '周一',
     '之前',
     '前段时间',
     '最近',
   ]) {
-    test(
-      'vague date $phrase requires clarification even if model supplies today',
-      () {
-        for (final modelDate in [null, '2026-10-24T10:00:00']) {
-          final r = validate([
-            {...proposal(), 'occurred_at': modelDate},
-          ], input: '$phrase午饭12元');
-          expect(r['transactions'], isEmpty);
-          expect(r['questions'], isNotEmpty);
-          expect(r['autoSaveEligible'], false);
-        }
-      },
-    );
+    test('vague date $phrase is recordable with a visible assumption', () {
+      for (final modelDate in [null, '2026-10-24T10:00:00']) {
+        final r = validate([
+          {...proposal(), 'occurred_at': modelDate},
+        ], input: '$phrase午饭12元');
+        final row = (r['transactions'] as List).single;
+        expect(jsonDecode(row['metadataJson'])['assumptions'], isNotEmpty);
+        expect(r['questions'], isEmpty);
+        expect(r['autoSaveEligible'], true);
+      }
+    });
   }
   for (final item in {
     '昨天': '2026-10-23',
     '前天': '2026-10-22',
     '上周五': '2026-10-16',
     '本星期一': '2026-10-19',
+    '周一': '2026-10-19',
     '3天前': '2026-10-21',
     '10月20日': '2026-10-20',
     '2025年12月31日': '2025-12-31',
@@ -246,15 +299,19 @@ void main() {
       final mismatch = validate([
         {...proposal(), 'occurred_at': '2026-10-24T10:00:00'},
       ], input: text);
-      expect(mismatch['transactions'], isEmpty);
+      expect(
+        (mismatch['transactions'] as List).single['occurredAt'],
+        DateTime.parse(item.value).millisecondsSinceEpoch,
+      );
     });
   }
-  test('model cannot invent a historical date without original evidence', () {
+  test('unsupported model history is replaced by the normal today default', () {
+    final r = validate([
+      {...proposal(), 'occurred_at': '2025-10-23T10:00:00'},
+    ]);
     expect(
-      validate([
-        {...proposal(), 'occurred_at': '2025-10-23T10:00:00'},
-      ])['transactions'],
-      isEmpty,
+      (r['transactions'] as List).single['occurredAt'],
+      now.millisecondsSinceEpoch,
     );
   });
   test('multiple entry dates remain associated with their own clauses', () {
@@ -270,8 +327,16 @@ void main() {
       DateTime(2026, 10, 24),
     ]);
   });
-  test('past date in a separate clause is clarified rather than lost', () {
-    expect(validate([proposal()], input: '前几天，午饭12元')['transactions'], isEmpty);
+  test('past date in a separate clause remains recordable', () {
+    final r = validate([proposal()], input: '前几天，午饭12元');
+    expect(r['transactions'], hasLength(1));
+    expect(r['autoSaveEligible'], true);
+    expect(
+      jsonDecode(
+        (r['transactions'] as List).single['metadataJson'],
+      )['assumptions'],
+      contains(contains('暂按今天')),
+    );
   });
   test('future day with asserted completion is still rejected', () {
     expect(validate([proposal()], input: '明天午饭付了12元')['transactions'], isEmpty);
@@ -284,7 +349,7 @@ void main() {
     );
     expect(tx.countsAsExpense, false);
     expect(tx.countsAsIncome, false);
-    expect(r['autoSaveEligible'], false);
+    expect(r['autoSaveEligible'], true);
   });
   test('Chinese spoken whole yuan is checked deterministically', () {
     expect(RecognitionProtocol.amountMatchesQuote(5000, '五十元'), true);
@@ -314,7 +379,7 @@ void main() {
       split(16000, 'receivable'),
     ], input: '午饭240元三人AA');
     expect((r['transactions'] as List).length, 2);
-    expect(r['autoSaveEligible'], false);
+    expect(r['autoSaveEligible'], true);
     final bad = validate([split(8000, 'expense')], input: '午饭240元三人AA');
     expect(bad['transactions'], isEmpty);
   });
@@ -365,11 +430,26 @@ void main() {
     '午饭12元不确定',
     '不要记午饭12元',
   ]) {
-    test('uncertain or negated speech is never automatically saved: $text', () {
-      final r = validate([proposal()], input: text, source: 'AI_VOICE');
-      expect(r['autoSaveEligible'], false);
-      expect(r['questions'], isNotEmpty);
-    });
+    test(
+      'stated estimate is recordable while negation and conflicting amounts are blocked: $text',
+      () {
+        final r = validate([proposal()], input: text, source: 'AI_VOICE');
+        final approximate = RegExp(r'大概|左右|不确定').hasMatch(text);
+        expect(r['autoSaveEligible'], approximate);
+        if (approximate) {
+          expect(r['transactions'], hasLength(1));
+          expect(
+            jsonDecode(
+              (r['transactions'] as List).single['metadataJson'],
+            )['assumptions'],
+            contains(contains('估算')),
+          );
+        } else {
+          expect(r['questions'], isNotEmpty);
+          expect(r['transactions'], isEmpty);
+        }
+      },
+    );
   }
   for (final role in ['订单号', '余额', '原价', '优惠', '积分', '交易编号']) {
     test(
@@ -406,16 +486,19 @@ void main() {
     expect(RecognitionProtocol.amountMatchesQuote(10, '12.001'), false);
     expect(RecognitionProtocol.amountMatchesQuote(1, '12.001'), false);
   });
-  test('unclear direction can be reviewed but cannot auto save', () {
-    final row = proposal(amount: 5000, quote: '50');
-    row['fieldEvidence'] = {
-      'amount': {'quote': '50', 'source': 'user'},
-      'type': {'quote': '记一下', 'source': 'user'},
-    };
-    final r = validate([row], input: '记一下50元');
-    expect((r['transactions'] as List).length, 1);
-    expect(r['autoSaveEligible'], false);
-  });
+  test(
+    'model semantic classification does not need a local direction keyword',
+    () {
+      final row = proposal(amount: 5000, quote: '50');
+      row['fieldEvidence'] = {
+        'amount': {'quote': '50', 'source': 'user'},
+        'type': {'quote': '记一下', 'source': 'user'},
+      };
+      final r = validate([row], input: '记一下50元');
+      expect((r['transactions'] as List).length, 1);
+      expect(r['autoSaveEligible'], true);
+    },
+  );
   test('spoken own transfer cannot be classified as consumption', () {
     final row = proposal(amount: 5000, quote: '50');
     row['fieldEvidence'] = {
@@ -451,4 +534,335 @@ void main() {
       DateTime(2026, 10, 24),
     );
   });
+  test(
+    'screenshot speech resolves yesterday evening without payment or year questions',
+    () {
+      final r = validate(
+        [
+          {
+            ...proposal(amount: 1700, quote: '17 块钱', status: 'unknown'),
+            'occurred_at': '2026-11-01',
+            'fieldEvidence': {
+              'amount': {'quote': '17 块钱', 'source': 'user'},
+              'type': {'quote': '吃的盖饭', 'source': 'inference'},
+            },
+            'missingFields': ['年份', 'paymentStatus'],
+            'questions': ['请补充具体年月日', '交易是否已完成？'],
+          },
+        ],
+        input: '昨天晚上 7 点过吃的盖饭，17 块钱。',
+        at: DateTime(2026, 11, 1, 13, 25),
+      );
+      final row = (r['transactions'] as List).single;
+      expect(row['amount'], 1700);
+      expect(
+        row['occurredAt'],
+        DateTime(2026, 10, 31, 19).millisecondsSinceEpoch,
+      );
+      expect(r['questions'], isEmpty);
+      expect(
+        jsonDecode(row['metadataJson'])['assumptions'],
+        contains(contains('19:00')),
+      );
+      expect(r['autoSaveEligible'], true);
+    },
+  );
+  test(
+    'month and day default to the most recent year including across new year',
+    () {
+      final r = validate(
+        [proposal()],
+        input: '12 月 31 号午饭12元',
+        at: DateTime(2026, 1, 2, 12),
+      );
+      final row = (r['transactions'] as List).single;
+      expect(row['occurredAt'], DateTime(2025, 12, 31).millisecondsSinceEpoch);
+      expect(r['questions'], isEmpty);
+    },
+  );
+  test('latest date supplement overrides original date and accepts spaces', () {
+    final r = validate([
+      {...proposal(), 'occurred_at': '2026-10-20'},
+    ], input: '昨天午饭12元\n补充：不是昨天，是 10 月 20 号\n补充：支付宝付的');
+    expect(
+      (r['transactions'] as List).single['occurredAt'],
+      DateTime(2026, 10, 20).millisecondsSinceEpoch,
+    );
+    expect(r['questions'], isEmpty);
+  });
+  test('latest clock supplement overrides the original clock', () {
+    final r = validate([proposal()], input: '昨天晚上7点午饭12元\n补充：改为晚上8点');
+    expect(
+      (r['transactions'] as List).single['occurredAt'],
+      DateTime(2026, 10, 23, 20).millisecondsSinceEpoch,
+    );
+  });
+  test(
+    'amount correction grounds the new amount without rejecting ordinary correction',
+    () {
+      final r = validate([
+        proposal(amount: 1800, quote: '18元'),
+      ], input: '昨天午饭17元\n补充：不是17元，其实18元');
+      expect((r['transactions'] as List).single['amount'], 1800);
+      expect(r['questions'], isEmpty);
+      final old = validate([
+        proposal(amount: 1700, quote: '17元'),
+      ], input: '昨天午饭17元\n补充：不是17元，其实18元');
+      expect(old['transactions'], isEmpty);
+    },
+  );
+  test(
+    'same amounts remain attached to distinct descriptions and inherited dates',
+    () {
+      Map<String, dynamic> meal(String description) => {
+        ...proposal(amount: 1700, quote: '17元'),
+        'fieldEvidence': {
+          'amount': {'quote': '17元', 'source': 'user'},
+          'type': {'quote': description, 'source': 'user'},
+        },
+      };
+      final r = validate([
+        meal('午餐'),
+        meal('晚餐'),
+        meal('买水'),
+      ], input: '昨天午餐17元，今天晚餐17元，买水17元');
+      final rows = r['transactions'] as List;
+      expect(rows.map((r) => r['occurredAt']), [
+        DateTime(2026, 10, 23).millisecondsSinceEpoch,
+        DateTime(2026, 10, 24).millisecondsSinceEpoch,
+        DateTime(2026, 10, 24).millisecondsSinceEpoch,
+      ]);
+      expect(
+        rows.map((r) => jsonDecode(r['metadataJson'])['operationId']).toSet(),
+        hasLength(3),
+      );
+    },
+  );
+  test(
+    'review citation range and proposal order do not change record identity',
+    () {
+      const input = '昨天吃盖饭花了17元，今天午饭12元';
+      Map<String, dynamic> rice(String amountQuote, String directionQuote) => {
+        ...proposal(amount: 1700, quote: amountQuote),
+        'fieldEvidence': {
+          'amount': {'quote': amountQuote, 'source': 'user'},
+          'type': {'quote': directionQuote, 'source': 'user'},
+        },
+      };
+      String id(Map<String, dynamic> r, int amount) => jsonDecode(
+        (r['transactions'] as List).singleWhere(
+          (r) => r['amount'] == amount,
+        )['metadataJson'],
+      )['operationId'];
+      final first = validate([rice('17元', '吃盖饭'), proposal()], input: input);
+      final reviewed = validate([
+        proposal(),
+        rice('花了17元', '盖饭'),
+      ], input: input);
+      expect(id(first, 1700), id(reviewed, 1700));
+      expect(id(first, 1200), id(reviewed, 1200));
+      final onlyOther = validate([proposal()], input: input);
+      expect(id(first, 1200), id(onlyOther, 1200));
+    },
+  );
+  test(
+    'a failed or future clause does not block an already completed record',
+    () {
+      final r = validate([proposal()], input: '午饭12元，晚饭20元没支付，明天准备买书30元');
+      expect(r['transactions'], hasLength(1));
+      final mixed = validate([
+        proposal(),
+        proposal(amount: 2000, quote: '20'),
+      ], input: '午饭12元，晚饭20元没支付');
+      expect(mixed['transactions'], hasLength(1));
+      expect((mixed['transactions'] as List).single['amount'], 1200);
+      expect(mixed['questions'], isNotEmpty);
+    },
+  );
+  test(
+    'important accounting questions remain while optional form fields do not block',
+    () {
+      final r = validate([
+        {
+          ...proposal(),
+          'questions': ['请补充商户名称', '金额是12元还是20元？'],
+        },
+      ]);
+      expect(r['transactions'], isEmpty);
+      expect(r['questions'], contains('金额是12元还是20元？'));
+      expect(r['questions'], isNot(contains('请补充商户名称')));
+    },
+  );
+  test(
+    'a model purpose question cannot block an already declared transfer',
+    () {
+      final r = validate([
+        {
+          ...proposal(kind: 'unknown'),
+          'fieldEvidence': {
+            'amount': {'quote': '12', 'source': 'user'},
+            'type': {'quote': '转给小林', 'source': 'user'},
+          },
+          'missingFields': ['business_kind'],
+          'questions': ['这笔转账是什么用途？账户互转还是消费？'],
+        },
+      ], input: '转给小林12元');
+      final row = (r['transactions'] as List).single;
+      expect(row['businessKind'], 'transfer');
+      expect(r['questions'], isEmpty);
+      expect(r['autoSaveEligible'], true);
+    },
+  );
+  test('Chinese spoken amount also works across a comma', () {
+    final r = validate([
+      proposal(amount: 1700, quote: '十七块钱'),
+    ], input: '昨天午饭，十七块钱');
+    expect(
+      (r['transactions'] as List).single['occurredAt'],
+      DateTime(2026, 10, 23).millisecondsSinceEpoch,
+    );
+    expect(r['questions'], isEmpty);
+  });
+  test(
+    'image record identities remain stable when review returns only another amount',
+    () {
+      final first = validate(
+        [
+          {...proposal(status: 'completed'), 'occurred_at': '2026-10-23'},
+          {
+            ...proposal(amount: 500, quote: '5', status: 'completed'),
+            'occurred_at': '2026-10-23',
+          },
+        ],
+        source: 'AI_IMAGE',
+        input: '',
+      );
+      final reviewed = validate(
+        [
+          {
+            ...proposal(amount: 500, quote: '5元', status: 'completed'),
+            'occurred_at': '2026-10-23',
+          },
+        ],
+        source: 'AI_IMAGE',
+        input: '',
+      );
+      final original = (first['transactions'] as List).singleWhere(
+        (r) => r['amount'] == 500,
+      );
+      expect(
+        jsonDecode(original['metadataJson'])['operationId'],
+        jsonDecode(
+          (reviewed['transactions'] as List).single['metadataJson'],
+        )['operationId'],
+      );
+    },
+  );
+  test('image questions about missing evidence are retained', () {
+    final r = RecognitionProtocol.validate(
+      {
+        'intent': 'record',
+        'questions': ['请补充具体日期'],
+        'proposals': [
+          {...proposal(status: 'completed'), 'occurred_at': '2026-10-23'},
+        ],
+      },
+      snapshot: snapshot,
+      input: '',
+      source: 'AI_IMAGE',
+      now: now,
+      operationId: 'request',
+    );
+    expect(r['questions'], contains('请补充具体日期'));
+  });
+  test(
+    'switching between voice and text supplement keeps active record identity',
+    () {
+      final voice = validate([proposal()], source: 'AI_VOICE');
+      final text = validate([proposal()], source: 'AI_TEXT');
+      expect(
+        jsonDecode(
+          (voice['transactions'] as List).single['metadataJson'],
+        )['operationId'],
+        jsonDecode(
+          (text['transactions'] as List).single['metadataJson'],
+        )['operationId'],
+      );
+    },
+  );
+  test(
+    'unclassified transfer is automatically recorded without becoming consumption',
+    () {
+      final r = validate([
+        {
+          ...proposal(amount: 5000, kind: 'unknown', quote: '50元'),
+          'questions': ['这笔转账是账户互转还是消费？'],
+          'fieldEvidence': {
+            'amount': {'quote': '50元', 'source': 'user'},
+            'type': {'quote': '转账', 'source': 'inference'},
+          },
+        },
+      ], input: '昨天转账50元');
+      final row = (r['transactions'] as List).single;
+      expect(row['businessKind'], 'transfer');
+      expect(r['autoSaveEligible'], true);
+      expect(r['questions'], isEmpty);
+      expect(
+        LedgerTransaction.fromMap(stringMap(row), draft: true).countsAsExpense,
+        false,
+      );
+    },
+  );
+  test(
+    'image without a numerically verifiable amount cannot automatically save',
+    () {
+      final r = validate([
+        {
+          ...proposal(amount: 5000, quote: '金额看不清', status: 'completed'),
+          'occurred_at': '2026-10-23',
+        },
+      ], source: 'AI_IMAGE');
+      expect(r['autoSaveEligible'], false);
+    },
+  );
+  test(
+    'completed refund and explicitly allocated advances can automatically record',
+    () {
+      final refund = validate([
+        {
+          ...proposal(
+            amount: 5000,
+            type: 'INCOME',
+            kind: 'refund',
+            quote: '50元',
+          ),
+          'fieldEvidence': {
+            'amount': {'quote': '50元', 'source': 'user'},
+            'type': {'quote': '退款到账', 'source': 'user'},
+          },
+        },
+      ], input: '退款到账50元');
+      expect(refund['autoSaveEligible'], true);
+      expect((refund['transactions'] as List).single['businessKind'], 'refund');
+      Map<String, dynamic> split(int amount, String kind) => {
+        ...proposal(amount: amount, kind: kind, quote: '240元'),
+        'fieldEvidence': {
+          'amount': {'quote': '240元', 'source': 'derived'},
+          'type': {'quote': '午饭', 'source': 'user'},
+        },
+        'allocation': {
+          'groupId': 'meal',
+          'totalAmount': 24000,
+          'totalQuote': '240元',
+          'parts': [8000, 16000],
+        },
+      };
+      final aa = validate([
+        split(8000, 'expense'),
+        split(16000, 'receivable'),
+      ], input: '午饭我垫付240元，三个人AA，我自己的80元，其余160元应收');
+      expect(aa['transactions'], hasLength(2));
+      expect(aa['autoSaveEligible'], true);
+    },
+  );
 }

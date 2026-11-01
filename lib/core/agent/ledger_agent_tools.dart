@@ -20,7 +20,7 @@ class LedgerAgentTools {
   }
   final AgentStore store;
   final AgentSession session;
-  final LedgerSnapshot ledger;
+  LedgerSnapshot ledger;
   final String question;
   final DateTime now;
   int _evidence = 0;
@@ -58,7 +58,7 @@ class LedgerAgentTools {
   static final definitions = <Map<String, dynamic>>[
     _tool(
       'ask_user',
-      '缺少金额、日期、方向或必须由用户选择时暂停，提出一个清楚的问题；用户回复后继续同一任务。',
+      '仅在缺少金额、资金用途有实质歧义或修改对象不唯一时暂停。日期和分类可合理推断，不要求用户补齐表单；用户回复后沿用上下文继续。',
       {'question': _s('需要用户补充的问题，最多1000字')},
       ['question'],
     ),
@@ -176,13 +176,15 @@ class LedgerAgentTools {
     ),
     _tool(
       'propose_transaction',
-      '准备新增或修改账单提案，等待用户界面确认。修改前先get_transaction；没有金额/日期/方向依据则先询问。',
+      '新增在启用自动记账时可直接保存，修改始终等待核对；以返回的applied或awaiting_confirmation状态为准。普通消费描述即可记录，合理推断写入assumptions。修改前先get_transaction；金额或账务用途有实质歧义才询问。',
       {
         'transaction_id': _i('修改目标id；新增时不传'),
         'amount': _i('正整数分'),
         'type': _s('方向', values: ['EXPENSE', 'INCOME']),
-        'category_id': _i('真实分类id'),
-        'date': _s('实际发生日期 YYYY-MM-DD，不能是未来日期'),
+        'category_id': _i('从真实分类中推荐；省略时修改保留原分类，新增优先使用其他分类'),
+        'date': _s(
+          '按设备当地日期换算成YYYY-MM-DD；昨天、月日省年份等自行换算。未提日期时可省略，新增默认今天，修改保留原日期；不能是未来日期',
+        ),
         'business_kind': _s(
           '用途',
           values: [
@@ -195,10 +197,16 @@ class LedgerAgentTools {
           ],
         ),
         'merchant': _s('商户，可选'),
+        'account_tag': _s('付款或到账账户，可按明确付款方式与已有习惯推断'),
         'note': _s('备注，可选'),
         'evidence': _s('当前用户请求中支持这次修改的原话'),
+        'assumptions': {
+          'type': 'array',
+          'items': _s('供用户核对的推断，如“10月23日按今年理解”“按餐饮分类”'),
+          'description': '可选，1～8条简短推断说明；没有则省略',
+        },
       },
-      ['amount', 'type', 'category_id', 'date', 'business_kind', 'evidence'],
+      ['amount', 'type', 'business_kind', 'evidence'],
     ),
     _tool(
       'propose_delete_transaction',
@@ -601,15 +609,31 @@ class LedgerAgentTools {
         _evidenceQuote(a);
         final amount = _int(a, 'amount', -1, 1, maxTransactionFen);
         final type = TxType.fromWire(a['type']);
-        final category = ledger.categories
-            .where(
-              (c) => c.id == a['category_id'] && c.enabled && c.type == type,
-            )
-            .firstOrNull;
+        final old = a['transaction_id'] == null ? null : _transaction(a);
+        if (old != null) _requireRead(old.id);
+        final categories = ledger.categories
+            .where((c) => c.enabled && c.type == type)
+            .toList();
+        final categoryId = a['category_id'] ?? old?.categoryId;
+        final category = categoryId == null
+            ? categories
+                      .where((c) => c.name == '其他' || c.name == '其他收入')
+                      .firstOrNull ??
+                  categories.firstOrNull
+            : categories.where((c) => c.id == categoryId).firstOrNull;
         if (category == null) {
           throw const FormatException('分类不存在、未启用或与资金方向不一致，请先查询分类');
         }
-        final date = parseDay(a['date'] as String);
+        final assumptions = List<String>.from(a['assumptions'] as List? ?? []);
+        if (a['category_id'] == null && old == null) {
+          assumptions.add('分类暂按“${category.name}”，请核对。');
+        }
+        final date = parseDay(
+          a['date'] as String? ?? day(old?.occurredAt ?? now),
+        );
+        if (a['date'] == null && old == null) {
+          assumptions.add('未提日期，按今天（${day(date)}）记录。');
+        }
         if (date.isAfter(DateTime(now.year, now.month, now.day))) {
           throw const FormatException('未来计划不能作为已发生账目');
         }
@@ -618,8 +642,6 @@ class LedgerAgentTools {
             (kind == 'income' || kind == 'refund') && type != TxType.income) {
           throw const FormatException('账务用途与方向不一致');
         }
-        final old = a['transaction_id'] == null ? null : _transaction(a);
-        if (old != null) _requireRead(old.id);
         final id = agentId();
         final payload = {
           'id': old?.id ?? 0,
@@ -634,7 +656,9 @@ class LedgerAgentTools {
               ? _text(a, 'merchant', 200)
               : old?.merchant,
           'note': a.containsKey('note') ? _text(a, 'note', 2000) : old?.note,
-          'accountTag': old?.accountTag,
+          'accountTag': a.containsKey('account_tag')
+              ? _text(a, 'account_tag', 100)
+              : old?.accountTag,
           'source': 'AI_TEXT',
           if (old != null) 'editVersion': old.editVersion,
           'metadataJson': jsonEncode({
@@ -642,14 +666,19 @@ class LedgerAgentTools {
             'operationId': 'agent:$id',
             'agentSessionId': session.id,
             'evidence': a['evidence'],
+            'assumptions': assumptions,
           }),
         };
-        return _propose(
+        final proposal = _propose(
           'transaction',
           '${old == null ? '新增' : '修改'} ${day(date)} ${category.name} ${formatMoney(amount)} 元',
           {'transaction': payload, if (old != null) 'before': old.toMap()},
           id: id,
         );
+        return {
+          ...proposal,
+          if (assumptions.isNotEmpty) 'assumptions': assumptions,
+        };
     }
     throw const FormatException('unknown_tool');
   }

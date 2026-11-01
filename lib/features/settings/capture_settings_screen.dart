@@ -61,7 +61,8 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'visual_unavailable' => '截图能力未启用、页面受保护或截图失败，可通过主动图片记账或账单导入补录。',
   'visual_required' => '微信仅提供了空节点。请在“识别与录入”中开启“本地支付截图补充”，再打开这张成功页；图片只在本机处理。',
   'visual_not_receipt' => '当前场景缺少明确完成状态、本人资金方向或有效金额，未生成账目。可查看对应支付结果、主动补录或导入账单。',
-  'visual_requires_flow' => '仅打开没有交易时间的红包详情不能证明刚发生收发。发红包需核验付款完成，领红包需观察到打开红包并已存入零钱；较早的红包可通过账单导入补录。',
+  'visual_requires_flow' =>
+    '仅打开没有交易时间的红包详情不能证明刚发生收发。发红包需核验付款完成，领红包需观察到打开红包并已存入零钱；较早的红包可通过账单导入补录。',
   'visual_read' => '仅在本机读取当前微信窗口，校验成功状态、金额和结果页布局；图片不会上传。',
   'visual_waiting' => '为避免连续截图，当前正在等待下一次有界读取；已保存的账目可在待确认列表核对。',
   'saved' => '请回到流水核对；即使关闭记账提醒，也可在待确认列表中查看。',
@@ -246,7 +247,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
         context,
         title: '开启通知云端解析？',
         message:
-            '本地规则无法完整识别时，会将筛选出的支付通知正文发送给你选择的 AI 服务，补充提取金额、商家等交易信息。通知正文可能包含个人信息。\n\n此设置默认关闭，不会上传支付页面全文。使用服务可能消耗套餐或 API 用量，你可以随时关闭。',
+            '将必要的支付通知文字、可用分类和同商户的少量相关记账习惯发送给你选择的 AI 服务，自动理解用途、分类和资金账户。通知文字可能包含个人信息。\n\n此设置默认关闭，不会上传整个账本或支付页面全文。使用服务可能消耗套餐或 API 用量，你可以随时关闭。',
         confirmLabel: '同意并开启',
       );
       if (!confirmed || !mounted) return;
@@ -326,7 +327,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                 const SizedBox(height: 24),
                 _permission(
                   title: '麦克风',
-                  detail: '在“语音模型”中配置转写服务。首次录音时请求麦克风授权，转写文字经 AI 解析、由你核对后保存。',
+                  detail: '在“语音模型”中配置转写服务。首次录音时请求麦克风授权，结束后由 AI 补全并自动记账。',
                   granted: capabilities['microphoneGranted'] == true,
                   target: 'microphone',
                   button: '打开应用设置',
@@ -482,7 +483,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                       vertical: 10,
                     ),
                     title: const Text('通知云端解析'),
-                    subtitle: const Text('本地规则无法完整识别时，发送筛选出的支付通知正文给所选 AI 服务。'),
+                    subtitle: const Text('结合支付文字和少量相关习惯，自动推断用途、分类及资金账户。'),
                     value: cloud,
                     onChanged: _busy ? null : _setCloud,
                   ),

@@ -84,6 +84,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         preferences.setScreenCloudParsingEnabled(false)
         preferences.setScreenVisualCaptureEnabled(false)
         preferences.setCloudImageParsingEnabled(false)
+        preferences.setCaptureAutoRecordEnabled(false)
         CaptureDiagnosticStore.clear()
         val directExecutor = Executor { it.run() }
         database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
@@ -689,7 +690,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         awaitStatus("saved")
         val first = rows().single()
         assertEquals(300L,first.amount)
-        assertEquals("unknown",first.businessKind)
+        assertEquals("expense",first.businessKind)
         assertTrue(first.metadataJson!!.contains("red_packet_sent"))
         service.opaqueVisualOcr = { redPacketDetailLines() }
         window.root = { screen("",visible=false,windowId=8) }
@@ -749,6 +750,29 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals("refund",refund.businessKind)
         assertEquals("alipay:refund",runBlocking { database.backupDao().captureEvents() }.single { it.orderId=="RF202610240008" }.orderDomain)
         assertEquals(0,cloudCalls)
+    }
+
+    @Test fun `alipay and meituan amount-first payment nodes reach Room through the service`() {
+        connect(enabled = true)
+        val packages = listOf("com.eg.android.AlipayGphone", "com.sankuai.meituan", "com.sankuai.meituan.takeoutnew")
+        for ((index, packageName) in packages.withIndex()) {
+            window.root = { amountFirstPaymentScreen(packageName, "18.5$index", "SC20261101000$index") }
+            sendEvent(packageName = packageName)
+            awaitCondition("amount-first receipt for $packageName did not persist") { rows().size == index + 1 }
+            val row = rows().last()
+            assertEquals(1850L + index, row.amount)
+            assertEquals(TxType.EXPENSE, row.type)
+            assertEquals(TxStatus.PENDING, row.status)
+            assertEquals(TxSource.ACCESSIBILITY, row.source)
+            assertEquals("expense", row.businessKind)
+        }
+        window.root = { amountFirstPaymentScreen(packages.first(), "20.00", "SC202611010009", editableChild = true) }
+        sendEvent(packageName = packages.first())
+        awaitStatus("input_page")
+        drainRetries()
+        assertEquals(3, rows().size)
+        assertTrue(window.screenshotWindows.isEmpty())
+        assertEquals(0, cloudCalls)
     }
 
     @Test fun `recent identified alipay receipt uses real time and historical or editable receipt stays excluded`() {
@@ -898,7 +922,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(300L, row.amount)
         assertEquals(TxType.EXPENSE, row.type)
         assertEquals(TxStatus.PENDING, row.status)
-        assertEquals("unknown", row.businessKind)
+        assertEquals("transfer", row.businessKind)
         assertTrue(row.metadataJson!!.contains("wechat-opaque-transfer"))
         repeat(2) {
             scheduler.advanceTimeBy(1_000)
@@ -1044,6 +1068,15 @@ class PaymentAccessibilityServiceIntegrationTest {
             }
         }
     }
+
+    private fun amountFirstPaymentScreen(packageName: String, amount: String, orderId: String,
+                                         editableChild: Boolean = false): AccessibilityNodeInfo =
+        screen("支付成功\n完成\n订单号：$orderId", packageName = packageName, editableChild = editableChild).apply {
+            val row = screen("", packageName = packageName)
+            shadowOf(row).addChild(screen(amount, packageName = packageName))
+            shadowOf(row).addChild(screen("支付金额", packageName = packageName))
+            shadowOf(this).addChild(row)
+        }
 
     private fun rows() = runBlocking { database.backupDao().transactions() }
 

@@ -39,8 +39,8 @@ class AppPreferences @Inject constructor(
     suspend fun setScreenVisualCaptureEnabled(enabled: Boolean) { context.dataStore.edit { it[screenVisualCaptureKey] = enabled } }
     private val cloudImageParsingKey = booleanPreferencesKey("cloud_image_parsing_enabled")
     val screenCloudParsingEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenCloudParsingKey] ?: false }
-    val captureAutoRecordEnabled: Flow<Boolean> = context.dataStore.data.map { it[captureAutoRecordKey] ?: false }
-    val activeInputAutoSaveEnabled: Flow<Boolean> = context.dataStore.data.map { it[activeInputAutoSaveKey] ?: false }
+    val captureAutoRecordEnabled: Flow<Boolean> = context.dataStore.data.map { it[captureAutoRecordKey] ?: true }
+    val activeInputAutoSaveEnabled: Flow<Boolean> = context.dataStore.data.map { it[activeInputAutoSaveKey] ?: true }
     val cloudImageParsingEnabled: Flow<Boolean> = context.dataStore.data.map { it[cloudImageParsingKey] ?: false }
     suspend fun setScreenCloudParsingEnabled(enabled: Boolean) { context.dataStore.edit { it[screenCloudParsingKey] = enabled } }
     suspend fun setCaptureAutoRecordEnabled(enabled: Boolean) { context.dataStore.edit { it[captureAutoRecordKey] = enabled } }

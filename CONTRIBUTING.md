@@ -21,7 +21,7 @@
    git push -u origin HEAD
    ```
 
-3. 创建以 `main` 为目标的 PR，说明变更目的、验证结果和已知限制。按改动范围运行 [README 中的检查](README.md#开发)；纯文档改动无需运行应用测试。审批人数和必需检查以 GitHub 当前分支规则为准。
+3. 创建以 `main` 为目标的 PR，说明变更目的、验证结果和已知限制。按改动范围运行下方的[检查与构建](#检查与构建)；纯文档改动无需运行应用测试。审批人数和必需检查以 GitHub 当前分支规则为准。
 
    ```sh
    gh pr create --base main
@@ -35,3 +35,62 @@
 - 不强制推送、改写远端 `main` 的历史或删除远端 `main`；`--force-with-lease` 也属于禁止范围。
 - 不通过关闭或削弱分支保护、管理员绕过等方式跳过 PR 流程。
 - 发布准备变更也走 PR；从 `main` 上已合并的提交构建正式版本并创建标签，详见 [发布说明](docs/RELEASING.md)。
+
+## 开发环境
+
+工具链：Flutter 3.47.7 / Dart 3.13.5、JDK 17、Android SDK 36。iOS 需要 macOS、Xcode，以及模拟器或已配置签名的真机。
+
+将 Flutter 加入 `PATH` 或配置 `FLUTTER_ROOT`；`tool/flutterw` 也支持项目内 `.tooling/flutter` 和 `android/local.properties` 中指定的 SDK。
+
+## 检查与构建
+
+Flutter 检查、测试和构建须串行执行，避免生成的平台插件注册文件相互覆盖。按变更范围运行：
+
+```sh
+./tool/flutterw pub get
+./tool/flutterw analyze
+./tool/flutterw test
+./tool/flutterw run -d <device-id>
+
+# Android 调试包
+./tool/flutterw build apk --debug
+# iOS 模拟器
+./tool/flutterw build ios --simulator --debug --no-codesign
+# Android 原生核心回归（根工程）
+./gradlew testDebugUnitTest
+# Android 宿主检查（使用 Android 工程的 wrapper）
+./android/gradlew -p android :app:testReleaseUnitTest :app:lintRelease
+```
+
+正式签名、构建与发布步骤见 [发布说明](docs/RELEASING.md)。
+
+平台集成测试只在专用测试设备运行，先备份，并保留 `--no-uninstall`，避免 Flutter 测试结束时卸载应用：
+
+```sh
+./tool/flutterw test integration_test/cross_platform_smoke_test.dart -d <test-device-id> --no-uninstall
+```
+
+测试后重新构建并安装普通 `main.dart` 入口。单元测试和模拟器验证不替代真实账户授权、语音识别、手机后台行为或 iPhone 真机验收。
+
+## 项目结构与文档
+
+| 路径 | 用途 |
+| --- | --- |
+| `lib/` | Flutter 界面、账务逻辑、AI 与跨平台存储适配 |
+| `android/` | Android 宿主与平台桥接 |
+| `ios/` | iOS 宿主、权限和 Keychain 配置 |
+| `app/` | Android Room、支付采集、原生账号等核心及回归测试 |
+| `test/`、`integration_test/` | Flutter 单元、组件与平台集成测试 |
+| `docs/` | 用户指南、架构、设计、验证与发布文档 |
+
+Android Flutter 构建会从 `app/` 同步原生核心源码，不能删除该目录。原 Compose UI 不进入 Flutter APK；根 Gradle 构建保留原生回归测试入口。Android 沿用 Room 数据库，iOS 使用 SQLite；两端使用同一 JSON 备份格式，凭据分别保存在设备安全存储。
+
+- [产品范围](PRODUCT.md) · [视觉规范](DESIGN.md)
+- [桥接契约](docs/flutter-bridge-contract.md) · [Agent 架构](docs/agent-architecture.md)
+- [识别系统验证](docs/testing/recognition-system.md) · [AI 记账体验验证](docs/testing/ai-entry-experience.md)
+
+## 仓库内容
+
+源码、必要资源、平台工程、依赖锁文件、Gradle wrapper、Room schema、公开签名证书指纹和长期维护文档随仓库提交。
+
+本机 SDK、缓存、构建包、签名私钥与密码、设备状态、真实账本和凭据不进入 Git。一次性审查记录、开发计划及本地原型分别保留在已忽略的 `docs/reviews/`、`docs/superpowers/`、`docs/ui/`；Android 安装包通过 GitHub Releases 分发。

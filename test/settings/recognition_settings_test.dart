@@ -76,7 +76,8 @@ void main() {
               body: TextButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => EntryScreen(controller: controller),
+                    builder: (_) =>
+                        EntryScreen(controller: controller, initialAi: false),
                   ),
                 ),
                 child: const Text('打开'),

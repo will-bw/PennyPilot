@@ -66,6 +66,51 @@ class NotificationParserTest {
     }
 
     @Test
+    fun `alipay and meituan completed receipt titles keep transaction evidence`() = runTest {
+        listOf("com.eg.android.AlipayGphone", "com.sankuai.meituan", "com.sankuai.meituan.takeoutnew").forEach { pkg ->
+            listOf("交易成功", "交易已成功通知", "付款完成", "扣款成功通知").forEach { title ->
+                val result = NotificationParser.parse(pkg, title, "实付18.00元\n商家：便利店",
+                    emptyList(), true) { fail("完整凭证应在本机识别"); null }
+                assertEquals("$pkg $title", 1800L, result?.amountCents)
+                assertEquals("EXPENSE", result?.direction)
+                assertEquals("便利店", result?.merchant)
+            }
+            val income = NotificationParser.parse(pkg, "收款已到账通知", "收款金额18元",
+                emptyList(), false) { null }
+            assertEquals("INCOME", income?.direction)
+        }
+    }
+
+    @Test
+    fun `complete amount in notification title does not require a separate body`() = runTest {
+        listOf("com.eg.android.AlipayGphone", "com.sankuai.meituan").forEach { pkg ->
+            listOf("支付成功18.00元", "付款成功：￥18.00", "订单支付成功 18.00元").forEach { title ->
+                val result = NotificationParser.parse(pkg, title, "", emptyList(), false) { null }
+                assertEquals(title, 1800L, result?.amountCents)
+                assertEquals("EXPENSE", result?.direction)
+            }
+        }
+    }
+
+    @Test
+    fun `receipt title expansion cannot accept chats promotions pending or directionless trades`() = runTest {
+        listOf("com.eg.android.AlipayGphone", "com.sankuai.meituan").forEach { pkg ->
+            val rules = listOf(ParseRuleEntity(appPackage = pkg, regexAmount = """(\d+(?:\.\d{1,2})?)"""))
+            listOf("张三" to "交易成功，实付18元", "交易成功" to "￥18.00",
+                "支付成功后可领取18元优惠券" to "实付18元", "交易成功" to "待支付18元",
+                "付款完成" to "付款失败18元", "扣款成功通知" to "实付18元，另收28元",
+                "交易成功" to "收款金额18元\n支付成功").forEach { (title, content) ->
+                assertNull("$pkg $title $content", NotificationParser.parse(pkg, title, content, rules, true) {
+                    fail("非凭证不能交给云端猜测"); null
+                })
+            }
+        }
+        assertNull(NotificationParser.parse("com.tencent.mm", "交易成功", "实付18元", emptyList(), true) {
+            fail("微信聊天仍需可信来源标题"); null
+        })
+    }
+
+    @Test
     fun `ambiguous and malformed amounts never reach cloud or permissive rules`() = runTest {
         var calls = 0
         val rules = PresetParseRules.rules.filter { it.appPackage == "com.tencent.mm" }

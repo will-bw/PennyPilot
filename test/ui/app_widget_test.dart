@@ -85,6 +85,22 @@ Future<void> saveScreenshot(WidgetTester tester, String name) async {
   await tester.pump();
 }
 
+Future<void> loadScreenshotFonts() async {
+  if (!screenshots) return;
+  final icons = FontLoader('MaterialIcons');
+  icons.addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
+  await icons.load();
+  // Optional local visual review; functional tests never require a host font.
+  final font = File('/System/Library/Fonts/Supplemental/Arial Unicode.ttf');
+  if (await font.exists()) {
+    final loader = FontLoader('Roboto');
+    loader.addFont(
+      Future.value(ByteData.sublistView(await font.readAsBytes())),
+    );
+    await loader.load();
+  }
+}
+
 void main() {
   setUpAll(() async {
     if (!screenshots) return;
@@ -103,18 +119,7 @@ void main() {
 矩阵文件名包含主题、逻辑宽度和文字倍率；图片以 2 倍像素输出。
 覆盖账本、搜索展开、统计、问账、设置、手动录入和一句话录入。
 ''');
-    final icons = FontLoader('MaterialIcons');
-    icons.addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
-    await icons.load();
-    // Optional local visual review; functional tests never require a host font.
-    final font = File('/System/Library/Fonts/Supplemental/Arial Unicode.ttf');
-    if (await font.exists()) {
-      final loader = FontLoader('Roboto');
-      loader.addFont(
-        Future.value(ByteData.sublistView(await font.readAsBytes())),
-      );
-      await loader.load();
-    }
+    await loadScreenshotFonts();
   });
 
   testWidgets('custom category icon stays consistent in ledger and entry', (
@@ -126,6 +131,8 @@ void main() {
     await pumpApp(tester, repository);
     expect(find.byIcon(Icons.redeem_outlined), findsWidgets);
     await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('手动'));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.redeem_outlined), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -284,6 +291,8 @@ void main() {
       await tester.tap(find.widgetWithText(FloatingActionButton, '记一笔'));
       await tester.pumpAndSettle();
       expect(find.byType(EntryScreen), findsOneWidget);
+      await tester.tap(find.text('手动'));
+      await tester.pumpAndSettle();
       await saveScreenshot(tester, 'entry-light');
       await tester.enterText(field('金额'), '0');
       await tester.scrollUntilVisible(
@@ -347,6 +356,8 @@ void main() {
       final repository = TestLedgerRepository();
       await pumpApp(tester, repository);
       await tester.tap(find.widgetWithText(FloatingActionButton, '记一笔'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('手动'));
       await tester.pumpAndSettle();
       await tester.enterText(field('金额'), '28.50');
       repository.data = {...repository.data, 'revision': 1};
@@ -492,10 +503,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(EntryScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
+      await tester.tap(find.text('手动'));
+      await tester.pumpAndSettle();
       await saveScreenshot(tester, 'entry-$suffix');
       await tester.tap(find.text('一句话'));
       await tester.pumpAndSettle();
-      expect(find.text('识别账单'), findsOneWidget);
+      expect(find.text('自动记账'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await saveScreenshot(tester, 'entry-ai-$suffix');
     });

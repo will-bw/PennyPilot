@@ -112,4 +112,52 @@ class PaymentSceneRecognitionTest {
         assertNull(PaymentTextParser.analyzeScreen(wechat, "支付成功\n实付\n18.00\n支付失败", structure).parsed)
         assertNull(PaymentTextParser.analyzeScreen(wechat, "支付成功\n实付\n18.00\n另付28.00元", structure).parsed)
     }
+
+    @Test fun `alipay and meituan amount-first payment rows retain all explicit expense labels`() {
+        val packages = listOf("com.eg.android.AlipayGphone", "com.sankuai.meituan", "com.sankuai.meituan.takeoutnew")
+        val labels = listOf("支付金额", "消费金额", "交易金额", "扣款金额", "实付款", "实扣金额", "实扣")
+        for (packageName in packages) for (label in labels) {
+            val structure = amountFirstRow(label)
+            val text = "支付成功\n18.50\n$label\n完成"
+            assertNull("plain text must not guess the bare amount", PaymentTextParser.parseScreen(packageName, text))
+            val result = PaymentTextParser.analyzeScreen(packageName, text, structure).parsed
+            assertEquals("$packageName $label", 1850L, result?.amountCents)
+            assertEquals("EXPENSE", result?.direction)
+            assertEquals("expense", result?.businessKind)
+        }
+    }
+
+    @Test fun `amount-first structural payment labels preserve failure history and amount boundaries`() {
+        val packageName = "com.sankuai.meituan"
+        val structure = amountFirstRow("支付金额")
+        val text = "支付成功\n18.50\n支付金额\n完成"
+        for (suffix in listOf("支付失败", "待支付", "订单详情", "另付28.00元")) {
+            assertNull(suffix, PaymentTextParser.analyzeScreen(packageName, "$text\n$suffix", structure).parsed)
+        }
+        val differentParent = PaymentScreenStructure(structure.nodes.map {
+            if (it.id == 4) it.copy(parentId = 1) else it
+        })
+        val ambiguous = PaymentScreenStructure(structure.nodes + PaymentScreenNode(6, 2, text = "28.00"))
+        val hiddenAmount = PaymentScreenStructure(structure.nodes.map {
+            if (it.id == 3) it.copy(visible = false) else it
+        })
+        for (invalid in listOf(differentParent, ambiguous, hiddenAmount)) {
+            assertTrue(invalid.labelledAmounts().isEmpty())
+            assertNull(PaymentTextParser.analyzeScreen(packageName, text, invalid).parsed)
+        }
+        for (label in listOf("应付金额", "订单金额", "原价", "优惠金额", "账户余额")) {
+            val ignored = amountFirstRow(label)
+            assertTrue(label, ignored.labelledAmounts().isEmpty())
+            assertNull(label, PaymentTextParser.analyzeScreen(packageName,
+                "支付成功\n18.50\n$label\n完成", ignored).parsed)
+        }
+    }
+
+    private fun amountFirstRow(label: String) = PaymentScreenStructure(listOf(
+        PaymentScreenNode(1, null),
+        PaymentScreenNode(2, 1, className = "android.widget.LinearLayout"),
+        PaymentScreenNode(3, 2, text = "18.50"),
+        PaymentScreenNode(4, 2, text = label),
+        PaymentScreenNode(5, 1, text = "支付成功")
+    ))
 }

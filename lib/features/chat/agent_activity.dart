@@ -193,12 +193,17 @@ class AgentActivity extends StatelessWidget {
     final payload = action['payload'] as Map;
     if (action['kind'] == 'transaction') {
       final tx = payload['transaction'] as Map;
+      final metadata = tx['metadataJson'] == null
+          ? const <String, dynamic>{}
+          : jsonDecode(tx['metadataJson'] as String) as Map;
       return [
         if (payload['before'] is Map)
           '原金额：${formatMoney((payload['before'] as Map)['amount'] as int)} 元',
         '${tx['type'] == 'INCOME' ? '收入' : '支出'} ${formatMoney(tx['amount'] as int)} 元',
         if (tx['merchant'] != null) '商户：${tx['merchant']}',
         if (tx['note'] != null) '备注：${tx['note']}',
+        for (final assumption in metadata['assumptions'] as List? ?? [])
+          '推断：$assumption',
       ];
     }
     if (action['kind'] == 'budget') {
