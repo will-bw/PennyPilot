@@ -49,7 +49,7 @@ object PaymentTextParser {
         "com.ss.android.ugc.aweme" to setOf("抖音", "抖音支付", "抖音商城", "抖音订单", "抖音生活服务"),
         "com.ss.android.ugc.aweme.lite" to setOf("抖音", "抖音极速版", "抖音支付", "抖音商城", "抖音订单", "抖音生活服务")
     )
-    private val receiptTitle = Regex("""^(?:订单)?(?:支付|付款|退款|收款)(?:成功|到账)(?:通知)?$""")
+    private val receiptTitle = Regex("""^(?:订单)?(?:支付|付款|消费|扣款|交易|退款|收款|收钱)(?:已)?(?:成功|到账|完成)(?:通知)?(?:\s*[:：]?\s*(?:[¥￥]\s*$RAW_AMOUNT(?:\s*元)?|$RAW_AMOUNT\s*元))?[!！。]?$""")
     private val orderToken = Regex("""(商户订单号|商家订单号|商户单号|支付订单号|交易订单号|订单编号|订单号|交易单号|交易号|流水号)\s*[:：]?\s*([^\s:：，,；;]+)""")
     private val validOrderId = Regex("""[A-Za-z0-9]{10,64}""")
     private val refundToken = Regex("""(商户退款单号|商家退款单号|退款交易单号|退款交易号|退款订单号|退款流水号|退款单号|退款编号)\s*[:：]?\s*([^\s:：，,；;]+)""")
@@ -150,7 +150,7 @@ object PaymentTextParser {
             else -> "unknown"
         }
         return parsed.copy(businessKind = businessKind, scene = scene,
-            ruleVersion = "payment-scenes-2026-10-24.2",
+            ruleVersion = "payment-scenes-2026-11-01.1",
             fieldEvidence = fieldEvidence(parsed, text, structure, source))
     }
 
@@ -159,7 +159,7 @@ object PaymentTextParser {
         val scene: String,
         val modelCandidate: Boolean,
         val evidenceText: String,
-        val ruleVersion: String = "payment-scenes-2026-10-24.2",
+        val ruleVersion: String = "payment-scenes-2026-11-01.1",
         val visualCandidate: Boolean = false
     )
 
@@ -202,7 +202,8 @@ object PaymentTextParser {
         val text = "$normalizedTitle\n$body"
         if (text.length > 16_000 || rejects(text) || conflictingDirections(text) || ambiguousRefundIds(text)) return false
         val facts = receiptFacts(text)
-        if (hasCompletion(facts)) return true
+        // “交易成功”只证明完成；没有独立收支依据时也不能交给自定义规则或云端猜方向。
+        if (hasCompletion(facts)) return !neutralCompleted.containsMatchIn(facts) || direction(facts) != null
         // 钱包的支付通知允许“向商户付款 18 元”“到账 100 元”等已发生动作。
         if (packageName == "com.tencent.mm" || packageName == "com.eg.android.AlipayGphone") {
             val bodyFacts = receiptFacts(body)

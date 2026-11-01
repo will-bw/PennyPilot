@@ -25,9 +25,11 @@ data class PaymentScreenStructure(val nodes: List<PaymentScreenNode>) {
 
     /** Labels in the same small row may arrive amount-first or through contentDescription. */
     fun labelledAmounts(): List<String> {
-        val labels = setOf("实付", "实付金额", "实际支付", "实际付款", "付款金额", "转账金额",
-            "到账金额", "收款金额", "退款金额", "退回金额", "退还金额", "本人领取金额", "领取金额",
-            "红包金额", "本次退款金额", "实际退款金额", "退款到账金额", "实际到账金额")
+        val labels = setOf("实付", "实付金额", "实际支付", "实际付款", "实付款", "实扣金额", "实扣",
+            "支付金额", "付款金额", "消费金额", "交易金额", "扣款金额", "转账金额",
+            "到账金额", "实际到账金额", "收款金额", "收钱金额", "入账金额", "收入金额",
+            "退款金额", "退回金额", "退还金额", "本次退款金额", "实际退款金额", "退款到账金额",
+            "本次退款", "实际退款", "本次退回金额", "本人领取金额", "领取金额", "收到红包金额", "红包金额")
         val money = Regex("""^(?:[¥￥]\s*)?([0-9]+(?:\.[0-9]{1,2})?)(?:\s*元)?$""")
         val siblings = nodes.filter { it.visible }.groupBy { it.parentId }
         return nodes.filter { it.visible && it.labels.any(labels::contains) }.mapNotNull { label ->

@@ -21,16 +21,21 @@ object NotificationContentExtractor {
         val notification = sbn.notification
         if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return null
         val extras = notification.extras ?: return null
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val normalTitle = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val expandedTitle = extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString()?.trim().orEmpty()
+        val title = normalTitle.ifBlank { expandedTitle }
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()
         val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
             ?.map { it.toString().trim() }?.filter { it.isNotBlank() }?.distinct()
             ?.joinToString("\n")
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
-        val content = bigText?.takeIf { it.isNotBlank() }
+        val body = bigText?.takeIf { it.isNotBlank() }
             ?: lines?.takeIf { it.isNotBlank() } ?: text
+        // 展开标题可能承载支付完成或失败状态，不能只保留应用名和金额正文。
+        val content = listOf(expandedTitle.takeIf { it != title && it !in body.lines() }.orEmpty(), body)
+            .filter { it.isNotBlank() }.joinToString("\n")
         // 不截断后再尝试匹配，避免金额或失败说明被裁掉后误判。
-        if (title.length + content.length > 8192 || content.isBlank()) return null
+        if (title.length + content.length > 8192 || (title.isBlank() && content.isBlank())) return null
         return CapturedNotification(sbn.packageName, sbn.key, sbn.postTime, title, content, notification.`when`)
     }
 
