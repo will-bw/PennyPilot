@@ -4,13 +4,13 @@ Git 仓库保存可构建源码、测试、依赖锁定文件和必要的公开�
 
 ## 版本与发布资产
 
-`pubspec.yaml` 的 `version` 是版本来源。`0.8.2+19` 对应版本名 `0.8.2`、Android 构建号 `19`，Git 标签为 `v0.8.2`。每次更新都必须递增构建号；版本名变大不能代替构建号递增。
+`pubspec.yaml` 的 `version` 是版本来源。`0.8.3+20` 对应版本名 `0.8.3`、Android 构建号 `20`，Git 标签为 `v0.8.3`。每次更新都必须递增构建号；版本名变大不能代替构建号递增。
 
 每个正式 Release 包含：
 
 | 文件 | 用途 |
 | --- | --- |
-| `PennyPilot-v0.8.2-android.apk` | 签名后的通用 Android 安装包 |
+| `PennyPilot-v0.8.3-android.apk` | 签名后的通用 Android 安装包 |
 | `update.json` | 应用读取的版本与下载校验清单 |
 | `SHA256SUMS` | 发布文件的 SHA-256 摘要，供下载者校验 |
 
@@ -57,7 +57,7 @@ Flutter 检查、测试和构建须串行执行；并行执行可能重写平台
 
 正式 APK 构建使用上方完整命令，保留默认的平台文件刷新，不添加 `--no-pub`。此前的调试或 iOS 构建可能留下包含 `integration_test` 的 Android 插件注册文件；完整 release 构建会重新生成文件，排除测试插件。
 
-产物为 `build/app/outputs/flutter-apk/app-release.apk`。发布脚本默认从该文件读取实际 APK 信息，验证发布签名、应用 ID、版本名与构建号，并生成 `build/releases/v0.8.2/` 下的三份发布资产。`update.json` 的 APK 下载地址指向该版本的 GitHub Release；文件大小和 SHA-256 从实际 APK 生成，不手写摘要。
+产物为 `build/app/outputs/flutter-apk/app-release.apk`。发布脚本默认从该文件读取实际 APK 信息，验证发布签名、应用 ID、版本名与构建号，并生成 `build/releases/v0.8.3/` 下的三份发布资产。`update.json` 的 APK 下载地址指向该版本的 GitHub Release；文件大小和 SHA-256 从实际 APK 生成，不手写摘要。
 
 发布前用 Android SDK 的 `apksigner verify --verbose --print-certs` 检查证书，将证书 SHA-256 与上次正式发布比较。安装包的 SHA-256 是文件摘要，不等同于签名证书摘要。
 
@@ -72,9 +72,9 @@ Flutter 检查、测试和构建须串行执行；并行执行可能重写平台
 ```json
 {
   "schemaVersion": 1,
-  "version": "0.8.2",
-  "versionCode": 19,
-  "apkUrl": "https://github.com/will-bw/PennyPilot/releases/download/v0.8.2/PennyPilot-v0.8.2-android.apk",
+  "version": "0.8.3",
+  "versionCode": 20,
+  "apkUrl": "https://github.com/will-bw/PennyPilot/releases/download/v0.8.3/PennyPilot-v0.8.3-android.apk",
   "sha256": "<实际 APK 的 64 位小写十六进制 SHA-256>",
   "size": 0
 }
