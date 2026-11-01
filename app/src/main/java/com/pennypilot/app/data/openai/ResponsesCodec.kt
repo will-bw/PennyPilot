@@ -21,19 +21,25 @@ import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 
-/** Stateless Responses mapping. Only a completed, validated response may leave this codec. */
+/** Incremental previews are separate from the completed, validated response. */
 internal object ResponsesCodec {
     const val NAMESPACE = "pennypilot"
     private const val MAX_LINE_BYTES = 512 * 1024L
     private const val MAX_EVENT_CHARS = 2 * 1024 * 1024
     private const val MAX_STREAM_BYTES = 8 * 1024 * 1024L
     private val functionName = Regex("[A-Za-z0-9_-]{1,64}")
+    private val reasoningEfforts = setOf("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
     fun request(
         model: String, messages: List<Message>, tools: List<ToolDefinition> = emptyList(),
-        jsonMode: Boolean = false
+        jsonMode: Boolean = false,
+        reasoningEffort: String? = null,
+        requestReasoningSummary: Boolean = false
     ): JsonObject {
         if (model.isBlank() || model.length > 256 || model.any(Char::isISOControl)) throw OpenAiErrors.noModel()
+        if (reasoningEffort != null && reasoningEffort !in reasoningEfforts) {
+            throw OpenAiErrors.protocol("当前推理强度不适用于 Responses 接口")
+        }
         MultimodalMessages.validate(messages)
         if (messages.isEmpty()) throw OpenAiErrors.protocol("对话为空")
         val names = tools.map { it.function.name }
@@ -110,6 +116,10 @@ internal object ResponsesCodec {
             put("stream", true)
             put("input", input)
             putJsonArray("include") { add("reasoning.encrypted_content") }
+            if (reasoningEffort != null || requestReasoningSummary) putJsonObject("reasoning") {
+                reasoningEffort?.let { put("effort", it) }
+                if (requestReasoningSummary) put("summary", "auto")
+            }
             if (jsonMode) {
                 put("instructions", "只输出一个有效的 JSON 对象，不要输出 Markdown 代码块或额外说明。")
                 putJsonObject("text") { putJsonObject("format") { put("type", "json_object") } }
@@ -143,12 +153,17 @@ internal object ResponsesCodec {
     }
 
     /** Multi-line SSE data is joined with LF. A sentinel or EOF never proves completion. */
-    fun readStream(source: BufferedSource, allowedTools: Set<String>, requestId: String? = null): ResponseOutput {
+    fun readStream(
+        source: BufferedSource, allowedTools: Set<String>, requestId: String? = null,
+        onReasoningDelta: (String) -> Unit = {},
+        onTextDelta: (String) -> Unit = {}
+    ): ResponseOutput {
         val data = StringBuilder()
         var eventName: String? = null
         var byteCount = 0L
         var firstLine = true
         val streamItems = StreamItems(requestId)
+        val summaries = ReasoningSummaries(requestId, onReasoningDelta)
         val utf8 = Charsets.UTF_8.newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
@@ -172,7 +187,7 @@ internal object ResponsesCodec {
             if (cleanLine.isEmpty()) {
                 if (data.isNotEmpty()) {
                     val payload = data.toString().removeSuffix("\n")
-                    consumeEvent(payload, eventName, allowedTools, requestId, streamItems)?.let { return it }
+                    consumeEvent(payload, eventName, allowedTools, requestId, streamItems, summaries, onTextDelta)?.let { return it }
                 }
                 data.setLength(0)
                 eventName = null
@@ -193,7 +208,9 @@ internal object ResponsesCodec {
     }
 
     private fun consumeEvent(
-        payload: String, eventName: String?, allowedTools: Set<String>, requestId: String?, streamItems: StreamItems
+        payload: String, eventName: String?, allowedTools: Set<String>, requestId: String?, streamItems: StreamItems,
+        summaries: ReasoningSummaries,
+        onTextDelta: (String) -> Unit
     ): ResponseOutput? {
         if (payload == "[DONE]" || payload == "[END]") return null
         val event = objectFrom(payload, requestId)
@@ -202,6 +219,15 @@ internal object ResponsesCodec {
             throw OpenAiErrors.protocol("事件类型不一致", requestId)
         }
         return when (type) {
+            "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.added", "response.reasoning_summary_part.done" -> {
+                summaries.accept(type, event)
+                null
+            }
+            "response.output_text.delta" -> {
+                onTextDelta(event.string("delta") ?: throw OpenAiErrors.protocol("文本增量无效", requestId))
+                null
+            }
             "response.output_item.added", "response.output_item.done" -> {
                 streamItems.accept(type, event)
                 null
@@ -212,7 +238,8 @@ internal object ResponsesCodec {
                 val items = response["output"] as? JsonArray ?: throw OpenAiErrors.protocol("完成事件缺少输出", requestId)
                 // Direct-route terminal events can omit the already-streamed output items.
                 // Use only final item.done payloads, and only after response.completed.
-                output(if (items.isEmpty()) streamItems.completed() else items, allowedTools, requestId)
+                val result = output(if (items.isEmpty()) streamItems.completed() else items, allowedTools, requestId)
+                if (result.reasoningSummary.isEmpty()) result.copy(reasoningSummary = summaries.completed()) else result
             }
             "response.failed" -> {
                 val response = event["response"] as? JsonObject
@@ -220,8 +247,49 @@ internal object ResponsesCodec {
             }
             "response.incomplete" -> throw OpenAiErrors.protocol("模型输出不完整", requestId)
             "error" -> throw OpenAiErrors.stream(event["error"] as? JsonObject ?: event, requestId)
-            else -> null // Deltas remain provisional and are never returned as completed content.
+            else -> null
         }
+    }
+
+    /** Only explicitly public summary_text is ever sent to the UI. */
+    private class ReasoningSummaries(private val requestId: String?, private val onDelta: (String) -> Unit) {
+        private val parts = mutableMapOf<Pair<String, Int>, String>()
+        private val done = mutableSetOf<Pair<String, Int>>()
+        private var characters = 0
+
+        fun accept(type: String, event: JsonObject) {
+            val item = event.string("item_id")?.takeIf { it.isNotBlank() && it.length <= 256 }
+                ?: throw OpenAiErrors.protocol("推理摘要缺少标识", requestId)
+            val index = (event["summary_index"] as? JsonPrimitive)?.intOrNull?.takeIf { it in 0..4095 }
+                ?: throw OpenAiErrors.protocol("推理摘要序号无效", requestId)
+            val key = item to index
+            val before = parts[key].orEmpty()
+            val next = when (type) {
+                "response.reasoning_summary_text.delta" -> {
+                    if (key in done) throw OpenAiErrors.protocol("推理摘要完成后仍有增量", requestId)
+                    before + (event.string("delta") ?: throw OpenAiErrors.protocol("推理摘要增量无效", requestId))
+                }
+                "response.reasoning_summary_text.done" -> event.string("text")
+                    ?: throw OpenAiErrors.protocol("推理摘要完成内容无效", requestId)
+                else -> {
+                    val part = event["part"] as? JsonObject ?: throw OpenAiErrors.protocol("推理摘要分段无效", requestId)
+                    if (part.string("type") != "summary_text") throw OpenAiErrors.protocol("推理摘要分段类型无效", requestId)
+                    part.string("text") ?: throw OpenAiErrors.protocol("推理摘要分段缺少文字", requestId)
+                }
+            }
+            if (!next.startsWith(before)) throw OpenAiErrors.protocol("推理摘要内容不一致", requestId)
+            val appended = next.removePrefix(before)
+            if (characters + appended.length > 64000) throw OpenAiErrors.protocol("推理摘要过长", requestId)
+            if (appended.isNotEmpty()) {
+                if (before.isEmpty() && parts.any { it.key != key && it.value.isNotEmpty() }) onDelta("\n\n")
+                characters += appended.length
+                onDelta(appended)
+            }
+            parts[key] = next
+            if (type.endsWith(".done")) done.add(key)
+        }
+
+        fun completed(): String = parts.filterKeys { it in done }.values.filter(String::isNotBlank).joinToString("\n\n")
     }
 
     private class StreamItems(private val requestId: String?) {
@@ -258,6 +326,7 @@ internal object ResponsesCodec {
 
     private fun output(items: JsonArray, allowedTools: Set<String>, requestId: String? = null): ResponseOutput {
         val text = StringBuilder()
+        val summary = mutableListOf<String>()
         val calls = mutableListOf<ToolCall>()
         val ids = mutableSetOf<String>()
         items.forEach { element ->
@@ -293,12 +362,22 @@ internal object ResponsesCodec {
                     if (!ids.add(call.id)) throw OpenAiErrors.protocol("工具调用编号重复", requestId)
                     calls.add(call)
                 }
-                "reasoning" -> Unit // Opaque encrypted state is replayed unchanged, never displayed or executed.
+                "reasoning" -> {
+                    // encrypted_content is retained in items for replay; never read it as text.
+                    val parts = item["summary"] as? JsonArray ?: JsonArray(emptyList())
+                    parts.forEach { raw ->
+                        val part = raw as? JsonObject ?: throw OpenAiErrors.protocol("推理摘要格式无效", requestId)
+                        if (part.string("type") != "summary_text") throw OpenAiErrors.protocol("推理摘要类型无效", requestId)
+                        val value = part.string("text") ?: throw OpenAiErrors.protocol("推理摘要缺少文字", requestId)
+                        if (summary.sumOf { it.length } + value.length > 64000) throw OpenAiErrors.protocol("推理摘要过长", requestId)
+                        if (value.isNotBlank()) summary.add(value)
+                    }
+                }
                 else -> throw OpenAiErrors.protocol("响应包含不受支持的输出", requestId)
             }
         }
         if (text.isBlank() && calls.isEmpty()) throw OpenAiErrors.protocol("响应没有有效内容", requestId)
-        return ResponseOutput(text.toString(), calls, items)
+        return ResponseOutput(text.toString(), calls, items, summary.joinToString("\n\n"))
     }
 
     private fun validateHistoryCall(call: ToolCall) {
@@ -315,4 +394,4 @@ internal object ResponsesCodec {
             ?: throw OpenAiErrors.protocol("JSON 格式无效", requestId)
 }
 
-internal data class ResponseOutput(val text: String, val toolCalls: List<ToolCall>, val items: JsonArray)
+internal data class ResponseOutput(val text: String, val toolCalls: List<ToolCall>, val items: JsonArray, val reasoningSummary: String = "")

@@ -2,6 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'recognition/recognition_protocol.dart';
+import 'agent/agent_models.dart' show agentId;
+import 'agent/agent_presentation.dart';
+import 'storage/assistant_attachment_store.dart';
+import 'ai/model_reasoning.dart';
 
 import 'package:flutter/foundation.dart';
 
@@ -26,16 +30,24 @@ class RecognitionSaveReceipt {
 }
 
 class LedgerController extends ChangeNotifier {
-  LedgerController({LedgerRepository? repository, DateTime Function()? clock})
-    : _repository = repository ?? CrossPlatformLedgerRepository(),
-      _clock = clock ?? DateTime.now {
+  LedgerController({
+    LedgerRepository? repository,
+    DateTime Function()? clock,
+    AssistantAttachmentStore? attachmentStore,
+  }) : _repository = repository ?? CrossPlatformLedgerRepository(),
+       _attachmentStore = attachmentStore ?? AssistantAttachmentStore(),
+       _clock = clock ?? DateTime.now {
     final now = _clock();
     _selectedMonth = DateTime(now.year, now.month);
   }
 
   final LedgerRepository _repository;
+  final AssistantAttachmentStore _attachmentStore;
   final DateTime Function() _clock;
+  final ValueNotifier<int> chatUpdates = ValueNotifier(0);
+  Timer? _chatUpdateTimer;
   LedgerSnapshot? _snapshot;
+  Map<int, LedgerTransaction> _transactionIndex = {};
   LedgerSnapshot? get snapshot => _snapshot;
   int get revision => _snapshot?.revision ?? 0;
   StreamSubscription<LedgerEvent>? _subscription;
@@ -64,6 +76,41 @@ class LedgerController extends ChangeNotifier {
   Map<String, dynamic> get settings => _snapshot?.settings ?? const {};
   Map<String, dynamic> get capabilities => _snapshot?.capabilities ?? const {};
   Map<String, dynamic> get auth => _snapshot?.auth ?? const {};
+  List<AiModel> _reasoningModels = [];
+  String? _reasoningCatalogAccount,
+      _reasoningCatalogAttempt,
+      _reasoningObservedAccount;
+  ReasoningOptions? _runningReasoningOptions;
+  ReasoningOptions get assistantReasoningOptions =>
+      isAsking && _runningReasoningOptions != null
+      ? _runningReasoningOptions!
+      : _configuredReasoningOptions;
+  ReasoningOptions get _configuredReasoningOptions => resolveReasoningOptions(
+    settings,
+    catalogModel: _reasoningCatalogAccount == auth['activeAccountId']
+        ? _reasoningModels
+              .where((m) => m.slug == settings['chatGptModel'])
+              .firstOrNull
+        : null,
+  );
+  ReasoningCapability get assistantReasoningCapability =>
+      assistantReasoningOptions.capability;
+
+  Future<void> setAssistantReasoning({bool? enabled, String? effort}) async {
+    if (isAsking) throw const LedgerException('当前任务使用发送时的思考设置，请在完成后调整。');
+    final options = _configuredReasoningOptions;
+    if (enabled != null && !options.capability.canToggle) {
+      throw const LedgerException('当前模型不支持切换思考模式。');
+    }
+    if (effort != null && !options.capability.efforts.contains(effort)) {
+      throw const LedgerException('当前模型不支持这个思考深度。');
+    }
+    final prefix = reasoningSettingsPrefix(options.provider);
+    await updateSettings({
+      '${prefix}ThinkingEnabled': ?enabled,
+      '${prefix}ReasoningEffort': ?effort,
+    });
+  }
 
   late DateTime _selectedMonth;
   DateTime get selectedMonth => _selectedMonth;
@@ -73,8 +120,13 @@ class LedgerController extends ChangeNotifier {
   TxType? get typeFilter => _typeFilter;
   TxStatus? _statusFilter;
   TxStatus? get statusFilter => _statusFilter;
+  bool _includeIgnored = false;
+  bool get includesAllStatuses => _includeIgnored;
   int? _categoryFilter;
   int? get categoryFilter => _categoryFilter;
+  DateTime? _rangeStart, _rangeEnd;
+  DateTime? get rangeStart => _rangeStart;
+  DateTime? get rangeEnd => _rangeEnd;
 
   List<String> recognitionQuestions = [];
   String? recognitionNotice;
@@ -95,6 +147,23 @@ class LedgerController extends ChangeNotifier {
   List<Map<String, dynamic>> agentSessions = [], agentMemories = [];
   Map<String, dynamic> agentConfig = {}, agentProgress = {};
   bool _agentLoaded = false;
+  String? _activeAssistantRun, _liveMessageId;
+  String _assistantDraft = '';
+  String get assistantDraft => _assistantDraft;
+  Map<String, dynamic>? _assistantAttachment;
+  Map<String, dynamic>? get assistantAttachment => _assistantAttachment;
+  String? _recognitionRunId;
+  String _recognitionText = '';
+  Map<String, dynamic>? _recognitionImage;
+  List<Map<String, dynamic>> _recognitionAttachments = [];
+  Future<void> _recognitionPersistence = Future.value();
+  bool get pendingRecognition =>
+      _recognitionRunId != null &&
+      (_drafts.any(
+            (t) =>
+                t.recognitionMetadata['requestSessionId'] == _recognitionRunId,
+          ) ||
+          recognitionQuestions.isNotEmpty);
   String? _retryQuestion;
   String? get retryQuestion => _retryQuestion;
   String _speechText = '';
@@ -106,6 +175,157 @@ class LedgerController extends ChangeNotifier {
 
   void _notify() {
     if (!_disposed) notifyListeners();
+  }
+
+  void _notifyChat() {
+    if (_disposed || _chatUpdateTimer != null) return;
+    _chatUpdateTimer = Timer(const Duration(milliseconds: 40), () {
+      _chatUpdateTimer = null;
+      if (!_disposed) chatUpdates.value++;
+    });
+  }
+
+  void _onAgentProgress(Map<String, dynamic> event) {
+    if (!isAsking) return;
+    final phase = event['phase'];
+    final runId = event['runId'] as String?;
+    if (runId != null &&
+        _activeAssistantRun != null &&
+        runId != _activeAssistantRun) {
+      return;
+    }
+    if (phase == 'run_started') {
+      _activeAssistantRun = runId;
+      if (event['reasoning'] is Map && event['reasoning']['mode'] is String) {
+        _runningReasoningOptions = ReasoningOptions.fromMap(
+          stringMap(event['reasoning']),
+        );
+      }
+      if (event['internal'] != true && _messages.lastOrNull?.role == 'user') {
+        _messages[_messages.length - 1] = _messages.last.copyWith(
+          id: event['userMessageId'] as String?,
+          runId: runId,
+        );
+      }
+    }
+    agentProgress = {...agentProgress, ...event};
+    if (runId == null) {
+      _notifyChat();
+      return;
+    }
+    var index = _messages.lastIndexWhere(
+      (m) => m.role == 'assistant' && m.runId == runId,
+    );
+    if (index < 0) {
+      _messages.add(
+        ChatMessage(
+          id: '$runId:answer',
+          runId: runId,
+          role: 'assistant',
+          text: '',
+          status: 'streaming',
+          isStreaming: true,
+          createdAt: _clock().millisecondsSinceEpoch,
+        ),
+      );
+      index = _messages.length - 1;
+    }
+    var message = _messages[index];
+    switch (phase) {
+      case 'reasoning_start':
+      case 'reasoning_delta':
+      case 'reasoning_complete':
+        final part = stringMap(event['part']);
+        final parts = List<Map<String, dynamic>>.of(message.parts);
+        final old = parts.indexWhere(
+          (p) => p['type'] == 'reasoning' && p['id'] == part['id'],
+        );
+        if (old < 0) {
+          parts.add(part);
+        } else {
+          parts[old] = part;
+        }
+        message = message.copyWith(parts: parts);
+      case 'text_start':
+        _liveMessageId = event['messageId'] as String?;
+        message = message.copyWith(
+          text: '',
+          status: 'streaming',
+          isStreaming: true,
+        );
+      case 'text_delta':
+        if (_liveMessageId == event['messageId']) {
+          message = message.copyWith(
+            text: message.text + (event['delta'] as String? ?? ''),
+          );
+        }
+      case 'text_complete':
+        if (_liveMessageId == event['messageId']) {
+          message = message.copyWith(
+            text: event['text'] as String? ?? message.text,
+            status: 'checking',
+          );
+        }
+      case 'text_reset':
+        if (_liveMessageId == event['messageId']) {
+          message = message.copyWith(text: '', status: 'checking');
+          agentProgress = {...agentProgress, 'text': '正在核对账本依据…'};
+        }
+      case 'tool':
+      case 'tool_result':
+        final parts = List<Map<String, dynamic>>.of(message.parts);
+        final callId = event['callId'];
+        if (callId != null) {
+          final trace = stringMap(event['trace'] ?? const {});
+          final result = event['result'];
+          final part = <String, dynamic>{
+            'type': 'tool',
+            ...trace,
+            'callId': callId,
+            'tool': event['tool'],
+            'status': phase == 'tool'
+                ? 'running'
+                : trace['status'] ?? 'completed',
+            'result': ?result,
+          };
+          final old = parts.indexWhere(
+            (p) => p['type'] == 'tool' && p['callId'] == callId,
+          );
+          if (old < 0) {
+            parts.add(part);
+          } else {
+            parts[old] = {...parts[old], ...part};
+          }
+          if (result is Map && result['presentation'] is Map) {
+            final spec = stringMap(result['presentation']);
+            if (!parts.any(
+              (p) => p['spec'] is Map && p['spec']['id'] == spec['id'],
+            )) {
+              parts.add({'type': spec['type'], 'spec': spec});
+            }
+          }
+        }
+        for (final raw in (event['actions'] as List? ?? []).whereType<Map>()) {
+          if (raw['runId'] != null && raw['runId'] != runId) continue;
+          final action = {'type': 'action', ...stringMap(raw)};
+          final old = parts.indexWhere(
+            (p) => p['type'] == 'action' && p['id'] == action['id'],
+          );
+          if (old < 0) {
+            parts.add(action);
+          } else {
+            parts[old] = action;
+          }
+        }
+        message = message.copyWith(parts: parts);
+      case 'run_finished':
+        message = message.copyWith(
+          isStreaming: false,
+          status: event['status'] as String? ?? 'complete',
+        );
+    }
+    _messages[index] = message;
+    _notifyChat();
   }
 
   Future<void> init() async {
@@ -165,6 +385,20 @@ class LedgerController extends ChangeNotifier {
       }
       _minimumRevision = next.revision;
       _snapshot = next;
+      final accountId = next.auth['activeAccountId'] as String?;
+      if (_reasoningObservedAccount != accountId) {
+        _reasoningObservedAccount = accountId;
+        _reasoningCatalogAccount = null;
+        _reasoningCatalogAttempt = null;
+        _reasoningModels = [];
+      }
+      if (next.settings['activeProvider'] == 'chatgpt' &&
+          accountId != null &&
+          _reasoningCatalogAttempt != accountId) {
+        _reasoningCatalogAttempt = accountId;
+        unawaited(_loadReasoningCatalog());
+      }
+      _transactionIndex = {for (final t in next.transactions) t.id: t};
       if (!_agentLoaded) {
         _agentLoaded = true;
         await loadAgentState();
@@ -213,8 +447,7 @@ class LedgerController extends ChangeNotifier {
         if (state == 'SUCCEEDED') unawaited(refresh());
         _notify();
       case 'agent':
-        agentProgress = event.data;
-        _notify();
+        _onAgentProgress(event.data);
     }
   }
 
@@ -230,6 +463,15 @@ class LedgerController extends ChangeNotifier {
     agentMemories = [];
     agentProgress = {};
     _agentLoaded = false;
+    _activeAssistantRun = null;
+    _runningReasoningOptions = null;
+    _liveMessageId = null;
+    _assistantDraft = '';
+    _assistantAttachment = null;
+    _recognitionRunId = null;
+    _recognitionText = '';
+    _recognitionImage = null;
+    _recognitionAttachments = [];
     _retryQuestion = null;
     _speechText = '';
     _launchTarget = null;
@@ -246,8 +488,67 @@ class LedgerController extends ChangeNotifier {
     _notify();
   }
 
+  void setAssistantDraft(String value) {
+    if (value == _assistantDraft) return;
+    _assistantDraft = value;
+    _notifyChat();
+  }
+
+  void setAssistantAttachment(Map<String, dynamic>? value) {
+    _assistantAttachment = value == null ? null : Map.of(value);
+    _notify();
+  }
+
+  void openAssistant({String? prompt, Map<String, dynamic>? attachment}) {
+    if (prompt != null) {
+      _assistantDraft = _assistantDraft.trim().isEmpty
+          ? prompt
+          : '$_assistantDraft\n$prompt';
+    }
+    if (attachment != null) _assistantAttachment = Map.of(attachment);
+    _launchTarget = {'route': 'assistant'};
+    _notify();
+  }
+
+  void openLedgerQuery(Map<String, dynamic> query) {
+    clearFilters();
+    final month = query['month'] as String?;
+    final start = DateTime.tryParse(
+      query['start'] as String? ??
+          query['period_b_start'] as String? ??
+          (month == null ? '' : '$month-01'),
+    );
+    final end = DateTime.tryParse(
+      query['end'] as String? ?? query['period_b_end'] as String? ?? '',
+    );
+    if (start != null) {
+      _selectedMonth = DateTime(start.year, start.month);
+      _rangeStart = DateTime(start.year, start.month, start.day);
+      _rangeEnd = end == null
+          ? DateTime(start.year, start.month + 1)
+          : DateTime(end.year, end.month, end.day + 1);
+    }
+    _categoryFilter = query['category_id'] as int?;
+    _keyword = query['keyword'] as String? ?? '';
+    _typeFilter = switch (query['type']) {
+      'EXPENSE' => TxType.expense,
+      'INCOME' => TxType.income,
+      _ => null,
+    };
+    _statusFilter = switch (query['status']) {
+      'ALL' => null,
+      'PENDING' => TxStatus.pending,
+      'IGNORED' => TxStatus.ignored,
+      _ => TxStatus.confirmed,
+    };
+    _includeIgnored = query['status'] == 'ALL';
+    _launchTarget = {'route': 'ledger'};
+    _notify();
+  }
+
   void setMonth(DateTime value) {
     _selectedMonth = DateTime(value.year, value.month);
+    _rangeStart = _rangeEnd = null;
     _notify();
   }
 
@@ -263,6 +564,7 @@ class LedgerController extends ChangeNotifier {
 
   void setStatusFilter(TxStatus? value) {
     _statusFilter = value;
+    _includeIgnored = false;
     _notify();
   }
 
@@ -275,7 +577,9 @@ class LedgerController extends ChangeNotifier {
     _keyword = '';
     _typeFilter = null;
     _statusFilter = null;
+    _includeIgnored = false;
     _categoryFilter = null;
+    _rangeStart = _rangeEnd = null;
     _notify();
   }
 
@@ -305,10 +609,13 @@ class LedgerController extends ChangeNotifier {
     return transactions
         .where(
           (transaction) =>
-              _inMonth(transaction, _selectedMonth) &&
+              (_rangeStart == null
+                  ? _inMonth(transaction, _selectedMonth)
+                  : !transaction.occurredAt.isBefore(_rangeStart!) &&
+                        transaction.occurredAt.isBefore(_rangeEnd!)) &&
               (_typeFilter == null || transaction.type == _typeFilter) &&
               (_statusFilter == null
-                  ? transaction.status != TxStatus.ignored
+                  ? _includeIgnored || transaction.status != TxStatus.ignored
                   : transaction.status == _statusFilter) &&
               (_categoryFilter == null ||
                   transaction.categoryId == _categoryFilter) &&
@@ -763,12 +1070,14 @@ class LedgerController extends ChangeNotifier {
       unawaited(_rememberCategory(value));
     }
     _notify();
+    _saveRecognitionLater();
   }
 
   void removeDraft(int index) {
     if (busyFor('saveTransactions')) return;
     _drafts.removeAt(index);
     _notify();
+    _saveRecognitionLater();
   }
 
   void clearDrafts() {
@@ -779,6 +1088,7 @@ class LedgerController extends ChangeNotifier {
     recognitionNotice = null;
     _undoneRecognitionOperations.clear();
     _notify();
+    _saveRecognitionLater();
   }
 
   Future<void> _rememberCategory(LedgerTransaction item) async {
@@ -901,45 +1211,58 @@ class LedgerController extends ChangeNotifier {
     }
     await refresh();
     rememberSave();
+    if (!busyFor('assistantInput')) await _persistAssistantRecognition();
     return saved;
   });
 
-  Future<int> undoLastRecognitionSave() =>
-      _operation('undoRecognitionSave', () async {
-        _requireLoaded();
-        final receipt = _lastRecognitionSave;
-        if (receipt == null) throw const LedgerException('没有可撤销的自动记账。');
-        if (receipt.revision != revision) {
-          throw const LedgerException('账本已恢复，这次记账不能撤销。', code: 'STALE_LEDGER');
-        }
-        final generation = _generation;
-        final result = stringMap(
-          await _repository.invoke('undoRecognitionSave', {
-            'revision': receipt.revision,
-            'transactions': [
-              for (final item in receipt.transactions)
-                {
-                  'id': item.id,
-                  'editVersion': item.editVersion,
-                  'operationId': item.recognitionMetadata['operationId'],
-                },
-            ],
-          }),
-        );
-        _requireCurrent(generation);
-        final count = integer(result['count'], 'count');
-        _undoneRecognitionOperations.addAll(
-          receipt.transactions
-              .map((item) => item.recognitionMetadata['operationId'])
-              .whereType<String>(),
-        );
-        if (identical(_lastRecognitionSave, receipt)) {
-          _lastRecognitionSave = null;
-        }
-        await refresh();
-        recognitionNotice = '已撤销 $count 笔自动记账。';
-        return count;
-      });
+  Future<int> undoLastRecognitionSave() {
+    final receipt = _lastRecognitionSave;
+    if (receipt != null && _repository is AgentSessionRepository) {
+      final run = _messages.where((m) => m.role == 'assistant').where((m) {
+        final stored = _assistantReceipt(m.runId);
+        return stored != null && receipt.ids.every(stored.ids.contains);
+      }).lastOrNull;
+      if (run != null) {
+        return _undoAssistantRun(run.runId, transactionIds: receipt.ids);
+      }
+    }
+    return _operation('undoRecognitionSave', () async {
+      _requireLoaded();
+      final receipt = _lastRecognitionSave;
+      if (receipt == null) throw const LedgerException('没有可撤销的自动记账。');
+      if (receipt.revision != revision) {
+        throw const LedgerException('账本已恢复，这次记账不能撤销。', code: 'STALE_LEDGER');
+      }
+      final generation = _generation;
+      final result = stringMap(
+        await _repository.invoke('undoRecognitionSave', {
+          'revision': receipt.revision,
+          'transactions': [
+            for (final item in receipt.transactions)
+              {
+                'id': item.id,
+                'editVersion': item.editVersion,
+                'operationId': item.recognitionMetadata['operationId'],
+              },
+          ],
+        }),
+      );
+      _requireCurrent(generation);
+      final count = integer(result['count'], 'count');
+      _undoneRecognitionOperations.addAll(
+        receipt.transactions
+            .map((item) => item.recognitionMetadata['operationId'])
+            .whereType<String>(),
+      );
+      if (identical(_lastRecognitionSave, receipt)) {
+        _lastRecognitionSave = null;
+      }
+      await refresh();
+      recognitionNotice = '已撤销 $count 笔自动记账。';
+      await _persistAssistantRecognition();
+      return count;
+    });
+  }
 
   Future<void> loadAgentState() async {
     if (_snapshot == null ||
@@ -969,27 +1292,333 @@ class LedgerController extends ChangeNotifier {
     agentSessions = (state['sessions'] as List? ?? []).map(stringMap).toList();
     agentMemories = (state['memories'] as List? ?? []).map(stringMap).toList();
     agentConfig = stringMap(state['config'] ?? {});
-    _messages = (_agentSession['messages'] as List? ?? [])
-        .map(stringMap)
+    _messages = presentAgentSession(_agentSession);
+    for (final state
+        in _messages
+            .expand((m) => m.parts)
+            .where((p) => p['type'] == 'recognition_state')) {
+      _undoneRecognitionOperations.addAll(
+        (state['undoneOperations'] as List? ?? []).whereType<String>(),
+      );
+    }
+    _drafts.removeWhere(
+      (t) => _undoneRecognitionOperations.contains(
+        t.recognitionMetadata['operationId'],
+      ),
+    );
+    if (const {
+      'failed',
+      'cancelled',
+      'interrupted',
+    }.contains(_agentSession['status'])) {
+      final users = (_agentSession['messages'] as List? ?? [])
+          .whereType<Map>()
+          .where((m) => m['role'] == 'user' && m['internal'] != true);
+      _retryQuestion = users.lastOrNull?['content'] as String?;
+    }
+    if (_recognitionRunId == null) _restoreAssistantRecognition();
+  }
+
+  void _restoreAssistantRecognition() {
+    final parts = _messages.expand((m) => m.parts);
+    final saved = parts
+        .where((p) => p['type'] == 'recognition_state')
+        .lastOrNull;
+    if (saved == null) return;
+    _undoneRecognitionOperations.addAll(
+      (saved['undoneOperations'] as List? ?? []).whereType<String>(),
+    );
+    final existing = transactions
+        .map((t) => t.recognitionMetadata['operationId'])
+        .toSet();
+    final restored = (saved['drafts'] as List? ?? [])
+        .whereType<Map>()
+        .map((m) => LedgerTransaction.fromMap(stringMap(m), draft: true))
         .where(
-          (m) =>
-              m['internal'] != true &&
-              m['provisional'] != true &&
-              (m['role'] == 'user' ||
-                  m['role'] == 'assistant' &&
-                      (m['tool_calls'] as List? ?? []).isEmpty),
-        )
-        .map(
-          (m) => ChatMessage(
-            role: m['role'] as String,
-            text: m['content'] as String? ?? '',
-            isError: m['isError'] == true,
-            chartData: m['chartData'] == null
-                ? null
-                : InsightChart.fromMap(stringMap(m['chartData'])),
-          ),
+          (t) =>
+              !existing.contains(t.recognitionMetadata['operationId']) &&
+              !_undoneRecognitionOperations.contains(
+                t.recognitionMetadata['operationId'],
+              ),
         )
         .toList();
+    final questions = (saved['questions'] as List? ?? [])
+        .whereType<String>()
+        .toList();
+    if (restored.isEmpty && questions.isEmpty) return;
+    _recognitionRunId = saved['runId'] as String;
+    _recognitionText = saved['text'] as String? ?? '';
+    _recognitionAttachments = (saved['attachments'] as List? ?? [])
+        .whereType<Map>()
+        .map(stringMap)
+        .toList();
+    _drafts = [
+      ..._drafts.where(
+        (t) => t.recognitionMetadata['requestSessionId'] == null,
+      ),
+      ...restored,
+    ];
+    recognitionQuestions = questions;
+  }
+
+  RecognitionSaveReceipt? _assistantReceipt(String runId) {
+    final parts = _messages
+        .where((m) => m.runId == runId)
+        .expand((m) => m.parts);
+    final rows = <int, LedgerTransaction>{};
+    for (final part in parts) {
+      if (part['type'] == 'receipt' && part['status'] != 'undone') {
+        final undone = (part['undoneTransactionIds'] as List? ?? []).toSet();
+        for (final raw
+            in (part['transactions'] as List? ?? []).whereType<Map>()) {
+          final tx = LedgerTransaction.fromMap(stringMap(raw));
+          if (!undone.contains(tx.id)) rows[tx.id] = tx;
+        }
+      } else if (part['type'] == 'action' &&
+          part['kind'] == 'transaction' &&
+          part['status'] == 'applied' &&
+          part['transactionId'] is int) {
+        final payload = stringMap(part['payload']);
+        if (payload['before'] != null) continue;
+        final tx = LedgerTransaction.fromMap({
+          ...stringMap(payload['transaction']),
+          'id': part['transactionId'],
+          'editVersion': 0,
+        });
+        rows[tx.id] = tx;
+      }
+    }
+    return rows.isEmpty
+        ? null
+        : RecognitionSaveReceipt(
+            revision: revision,
+            transactions: rows.values.toList(),
+          );
+  }
+
+  bool canUndoAssistantRun(String runId) {
+    if (isBusy) return false;
+    final receipt = _assistantReceipt(runId);
+    return receipt != null &&
+        receipt.transactions.every((expected) {
+          final current = _transactionIndex[expected.id];
+          final operation = expected.recognitionMetadata['operationId'];
+          return operation is String &&
+              current != null &&
+              current.editVersion == expected.editVersion &&
+              current.recognitionMetadata['operationId'] == operation;
+        });
+  }
+
+  Future<int> undoAssistantRun(String runId) => _undoAssistantRun(runId);
+
+  Future<int> _undoAssistantRun(
+    String runId, {
+    List<int>? transactionIds,
+  }) async {
+    final original = _assistantReceipt(runId);
+    final selected =
+        original?.transactions
+            .where(
+              (t) => transactionIds == null || transactionIds.contains(t.id),
+            )
+            .toList() ??
+        [];
+    if (isBusy ||
+        selected.isEmpty ||
+        !selected.every((expected) {
+          final current = _transactionIndex[expected.id];
+          return current != null &&
+              current.editVersion == expected.editVersion &&
+              current.recognitionMetadata['operationId'] ==
+                  expected.recognitionMetadata['operationId'];
+        })) {
+      throw const LedgerException('这次账单已被修改、删除或撤销，不能再次撤销。');
+    }
+    if (_repository is! AgentSessionRepository) {
+      _lastRecognitionSave = _assistantReceipt(runId);
+      return undoLastRecognitionSave();
+    }
+    return _operation('undoRecognitionSave', () async {
+      final generation = _generation;
+      final result = stringMap(
+        await _repository.invoke('agentUndoRun', {
+          'revision': revision,
+          'runId': runId,
+          'transactionIds': ?transactionIds,
+        }),
+      );
+      _requireCurrent(generation);
+      _adoptAgentState(result);
+      _lastRecognitionSave = null;
+      await refresh();
+      return integer(result['count'], 'count');
+    });
+  }
+
+  Future<void> sendAssistantInput(
+    String text, {
+    Map<String, dynamic>? attachment,
+    bool isSupplement = false,
+    String source = 'AI_TEXT',
+  }) async {
+    final image = attachment ?? _assistantAttachment;
+    if (_assistantDraft.trim() == text.trim()) setAssistantDraft('');
+    if (identical(image, _assistantAttachment)) _assistantAttachment = null;
+    if (image == null && !(isSupplement && pendingRecognition)) {
+      await _ask(text, retry: false, source: source);
+      return;
+    }
+    await _operation('assistantInput', () async {
+      _requireLoaded();
+      final generation = _generation;
+      if (!isSupplement) {
+        if (pendingRecognition) {
+          throw const LedgerException('请先处理这次待核对账单，再识别新的凭证。');
+        }
+        _recognitionRunId = agentId();
+        _recognitionText = text.trim();
+        _recognitionAttachments = [];
+        _recognitionImage = null;
+        if (image != null) {
+          _recognitionImage = {
+            'imageBase64': image['imageBase64'] ?? image['base64'],
+            'mimeType': image['mimeType'],
+          };
+          _recognitionAttachments = [
+            await _attachmentStore.save(_recognitionImage!),
+          ];
+        }
+      } else {
+        if (text.trim().isEmpty) throw const LedgerException('写一句补充信息就可以。');
+        _recognitionText += '\n补充：${text.trim()}';
+      }
+      if (_recognitionImage == null && _recognitionAttachments.isNotEmpty) {
+        _recognitionImage = await _attachmentStore.read(
+          _recognitionAttachments.first,
+        );
+      }
+      _requireCurrent(generation);
+      try {
+        await recognizeInput(
+          text: _recognitionText,
+          source: _recognitionImage == null
+              ? TxSource.fromWire(source)
+              : TxSource.aiImage,
+          image: _recognitionImage,
+          sessionId: _recognitionRunId,
+        );
+        _requireCurrent(generation);
+        await _persistAssistantRecognition();
+      } catch (error) {
+        _requireCurrent(generation);
+        if (_drafts.isNotEmpty || _lastRecognitionSave != null) {
+          await _persistAssistantRecognition();
+        }
+        rethrow;
+      }
+    });
+  }
+
+  Future<void> _persistAssistantRecognition() async {
+    final runId = _recognitionRunId;
+    if (runId == null) return;
+    final generation = _generation;
+    final saved = transactions
+        .where((t) => t.recognitionMetadata['requestSessionId'] == runId)
+        .toList();
+    final ownedDrafts = _drafts
+        .where((t) => t.recognitionMetadata['requestSessionId'] == runId)
+        .toList();
+    final receipt = {
+      'type': 'receipt',
+      'title': saved.isEmpty
+          ? recognitionNotice ?? '识别结果'
+          : '已记下 ${saved.length} 笔',
+      'status': saved.isEmpty ? 'complete' : 'applied',
+      'transactions': saved
+          .map((t) => {...t.toMap(), 'editVersion': 0})
+          .toList(),
+    };
+    final pending = ownedDrafts.isNotEmpty || recognitionQuestions.isNotEmpty;
+    final answer = [
+      if (saved.isNotEmpty) '已记下 ${saved.length} 笔。',
+      if (ownedDrafts.isNotEmpty) '还有 ${ownedDrafts.length} 笔待核对。',
+      ...recognitionQuestions,
+      if (!pending && saved.isEmpty) recognitionNotice ?? '这次没有新增账单。',
+    ].join('\n');
+    final args = {
+      'revision': revision,
+      'runId': runId,
+      'question': _recognitionText.isEmpty ? '识别这张凭证中的收支' : _recognitionText,
+      'source': _recognitionAttachments.isEmpty ? 'AI_TEXT' : 'AI_IMAGE',
+      'answer': answer,
+      'status': pending ? 'awaiting_input' : 'completed',
+      if (_recognitionAttachments.isNotEmpty)
+        'attachment': _recognitionAttachments.first,
+      'parts': [
+        receipt,
+        {
+          'type': 'recognition_state',
+          'runId': runId,
+          'text': _recognitionText,
+          'attachments': _recognitionAttachments,
+          'drafts': ownedDrafts.map((t) => t.toMap()).toList(),
+          'questions': List<String>.of(recognitionQuestions),
+          'undoneOperations': _undoneRecognitionOperations.toList(),
+        },
+      ],
+    };
+    final previous = _recognitionPersistence;
+    final operation = () async {
+      try {
+        await previous;
+      } catch (_) {
+        /* A newer snapshot can still be saved. */
+      }
+      _requireCurrent(generation);
+      if (_repository is AgentSessionRepository) {
+        final result = stringMap(
+          await _repository.invoke('agentAppendInput', args),
+        );
+        _requireCurrent(generation);
+        _adoptAgentState(result);
+      } else {
+        final prior = _messages.where((m) => m.runId != runId).toList();
+        _messages = [
+          ...prior,
+          ChatMessage(
+            id: '$runId:user',
+            runId: runId,
+            role: 'user',
+            text: args['question'] as String,
+            parts: _recognitionAttachments,
+          ),
+          ChatMessage(
+            id: '$runId:answer',
+            runId: runId,
+            role: 'assistant',
+            text: answer,
+            parts: (args['parts'] as List).cast<Map<String, dynamic>>(),
+          ),
+        ];
+      }
+      _notify();
+    }();
+    _recognitionPersistence = operation;
+    await operation;
+  }
+
+  void _saveRecognitionLater() {
+    if (_recognitionRunId == null || busyFor('assistantInput')) return;
+    unawaited(
+      _persistAssistantRecognition().catchError((Object error) {
+        if (!_disposed) {
+          _error = '账单状态已更新，对话回执未能保存：${_friendly(error).message}';
+          _notify();
+        }
+      }),
+    );
   }
 
   Future<void> agentCommand(
@@ -997,11 +1626,24 @@ class LedgerController extends ChangeNotifier {
     Map<String, dynamic> args = const {},
   ]) => _operation('agentSession', () async {
     if (isAsking) throw const LedgerException('请先停止当前任务。');
+    await _recognitionPersistence;
     final generation = _generation;
     final result = stringMap(
       await _repository.invoke(method, {'revision': revision, ...args}),
     );
     _requireCurrent(generation);
+    if (method == 'agentNewSession' ||
+        method == 'agentSelectSession' ||
+        method == 'agentDeleteSession') {
+      _recognitionRunId = null;
+      _recognitionText = '';
+      _recognitionImage = null;
+      _recognitionAttachments = [];
+      _drafts = _drafts
+          .where((t) => t.recognitionMetadata['requestSessionId'] == null)
+          .toList();
+      recognitionQuestions = [];
+    }
     _adoptAgentState(result);
     _retryQuestion = null;
     _notify();
@@ -1013,7 +1655,10 @@ class LedgerController extends ChangeNotifier {
   Future<void> resolveAgentAction(String id, bool approve) =>
       _operation('ask', () async {
         final generation = _generation;
+        await _recognitionPersistence;
+        _requireCurrent(generation);
         agentProgress = {};
+        _activeAssistantRun = null;
         try {
           final result = stringMap(
             await _repository.invoke('agentResolveAction', {
@@ -1049,80 +1694,141 @@ class LedgerController extends ChangeNotifier {
     return _ask(question, retry: true);
   }
 
-  Future<ChatMessage> _ask(String question, {required bool retry}) =>
-      _operation('ask', () async {
-        _requireLoaded();
-        final text = question.trim();
-        if (text.isEmpty) throw const LedgerException('请输入想了解的账本问题。');
-        final generation = _generation;
-        var prior = _messages.where((message) => !message.isError).toList();
-        final existingIds = transactions.map((item) => item.id).toSet();
-        if (retry && prior.isNotEmpty && prior.last.role == 'user') {
-          prior.removeLast();
+  Future<ChatMessage> _ask(
+    String question, {
+    required bool retry,
+    String source = 'AI_TEXT',
+  }) => _operation('ask', () async {
+    _requireLoaded();
+    final text = question.trim();
+    if (text.isEmpty) throw const LedgerException('请输入想了解的账本问题。');
+    final generation = _generation;
+    await _recognitionPersistence;
+    _requireCurrent(generation);
+    if (!pendingRecognition) {
+      _recognitionRunId = null;
+      _recognitionText = '';
+      _recognitionImage = null;
+      _recognitionAttachments = [];
+    }
+    final prior = List<ChatMessage>.of(_messages);
+    final existingIds = transactions.map((item) => item.id).toSet();
+    _messages = [
+      ...prior,
+      if (!retry)
+        ChatMessage(
+          id: agentId(),
+          runId: 'local:${agentId()}',
+          role: 'user',
+          text: text,
+        ),
+    ];
+    _retryQuestion = null;
+    agentProgress = {};
+    _runningReasoningOptions = _configuredReasoningOptions;
+    _activeAssistantRun = null;
+    _liveMessageId = null;
+    _notify();
+    try {
+      final result = stringMap(
+        await _repository.invoke('ask', {
+          'revision': revision,
+          'question': text,
+          'source': source,
+          if (retry) 'retry': true,
+        }),
+      );
+      _requireCurrent(generation);
+      final autoSavedIds = (result['autoSavedIds'] as List? ?? [])
+          .whereType<int>()
+          .where((id) => !existingIds.contains(id))
+          .toSet();
+      if (autoSavedIds.isNotEmpty) {
+        await refresh();
+        _requireCurrent(generation);
+        final inserted = transactions
+            .where((item) => autoSavedIds.contains(item.id))
+            .toList();
+        if (inserted.isNotEmpty) {
+          _lastRecognitionSave = RecognitionSaveReceipt(
+            revision: revision,
+            transactions: inserted
+                .map(
+                  (item) => LedgerTransaction.fromMap({
+                    ...item.toMap(),
+                    'editVersion': 0,
+                  }),
+                )
+                .toList(),
+          );
         }
-        _messages = [...prior, ChatMessage(role: 'user', text: text)];
-        _retryQuestion = null;
-        agentProgress = {};
-        _notify();
-        try {
-          final result = stringMap(
-            await _repository.invoke('ask', {
-              'revision': revision,
-              'question': text,
-            }),
-          );
-          _requireCurrent(generation);
-          final autoSavedIds = (result['autoSavedIds'] as List? ?? [])
-              .whereType<int>()
-              .where((id) => !existingIds.contains(id))
-              .toSet();
-          if (autoSavedIds.isNotEmpty) {
-            await refresh();
-            _requireCurrent(generation);
-            final inserted = transactions
-                .where((item) => autoSavedIds.contains(item.id))
-                .toList();
-            if (inserted.isNotEmpty) {
-              _lastRecognitionSave = RecognitionSaveReceipt(
-                revision: revision,
-                transactions: inserted
-                    .map(
-                      (item) => LedgerTransaction.fromMap({
-                        ...item.toMap(),
-                        'editVersion': 0,
-                      }),
-                    )
-                    .toList(),
-              );
-            }
-          }
-          final response = ChatMessage(
-            role: 'assistant',
-            text: result['answer'] as String? ?? '暂未收到回答，请重试。',
-            isError: result['isError'] as bool? ?? false,
-            chartData: result['chartData'] == null
-                ? null
-                : InsightChart.fromMap(stringMap(result['chartData'])),
-          );
-          if (result['session'] != null) {
-            _adoptAgentState(result);
-          } else {
-            _messages = [..._messages, response];
-          }
-          _retryQuestion = response.isError ? text : null;
-          return response;
-        } catch (error) {
-          _requireCurrent(generation);
-          final response = ChatMessage(
-            role: 'assistant',
-            text: _friendly(error).message,
-            isError: true,
-          );
-          _messages = [..._messages, response];
-          _retryQuestion = text;
-          rethrow;
-        }
-      });
+      }
+      final response = ChatMessage(
+        role: 'assistant',
+        text: result['answer'] as String? ?? '暂未收到回答，请重试。',
+        isError: result['isError'] as bool? ?? false,
+        chartData: result['chartData'] == null
+            ? null
+            : InsightChart.fromMap(stringMap(result['chartData'])),
+      );
+      if (result['session'] != null) {
+        _adoptAgentState(result);
+      } else {
+        _settleAssistantPreview(response);
+      }
+      _retryQuestion =
+          response.isError ||
+              const {
+                'failed',
+                'cancelled',
+                'interrupted',
+              }.contains(_agentSession['status'])
+          ? text
+          : null;
+      return response;
+    } catch (error) {
+      _requireCurrent(generation);
+      final response = ChatMessage(
+        role: 'assistant',
+        text: _friendly(error).message,
+        isError: true,
+      );
+      _settleAssistantPreview(response);
+      _retryQuestion = text;
+      rethrow;
+    }
+  });
+
+  void _settleAssistantPreview(ChatMessage response) {
+    final index = _messages.lastIndexWhere(
+      (m) =>
+          m.role == 'assistant' &&
+          (m.isStreaming ||
+              _activeAssistantRun != null && m.runId == _activeAssistantRun),
+    );
+    if (index < 0) {
+      _messages.add(
+        response.copyWith(
+          id: agentId(),
+          runId: _activeAssistantRun ?? _messages.lastOrNull?.runId ?? '',
+          status: response.isError ? 'error' : 'complete',
+        ),
+      );
+      return;
+    }
+    final prior = _messages[index];
+    _messages[index] = prior.copyWith(
+      text: response.text,
+      isError: response.isError,
+      isStreaming: false,
+      status: response.isError ? 'error' : 'complete',
+      parts: [
+        ...prior.parts,
+        if (response.isError && prior.text.isNotEmpty)
+          {'type': 'interrupted_text', 'text': prior.text},
+      ],
+    );
+  }
 
   Future<int> saveCategory(LedgerCategory category) async {
     final result = stringMap(
@@ -1282,14 +1988,43 @@ class LedgerController extends ChangeNotifier {
   }
 
   Future<List<AiModel>> listModels() async {
+    final account = auth['activeAccountId'] as String?;
     final result = await command('listModels', refreshAfter: false) as List;
-    return result.map((item) => AiModel.fromMap(stringMap(item))).toList();
+    final models = result
+        .map((item) => AiModel.fromMap(stringMap(item)))
+        .toList();
+    if (account == auth['activeAccountId']) {
+      _reasoningCatalogAccount = account;
+      _reasoningModels = models;
+      _notify();
+    }
+    return models;
+  }
+
+  Future<void> _loadReasoningCatalog() async {
+    final account = auth['activeAccountId'] as String?;
+    try {
+      // Capability metadata is an enhancement; authentication errors remain
+      // actionable in AI settings and must not replace an otherwise usable chat.
+      final result = await _repository.invoke('listModels', {}) as List;
+      if (!_disposed && account == auth['activeAccountId']) {
+        _reasoningCatalogAccount = account;
+        _reasoningModels = result
+            .map((m) => AiModel.fromMap(stringMap(m)))
+            .toList();
+        _notify();
+      }
+    } on LedgerException {
+      // Keep unknown capabilities rather than advertising unsupported options.
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
     _generation++;
+    _chatUpdateTimer?.cancel();
+    chatUpdates.dispose();
     unawaited(_subscription?.cancel());
     if (_repository is CrossPlatformLedgerRepository) {
       unawaited(_repository.close());

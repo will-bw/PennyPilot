@@ -37,11 +37,9 @@ class _Model extends SharedAiService {
   @override
   Future<AgentModel> openAgentModel(
     LedgerSnapshot snapshot, {
-    Future<AgentReply> Function(
-      List<Map<String, dynamic>>,
-      List<Map<String, dynamic>>,
-    )?
-    nativeTurn,
+    AgentStreamComplete? nativeTurn,
+    AgentReasoningStreamComplete? nativeReasoningTurn,
+    AiModel? catalogModel,
     required Future<void> Function() guard,
   }) async {
     var step = 0;
@@ -141,7 +139,7 @@ void main() {
     final controller = LedgerController(repository: repository);
     await tester.pumpWidget(PennyPilotApp(controller: controller));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('问账'));
+    await tester.tap(find.text('AI 助手').last);
     await tester.pumpAndSettle();
     await controller.ask('对比本月和上月，再查餐饮明细。记住每月储蓄1000元，并把月预算改为3000元。');
     await tester.pumpAndSettle();

@@ -14,11 +14,53 @@ typedef AgentComplete =
       List<Map<String, dynamic>> tools,
     );
 
+typedef AgentStreamComplete =
+    Future<AgentReply> Function(
+      List<Map<String, dynamic>> messages,
+      List<Map<String, dynamic>> tools,
+      void Function(String delta) onTextDelta,
+    );
+
+typedef AgentReasoningStreamComplete =
+    Future<AgentReply> Function(
+      List<Map<String, dynamic>> messages,
+      List<Map<String, dynamic>> tools,
+      void Function(String delta) onTextDelta,
+      void Function(String delta) onReasoningDelta,
+    );
+
 class AgentModel {
-  const AgentModel({required this.identity, required this.complete});
+  const AgentModel({
+    required this.identity,
+    required this.complete,
+    this.stream,
+    this.reasoningStream,
+    this.reasoningConfig = const {},
+    this.cancel,
+  });
   // Public identity only. Never put credentials into persisted state.
   final String identity;
   final AgentComplete complete;
+  final AgentStreamComplete? stream;
+  final AgentReasoningStreamComplete? reasoningStream;
+  final Map<String, dynamic> reasoningConfig;
+  final void Function()? cancel;
+
+  Future<AgentReply> turn(
+    List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>> tools, {
+    required void Function(String delta) onTextDelta,
+    void Function(String delta)? onReasoningDelta,
+  }) => reasoningStream != null
+      ? reasoningStream!(
+          messages,
+          tools,
+          onTextDelta,
+          onReasoningDelta ?? (_) {},
+        )
+      : stream == null
+      ? complete(messages, tools)
+      : stream!(messages, tools, onTextDelta);
 }
 
 class AgentReply {
@@ -149,6 +191,8 @@ class AgentSession {
 
 class AgentCancellation {
   bool _cancelled = false;
+  bool get isCancelled => _cancelled;
+  LedgerException? get reason => _cancelled ? _reason : null;
   LedgerException _reason = const LedgerException(
     '已停止本次任务。',
     code: 'AGENT_CANCELLED',

@@ -18,6 +18,71 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ResponsesCodecTest {
+    @Test fun `reasoning options are explicit and unsupported client effort is rejected`() {
+        val messages = listOf(Message("user", "分析支出"))
+        val on = ResponsesCodec.request("chosen-model", messages, reasoningEffort = "high", requestReasoningSummary = true)
+        assertEquals("chosen-model", on.string("model"))
+        assertEquals("high", on.getValue("reasoning").jsonObject.string("effort"))
+        assertEquals("auto", on.getValue("reasoning").jsonObject.string("summary"))
+        val off = ResponsesCodec.request("chosen-model", messages, reasoningEffort = "none")
+        assertEquals("none", off.getValue("reasoning").jsonObject.string("effort"))
+        assertFalse(off.getValue("reasoning").jsonObject.containsKey("summary"))
+        assertFalse(ResponsesCodec.request("chosen-model", messages).containsKey("reasoning"))
+        assertThrows(UserFacingLlmException::class.java) {
+            ResponsesCodec.request("chosen-model", messages, reasoningEffort = "ultra")
+        }
+    }
+
+    @Test fun `public summary deltas are separate from answer and encrypted reasoning`() {
+        val previews = mutableListOf<String>()
+        val text = mutableListOf<String>()
+        val reasoning = Json.parseToJsonElement("""{"id":"rs_1","type":"reasoning","summary":[
+            {"type":"summary_text","text":"先核对账本"},{"type":"summary_text","text":"再比较预算"}
+        ],"encrypted_content":"never-show-private-reasoning"}""").jsonObject
+        val sse = summaryEvent("response.reasoning_summary_part.added", 0, partText = "") +
+            summaryEvent("response.reasoning_summary_text.delta", 0, delta = "先核对") +
+            summaryEvent("response.reasoning_summary_text.delta", 0, delta = "账本") +
+            summaryEvent("response.reasoning_summary_text.done", 0, text = "先核对账本") +
+            summaryEvent("response.reasoning_summary_part.done", 0, partText = "先核对账本") +
+            summaryEvent("response.reasoning_summary_part.added", 1, partText = "") +
+            summaryEvent("response.reasoning_summary_text.done", 1, text = "再比较预算") +
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"never-show-raw-chain\"}\n\n" +
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"结论\"}\n\n" +
+            stream(JsonArray(listOf(reasoning) + textOutput("最终结论")))
+        val result = ResponsesCodec.readStream(Buffer().writeUtf8(sse), emptySet(),
+            onReasoningDelta = { previews.add(it) }, onTextDelta = { text.add(it) })
+        assertEquals("先核对账本\n\n再比较预算", previews.joinToString(""))
+        assertEquals("先核对账本\n\n再比较预算", result.reasoningSummary)
+        assertEquals(listOf("结论"), text)
+        assertEquals("最终结论", result.text)
+        assertTrue(result.items.toString().contains("never-show-private-reasoning"))
+        assertFalse((previews + text + result.reasoningSummary).joinToString().contains("never-show"))
+    }
+
+    @Test fun `completed summary events survive omitted summaries but provisional ones do not`() {
+        val completed = summaryEvent("response.reasoning_summary_text.delta", 0, delta = "核对完成") +
+            summaryEvent("response.reasoning_summary_text.done", 0, text = "核对完成")
+        assertEquals("核对完成", parse(completed + stream(textOutput("答案"))).reasoningSummary)
+        val provisional = summaryEvent("response.reasoning_summary_text.delta", 0, delta = "尚未完成")
+        assertEquals("", parse(provisional + stream(textOutput("答案"))).reasoningSummary)
+        val invalid = summaryEvent("response.reasoning_summary_text.delta", 0, delta = "初稿") +
+            summaryEvent("response.reasoning_summary_text.done", 0, text = "另一份内容")
+        assertThrows(UserFacingLlmException::class.java) { parse(invalid + stream(textOutput("答案"))) }
+    }
+
+    @Test fun `preview callbacks are incremental while completed output stays authoritative`() {
+        val preview = mutableListOf<String>()
+        val sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"部分\"}\n\n" +
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"答案☕\"}\n\n" +
+            stream(textOutput("已核对的完整答案"))
+        val result = ResponsesCodec.readStream(Buffer().writeUtf8(sse), emptySet(), "req_preview") { preview.add(it) }
+        assertEquals(listOf("部分", "答案☕"), preview)
+        assertEquals("已核对的完整答案", result.text)
+        assertThrows(UserFacingLlmException::class.java) {
+            ResponsesCodec.readStream(Buffer().writeUtf8("data: {\"type\":\"response.output_text.delta\",\"delta\":\"未完成\"}\n\n"), emptySet())
+        }
+    }
+
     @Test fun `requests use stateless Responses fields and developer messages`() {
         val request = ResponsesCodec.request("account-model", listOf(Message("system", "记账助手"), Message("user", "午饭 20 元")), jsonMode = true)
         assertFalse(request.getValue("store").jsonPrimitive.boolean)
@@ -196,6 +261,26 @@ class ResponsesCodecTest {
         assertThrows(UserFacingLlmException::class.java) { ChatGptModelRepository.parseModels("{\"data\":[]}") }
     }
 
+    @Test fun `account catalog capabilities preserve unknown explicit none and provider metadata`() {
+        val models = ChatGptModelRepository.parseModels("""{"models":[
+            {"slug":"selected","display_name":"自选模型","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"ultra"},{"effort":"medium"}],"default_reasoning_level":"low","supports_reasoning_summaries":true},
+            {"slug":"none","display_name":"无推理","visibility":"list","supported_reasoning_efforts":[],"supports_reasoning_summaries":false},
+            {"slug":"unknown","display_name":"未知","visibility":"list","supports_reasoning_summaries":"false"},
+            {"slug":"efforts","display_name":"另一目录格式","visibility":"list","supported_reasoning_efforts":["none",{"effort":"high"}],"default_reasoning_effort":"high"},
+            {"slug":"malformed","display_name":"无效元数据","visibility":"list","supported_reasoning_levels":[42,{}]}
+        ]}""")
+        assertEquals(listOf("low", "medium", "ultra"), models[0].reasoningEfforts)
+        assertEquals("low", models[0].defaultReasoningEffort)
+        assertEquals(true, models[0].supportsReasoningSummaries)
+        assertEquals(emptyList<String>(), models[1].reasoningEfforts)
+        assertEquals(false, models[1].supportsReasoningSummaries)
+        assertNull(models[2].reasoningEfforts)
+        assertNull(models[2].supportsReasoningSummaries)
+        assertEquals(listOf("none", "high"), models[3].reasoningEfforts)
+        assertEquals("high", models[3].defaultReasoningEffort)
+        assertNull(models[4].reasoningEfforts)
+    }
+
     @Test fun `errors retain safe diagnostic identifiers without server messages or credentials`() {
         val error = OpenAiErrors.http(429, """{"error":{"code":"subscription_sharing_usage_limit_exceeded","param":"model","message":"Bearer secret-token"}}""", "req_123")
         assertTrue(error.message!!.contains("额度"))
@@ -213,6 +298,14 @@ class ResponsesCodecTest {
     private fun itemEvent(type: String, index: Int, item: JsonObject) = "data: " + buildJsonObject {
         put("type", type); put("output_index", index); put("item", item)
     } + "\n\n"
+
+    private fun summaryEvent(type: String, index: Int, delta: String? = null, text: String? = null, partText: String? = null) =
+        "data: " + buildJsonObject {
+            put("type", type); put("item_id", "rs_1"); put("output_index", 0); put("summary_index", index)
+            delta?.let { put("delta", it) }
+            text?.let { put("text", it) }
+            partText?.let { put("part", buildJsonObject { put("type", "summary_text"); put("text", it) }) }
+        } + "\n\n"
 
     companion object {
         val tool = ToolDefinition(function = FunctionDef("query_transactions", "查询交易", buildJsonObject { put("type", "object") }))

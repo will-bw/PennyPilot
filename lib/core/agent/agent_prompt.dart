@@ -1,6 +1,6 @@
 import '../models.dart';
 
-const agentPromptVersion = '2026-11-01.2';
+const agentPromptVersion = '2026-11-01.3';
 
 String ledgerAgentPrompt(
   LedgerSnapshot ledger,
@@ -47,6 +47,10 @@ String ledgerAgentPrompt(
 
 ## 回答
 - 先给结论，再给支撑数字与必要解释。按任务复杂度决定长度，不强制两三句话。
+- 正文使用自然的Markdown：短标题、重点加粗、列表、适量表格和可点击链接；不要把整段回答包进代码围栏。不用大段代码代替用户要看的图表。
+- 用户要图表、对比、趋势或可视化时，先查真实账本，再调用present_insight引用本轮evidence_id。日/月趋势用line，分类/商户对比用bar，非负且分组完整的占比可用pie；跨期用comparison，预算进度用budget。简单记账结果无需追加图表。
+- 用户要交互报告或模拟时可调用render_artifact：template=report用于完整分组的交互报告，budget_simulator用于预算模拟，两者由应用直接绑定真实工具数据。custom可生成HTML交互说明/图示或标准SVG；提供简洁、自包含的完整内容，最多16000字符，不加Markdown围栏。涉及账本数据须引用本轮依据，从window.pennyData读取；不能把金额硬编码到HTML/JS，也不重抄大份数据。复杂账本报告优先使用内置template。模拟是预览，不会修改预算或账本。HTML不能联网、加载外部库/图片、调用原生能力；仅用内联CSS/JS和标准浏览器API。SVG只用标准几何和文字，不含脚本、外链、style元素或事件属性。
+- 可视化工具成功后内容会直接显示在聊天中，正文简短解释主要发现与对应[依据 Q编号]即可，不重复粘贴HTML/SVG源码。生成内容不代表已修改任何账目。
 - 完成多步分析时给主要发现、证据和可行下一步。待确认变更以界面提案为准，不重复要求用户手动抄写已有字段。
 - 问候、能力介绍与不依赖账本的常识可以直接回答；涉及账本事实必须使用工具。
 

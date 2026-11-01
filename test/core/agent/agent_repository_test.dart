@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pennypilot/core/agent/agent_store.dart';
 import 'package:pennypilot/core/ai/shared_ai_service.dart';
 import 'package:pennypilot/core/cross_platform_repository.dart';
+import 'package:pennypilot/core/models.dart';
 import 'package:pennypilot/core/platform/mobile_platform_services.dart';
 
 import '../../ui/test_ledger_repository.dart';
@@ -33,7 +35,16 @@ class _NativeStore extends TestLedgerRepository {
     calls.add((method: method, arguments: args));
     expect(args['expectedAccountId'], 'native-account');
     expect(args['expectedModel'], 'test-model');
-    expect(jsonDecode(args['toolsJson'] as String), hasLength(16));
+    final offered = jsonDecode(args['toolsJson'] as String) as List;
+    expect(
+      offered.map((tool) => tool['function']['name']),
+      containsAll([
+        'get_budget',
+        'propose_transaction',
+        'present_insight',
+        'render_artifact',
+      ]),
+    );
     if (++turns == 1) {
       return {
         'messageJson': jsonEncode({
@@ -111,8 +122,152 @@ class _RecordingNativeStore extends _NativeStore {
   }
 }
 
+class _StreamingNativeStore extends _NativeStore {
+  final started = Completer<void>();
+  final finish = Completer<void>();
+  @override
+  Future<Object?> invoke(String method, Map<String, dynamic> args) async {
+    if (method != 'agentModelTurn') return super.invoke(method, args);
+    updates.add(
+      LedgerEvent('agentModelText', 0, {
+        'requestId': args['requestId'],
+        'delta': '你好',
+      }),
+    );
+    started.complete();
+    await finish.future;
+    return {
+      'messageJson': jsonEncode({'role': 'assistant', 'content': '你好'}),
+    };
+  }
+}
+
+class _ThinkingNativeStore extends _NativeStore {
+  _ThinkingNativeStore() {
+    (data['settings'] as Map).addAll({
+      'chatGptModel': 'catalog-model',
+      'chatGptReasoningEffort': 'max',
+    });
+  }
+  final started = Completer<void>(), finish = Completer<void>();
+  @override
+  Future<Object?> invoke(String method, Map<String, dynamic> args) async {
+    if (method == 'listModels') {
+      return [
+        {
+          'slug': 'catalog-model',
+          'displayName': 'Catalog model',
+          'reasoningEfforts': ['low', 'max'],
+          'defaultReasoningEffort': 'low',
+        },
+      ];
+    }
+    if (method != 'agentModelTurn') return super.invoke(method, args);
+    expect(args['reasoningEffort'], 'max');
+    expect(args['requestReasoningSummary'], true);
+    updates.add(
+      LedgerEvent('agentModelReasoning', 0, {
+        'requestId': 'unrelated-request',
+        'delta': '忽略过期事件',
+      }),
+    );
+    updates.add(
+      LedgerEvent('agentModelReasoning', 0, {
+        'requestId': args['requestId'],
+        'delta': '公开摘要',
+      }),
+    );
+    started.complete();
+    await finish.future;
+    return {
+      'messageJson': jsonEncode({
+        'role': 'assistant',
+        'content': '你好',
+        'reasoning_summary': '公开摘要',
+        'responsesItems': [
+          {'type': 'reasoning', 'encrypted_content': 'PRIVATE-OPAQUE'},
+        ],
+      }),
+    };
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'native reasoning uses account catalog and streams independently before completion',
+    () async {
+      final store = _ThinkingNativeStore();
+      final credentials = MemoryCredentials();
+      final repo = CrossPlatformLedgerRepository(
+        store: store,
+        agentStore: MemoryAgentStore(),
+        credentials: credentials,
+        ai: SharedAiService(credentials: credentials),
+        platformServices: _Platform(),
+        android: true,
+      );
+      addTearDown(repo.close);
+      addTearDown(store.updates.close);
+      final events = <LedgerEvent>[];
+      final subscription = repo.events.listen(events.add);
+      addTearDown(subscription.cancel);
+      await repo.invoke('listModels', {});
+      final task = repo.invoke('ask', {'revision': 0, 'question': '你好'});
+      await store.started.future;
+      await Future<void>.delayed(Duration.zero);
+      final reasoningEvents = events.where(
+        (e) => e.type == 'agent' && e.data['phase'] == 'reasoning_delta',
+      );
+      expect(reasoningEvents.single.data['part']['text'], '公开摘要');
+      expect(events.any((e) => e.type == 'agentModelReasoning'), false);
+      expect(events.any((e) => e.data['phase'] == 'text_delta'), false);
+      store.finish.complete();
+      final result = await task as Map;
+      final messages = (result['session'] as Map)['messages'] as List;
+      final part = (messages.last['parts'] as List).single;
+      expect(part['kind'], 'summary');
+      expect(part['text'], '公开摘要');
+      expect(jsonEncode(part), isNot(contains('PRIVATE-OPAQUE')));
+    },
+  );
+  test(
+    'native EventChannel text reaches the shared run before MethodChannel completion',
+    () async {
+      final store = _StreamingNativeStore();
+      final credentials = MemoryCredentials();
+      final repo = CrossPlatformLedgerRepository(
+        store: store,
+        agentStore: MemoryAgentStore(),
+        credentials: credentials,
+        ai: SharedAiService(credentials: credentials),
+        platformServices: _Platform(),
+        android: true,
+      );
+      addTearDown(repo.close);
+      addTearDown(store.updates.close);
+      final events = <LedgerEvent>[];
+      final subscription = repo.events.listen(events.add);
+      addTearDown(subscription.cancel);
+      final task = repo.invoke('ask', {'revision': 0, 'question': '你好'});
+      await store.started.future;
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        events
+            .where((event) => event.type == 'agent')
+            .any(
+              (event) =>
+                  event.data['phase'] == 'text_delta' &&
+                  event.data['delta'] == '你好',
+            ),
+        true,
+      );
+      expect(events.any((event) => event.type == 'agentModelText'), false);
+      store.finish.complete();
+      final result = await task as Map;
+      expect(result['answer'], '你好');
+    },
+  );
   test(
     'Android ChatGPT uses shared loop and native per-turn transport instead of legacy ask',
     () async {

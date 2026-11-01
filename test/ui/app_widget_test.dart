@@ -117,7 +117,7 @@ void main() {
 `./tool/flutterw test test/ui/app_widget_test.dart --dart-define=PENNYPILOT_SCREENSHOTS=true`
 
 矩阵文件名包含主题、逻辑宽度和文字倍率；图片以 2 倍像素输出。
-覆盖账本、搜索展开、统计、问账、设置、手动录入和一句话录入。
+覆盖账本、搜索展开、统计、AI 助手、设置、手动录入和助手草稿。
 ''');
     await loadScreenshotFonts();
   });
@@ -131,8 +131,6 @@ void main() {
     await pumpApp(tester, repository);
     expect(find.byIcon(Icons.redeem_outlined), findsWidgets);
     await tester.tap(find.byType(FloatingActionButton));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('手动'));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.redeem_outlined), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -231,8 +229,8 @@ void main() {
       expect(find.text('3 笔已确认账单'), findsOneWidget);
       expect(find.text('¥40.00'), findsOneWidget);
       await saveScreenshot(tester, 'reports-light');
-      await chooseTab(tester, '问账');
-      expect(find.text('问问账本'), findsOneWidget);
+      await chooseTab(tester, 'AI 助手');
+      expect(find.widgetWithText(AppBar, 'AI 助手'), findsOneWidget);
       await saveScreenshot(tester, 'chat-light');
       await chooseTab(tester, '设置');
       expect(find.text('每月预算'), findsOneWidget);
@@ -248,36 +246,36 @@ void main() {
     (tester) async {
       final repository = TestLedgerRepository(populated: true);
       await pumpApp(tester, repository);
-      await chooseTab(tester, '问账');
-      final input = find.byWidgetPredicate(
-        (widget) =>
-            widget is TextField &&
-            widget.decoration?.hintText == '查询、分析，或告诉我想完成的记账任务',
-      );
+      await chooseTab(tester, 'AI 助手');
+      final input = find.byKey(const ValueKey('assistant-input'));
       await tester.enterText(input, '本月已确认支出是多少？');
       await tester.pump();
-      await tester.tap(find.byTooltip('发送问题'));
+      await tester.tap(find.byTooltip('发送消息'));
       await tester.pumpAndSettle();
       expect(find.text('本月已确认支出是多少？'), findsOneWidget);
-      expect(find.text('测试账本已确认支出 40 元。'), findsOneWidget);
+      expect(find.text('测试账本已确认支出 40 元。', findRichText: true), findsOneWidget);
       final call = repository.calls.singleWhere((call) => call.method == 'ask');
       expect(call.arguments['question'], '本月已确认支出是多少？');
       expect(call.arguments['revision'], 0);
       await saveScreenshot(tester, 'chat-response-light');
 
       await chooseTab(tester, '账本');
-      await chooseTab(tester, '问账');
-      expect(find.text('测试账本已确认支出 40 元。'), findsOneWidget);
-      await tester.tap(find.byTooltip('清空本次对话'));
+      await chooseTab(tester, 'AI 助手');
+      expect(find.text('测试账本已确认支出 40 元。', findRichText: true), findsOneWidget);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('清空本次对话'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
-      expect(find.text('测试账本已确认支出 40 元。'), findsOneWidget);
-      await tester.tap(find.byTooltip('清空本次对话'));
+      expect(find.text('测试账本已确认支出 40 元。', findRichText: true), findsOneWidget);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('清空本次对话'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(FilledButton, '清空'));
       await tester.pumpAndSettle();
-      expect(find.text('测试账本已确认支出 40 元。'), findsNothing);
+      expect(find.text('测试账本已确认支出 40 元。', findRichText: true), findsNothing);
       expect(repository.data['transactions'], hasLength(5));
       expect(tester.takeException(), isNull);
     },
@@ -291,8 +289,6 @@ void main() {
       await tester.tap(find.widgetWithText(FloatingActionButton, '记一笔'));
       await tester.pumpAndSettle();
       expect(find.byType(EntryScreen), findsOneWidget);
-      await tester.tap(find.text('手动'));
-      await tester.pumpAndSettle();
       await saveScreenshot(tester, 'entry-light');
       await tester.enterText(field('金额'), '0');
       await tester.scrollUntilVisible(
@@ -356,8 +352,6 @@ void main() {
       final repository = TestLedgerRepository();
       await pumpApp(tester, repository);
       await tester.tap(find.widgetWithText(FloatingActionButton, '记一笔'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('手动'));
       await tester.pumpAndSettle();
       await tester.enterText(field('金额'), '28.50');
       repository.data = {...repository.data, 'revision': 1};
@@ -450,8 +444,8 @@ void main() {
       expect(find.byType(EntryScreen), findsOneWidget);
       await tester.tap(find.byType(BackButton).first);
       await tester.pumpAndSettle();
-      await chooseTab(tester, '问账');
-      expect(find.text('问问账本'), findsOneWidget);
+      await chooseTab(tester, 'AI 助手');
+      expect(find.widgetWithText(AppBar, 'AI 助手'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );
@@ -464,54 +458,67 @@ void main() {
   ]) {
     final suffix =
         '${scenario.theme}-${scenario.width.toInt()}-text-${scenario.scale}';
-    testWidgets('$suffix keeps all destinations and both entry modes usable', (
-      tester,
-    ) async {
-      await pumpApp(
-        tester,
-        TestLedgerRepository(populated: true, theme: scenario.theme),
-        size: Size(scenario.width, 844),
-        textScale: scenario.scale,
-      );
-      expect(
-        Theme.of(tester.element(find.byType(LedgerScreen))).brightness,
-        scenario.theme == 'dark' ? Brightness.dark : Brightness.light,
-      );
-      expect(tester.takeException(), isNull);
-      await saveScreenshot(tester, 'ledger-$suffix');
-      await tester.tap(find.byTooltip('搜索账单'));
-      await tester.pumpAndSettle();
-      expect(ledgerSearch(), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await saveScreenshot(tester, 'ledger-search-$suffix');
-      await tester.tap(find.byTooltip('收起搜索'));
-      await tester.pumpAndSettle();
-      await chooseTab(tester, '统计');
-      expect(find.text('收支统计'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await saveScreenshot(tester, 'reports-$suffix');
-      await chooseTab(tester, '问账');
-      expect(find.byTooltip('发送问题'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await saveScreenshot(tester, 'chat-$suffix');
-      await chooseTab(tester, '设置');
-      expect(find.text('每月预算'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await saveScreenshot(tester, 'settings-$suffix');
-      await chooseTab(tester, '账本');
-      await tester.tap(find.widgetWithText(FloatingActionButton, '记一笔'));
-      await tester.pumpAndSettle();
-      expect(find.byType(EntryScreen), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await tester.tap(find.text('手动'));
-      await tester.pumpAndSettle();
-      await saveScreenshot(tester, 'entry-$suffix');
-      await tester.tap(find.text('一句话'));
-      await tester.pumpAndSettle();
-      expect(find.text('自动记账'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await saveScreenshot(tester, 'entry-ai-$suffix');
-    });
+    testWidgets(
+      '$suffix keeps all destinations, manual entry and assistant input usable',
+      (tester) async {
+        await pumpApp(
+          tester,
+          TestLedgerRepository(populated: true, theme: scenario.theme),
+          size: Size(scenario.width, 844),
+          textScale: scenario.scale,
+        );
+        expect(
+          Theme.of(tester.element(find.byType(LedgerScreen))).brightness,
+          scenario.theme == 'dark' ? Brightness.dark : Brightness.light,
+        );
+        expect(tester.takeException(), isNull);
+        await saveScreenshot(tester, 'ledger-$suffix');
+        await tester.tap(find.byTooltip('搜索账单'));
+        await tester.pumpAndSettle();
+        expect(ledgerSearch(), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await saveScreenshot(tester, 'ledger-search-$suffix');
+        await tester.tap(find.byTooltip('收起搜索'));
+        await tester.pumpAndSettle();
+        await chooseTab(tester, '统计');
+        expect(find.text('收支统计'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await saveScreenshot(tester, 'reports-$suffix');
+        await chooseTab(tester, 'AI 助手');
+        expect(find.byTooltip('发送消息'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await saveScreenshot(tester, 'chat-$suffix');
+        await chooseTab(tester, '设置');
+        expect(find.text('每月预算'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await saveScreenshot(tester, 'settings-$suffix');
+        await chooseTab(tester, '账本');
+        await tester.tap(find.widgetWithText(FloatingActionButton, '记一笔'));
+        await tester.pumpAndSettle();
+        expect(find.byType(EntryScreen), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await saveScreenshot(tester, 'entry-$suffix');
+        expect(field('金额'), findsOneWidget);
+        expect(find.text('一句话'), findsNothing);
+        await tester.tap(find.byType(BackButton).last);
+        await tester.pumpAndSettle();
+        await chooseTab(tester, 'AI 助手');
+        await tester.enterText(
+          find.byKey(const ValueKey('assistant-input')),
+          '午饭 28 元，地铁 4 元',
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<TextField>(find.byKey(const ValueKey('assistant-input')))
+              .controller!
+              .text,
+          '午饭 28 元，地铁 4 元',
+        );
+        expect(tester.takeException(), isNull);
+        await saveScreenshot(tester, 'assistant-draft-$suffix');
+      },
+    );
   }
 
   testWidgets(
@@ -527,8 +534,8 @@ void main() {
       expect(find.byType(NavigationBar), findsNothing);
       await chooseTab(tester, '统计');
       expect(find.text('收支统计'), findsOneWidget);
-      await chooseTab(tester, '问账');
-      expect(find.text('问问账本'), findsOneWidget);
+      await chooseTab(tester, 'AI 助手');
+      expect(find.widgetWithText(AppBar, 'AI 助手'), findsOneWidget);
       await chooseTab(tester, '设置');
       expect(find.text('每月预算'), findsOneWidget);
       expect(tester.takeException(), isNull);

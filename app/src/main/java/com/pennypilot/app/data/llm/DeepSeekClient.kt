@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 
 class DeepSeekClient(
     private val apiKey: String,
-    private val model: String = "deepseek-chat",
+    private val model: String = "deepseek-flash",
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)

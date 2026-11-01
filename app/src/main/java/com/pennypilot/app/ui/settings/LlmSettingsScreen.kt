@@ -96,7 +96,7 @@ fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
                         Text("DeepSeek 配置", style = MaterialTheme.typography.titleMedium)
                         SecretField(draft.deepSeekKey, { changed(draft.copy(deepSeekKey = it)) }, providerEnabled, "DeepSeek API Key")
                         OutlinedTextField(draft.deepSeekModel, { changed(draft.copy(deepSeekModel = it)) },
-                            label = { Text("模型名称") }, supportingText = { Text("例如 deepseek-chat") },
+                            label = { Text("模型名称") }, supportingText = { Text("例如 deepseek-flash") },
                             singleLine = true, enabled = providerEnabled, modifier = Modifier.fillMaxWidth())
                     }
                     "qwen" -> {
@@ -106,7 +106,7 @@ fun LlmSettingsScreen(onBack: () -> Unit, viewModel: LlmSettingsViewModel) {
                             label = { Text("服务地址（Base URL）") }, supportingText = { Text("填写供应商提供的 HTTPS 兼容接口地址，以 /v1 结尾。") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), enabled = providerEnabled, modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(draft.qwenModel, { changed(draft.copy(qwenModel = it)) },
-                            label = { Text("模型名称") }, supportingText = { Text("例如 qwen-plus，需与服务地址对应。") },
+                            label = { Text("模型名称") }, supportingText = { Text("例如 qwen3.8-flash，需与服务地址对应。") },
                             singleLine = true, enabled = providerEnabled, modifier = Modifier.fillMaxWidth())
                     }
                     else -> ManagementMessage("尚未选择供应商。选择后可配置 AI 记账与查询。")

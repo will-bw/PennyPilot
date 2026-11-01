@@ -117,4 +117,11 @@ class DynamicLlmClient(
         messages: List<Message>,
         tools: List<ToolDefinition>
     ): ChatResponseWithTools = resolve().chatWithTools(messages, tools)
+
+    override suspend fun chatWithReasoning(
+        messages: List<Message>, tools: List<ToolDefinition>,
+        onReasoningDelta: (String) -> Unit, onTextDelta: (String) -> Unit,
+        reasoningEffort: String?, requestReasoningSummary: Boolean
+    ): ChatResponseWithTools = resolve().chatWithReasoning(messages, tools, onReasoningDelta, onTextDelta,
+        reasoningEffort, requestReasoningSummary)
 }

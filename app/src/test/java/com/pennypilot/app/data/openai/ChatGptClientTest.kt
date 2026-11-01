@@ -27,6 +27,38 @@ import org.junit.Test
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ChatGptClientTest {
+    @Test fun `enhanced agent forwards explicit reasoning and returns only public summaries`() = runTest {
+        val reasoning = Json.parseToJsonElement("""{"id":"rs_1","type":"reasoning","summary":[
+            {"type":"summary_text","text":"先核对账本"}
+        ],"encrypted_content":"opaque-private-state"}""").jsonObject
+        val sse = "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"先核对账本\"}\n\n" +
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"回答\"}\n\n" +
+            ResponsesCodecTest.stream(JsonArray(listOf(reasoning) + ResponsesCodecTest.textOutput("已核对")))
+        val factory = FakeCalls { call, callback -> callback.onResponse(call, response(call, sse)) }
+        val client = ChatGptClient(FakeAccess(), { "chosen-model" }, OpenAiHttp(factory))
+        val reasoningDeltas = mutableListOf<String>()
+        val textDeltas = mutableListOf<String>()
+        val result = client.chatWithReasoning(listOf(Message("user", "支出分析")), emptyList(),
+            onReasoningDelta = { reasoningDeltas.add(it) }, onTextDelta = { textDeltas.add(it) },
+            reasoningEffort = "high", requestReasoningSummary = true).choices.single().message!!
+        val body = Buffer().also { factory.calls.single().request().body!!.writeTo(it) }.readUtf8()
+        val request = Json.parseToJsonElement(body).jsonObject
+        assertEquals("chosen-model", request.string("model"))
+        assertEquals("high", request.getValue("reasoning").jsonObject.string("effort"))
+        assertEquals("auto", request.getValue("reasoning").jsonObject.string("summary"))
+        assertEquals(listOf("先核对账本"), reasoningDeltas)
+        assertEquals(listOf("回答"), textDeltas)
+        assertEquals("先核对账本", result.reasoningSummary)
+        assertEquals("已核对", result.content)
+        assertTrue(result.responsesItems.toString().contains("opaque-private-state"))
+        assertFalse((reasoningDeltas + textDeltas + result.reasoningSummary.orEmpty()).joinToString().contains("opaque"))
+        client.chatWithReasoning(listOf(Message("user", "直接回答")), emptyList(), {}, {}, "none", false)
+        val offBody = Buffer().also { factory.calls.last().request().body!!.writeTo(it) }.readUtf8()
+        val off = Json.parseToJsonElement(offBody).jsonObject.getValue("reasoning").jsonObject
+        assertEquals("none", off.string("effort"))
+        assertFalse(off.containsKey("summary"))
+    }
+
     @Test fun `inference sends bearer to public endpoint once with one-shot body`() = runTest {
         val factory = FakeCalls { call, callback -> callback.onResponse(call, response(call, answer("完成"))) }
         val client = ChatGptClient(FakeAccess(), { "selected-model" }, OpenAiHttp(factory))

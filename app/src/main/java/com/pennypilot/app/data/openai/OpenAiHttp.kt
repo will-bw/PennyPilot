@@ -15,9 +15,10 @@ import kotlin.coroutines.resumeWithException
 
 /** A request is issued once. Inference must never be automatically replayed after disconnect. */
 internal class OpenAiHttp(private val calls: Call.Factory = client) {
-    suspend fun <T> request(request: Request, decode: (Response) -> T): T =
+    suspend fun <T> request(request: Request, timeoutSeconds: Long? = null, decode: (Response) -> T): T =
         suspendCancellableCoroutine { continuation ->
             val call = calls.newCall(request)
+            timeoutSeconds?.let { call.timeout().timeout(it, TimeUnit.SECONDS) }
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {

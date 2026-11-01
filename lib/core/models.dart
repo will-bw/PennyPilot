@@ -462,12 +462,41 @@ class ChatMessage {
   const ChatMessage({
     required this.role,
     required this.text,
+    this.id = '',
+    this.runId = '',
+    this.status = 'complete',
+    this.isStreaming = false,
+    this.createdAt,
+    this.parts = const [],
     this.isError = false,
     this.chartData,
   });
   final String role, text;
-  final bool isError;
+  final String id, runId, status;
+  final bool isError, isStreaming;
+  final int? createdAt;
+  final List<Map<String, dynamic>> parts;
   final InsightChart? chartData;
+  ChatMessage copyWith({
+    String? id,
+    String? runId,
+    String? text,
+    String? status,
+    bool? isStreaming,
+    bool? isError,
+    List<Map<String, dynamic>>? parts,
+  }) => ChatMessage(
+    id: id ?? this.id,
+    runId: runId ?? this.runId,
+    role: role,
+    text: text ?? this.text,
+    status: status ?? this.status,
+    isStreaming: isStreaming ?? this.isStreaming,
+    isError: isError ?? this.isError,
+    createdAt: createdAt,
+    parts: parts ?? this.parts,
+    chartData: chartData,
+  );
   Map<String, dynamic> toHistory() => {
     'role': role == 'user' ? 'user' : 'assistant',
     'content': text,
@@ -476,10 +505,22 @@ class ChatMessage {
 
 @immutable
 class AiModel {
-  const AiModel({required this.slug, required this.displayName});
+  const AiModel({
+    required this.slug,
+    required this.displayName,
+    this.reasoningEfforts,
+    this.defaultReasoningEffort,
+    this.supportsReasoningSummaries,
+  });
   final String slug, displayName;
+  final List<String>? reasoningEfforts;
+  final String? defaultReasoningEffort;
+  final bool? supportsReasoningSummaries;
   factory AiModel.fromMap(Map<String, dynamic> map) => AiModel(
     slug: map['slug'] as String,
     displayName: map['displayName'] as String? ?? map['slug'] as String,
+    reasoningEfforts: (map['reasoningEfforts'] as List?)?.cast<String>(),
+    defaultReasoningEffort: map['defaultReasoningEffort'] as String?,
+    supportsReasoningSummaries: map['supportsReasoningSummaries'] as bool?,
   );
 }

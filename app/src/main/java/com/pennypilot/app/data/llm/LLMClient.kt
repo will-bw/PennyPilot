@@ -27,6 +27,18 @@ interface LLMClient {
      * 返回原始响应，由调用方解析 tool_calls。
      */
     suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools
+
+    /** Preview text is provisional; tool calls still come only from the validated result. */
+    suspend fun chatWithToolsStreaming(
+        messages: List<Message>, tools: List<ToolDefinition>, onTextDelta: (String) -> Unit
+    ): ChatResponseWithTools = chatWithTools(messages, tools)
+
+    /** Public reasoning summaries are a separate channel, never response text. */
+    suspend fun chatWithReasoning(
+        messages: List<Message>, tools: List<ToolDefinition>,
+        onReasoningDelta: (String) -> Unit, onTextDelta: (String) -> Unit,
+        reasoningEffort: String? = null, requestReasoningSummary: Boolean = true
+    ): ChatResponseWithTools = chatWithToolsStreaming(messages, tools, onTextDelta)
 }
 
 open class LLMException(message: String, cause: Throwable? = null) : Exception(message, cause)

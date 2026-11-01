@@ -101,6 +101,12 @@ void main() {
       );
       expect(snapshot.rules, hasLength(5));
       expect(snapshot.settings['activeProvider'], 'deepseek');
+      expect(snapshot.settings['deepSeekModel'], 'deepseek-flash');
+      expect(snapshot.settings['qwenModel'], 'qwen3.8-flash');
+      expect(
+        snapshot.settings['qwenBaseUrl'],
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
       expect(snapshot.settings['hasDeepSeekKey'], false);
       expect(snapshot.auth['accounts'], isEmpty);
       expect(snapshot.capabilities['platform'], 'ios');
@@ -136,6 +142,13 @@ void main() {
         'themeMode': 'dark',
         'activeProvider': 'qwen',
         'qwenModel': 'qwen-plus',
+        'qwenBaseUrl': 'https://example.com/custom/v1',
+        'chatGptThinkingEnabled': false,
+        'chatGptReasoningEffort': 'max',
+        'deepSeekThinkingEnabled': false,
+        'deepSeekReasoningEffort': 'low',
+        'qwenThinkingEnabled': true,
+        'qwenReasoningEffort': 'medium',
       });
       final backup = await export();
       await store.close();
@@ -149,6 +162,14 @@ void main() {
       expect(snapshot.settings['budgetCents'], 120000);
       expect(snapshot.settings['onboardingDone'], true);
       expect(snapshot.settings['activeProvider'], 'qwen');
+      expect(snapshot.settings['qwenModel'], 'qwen-plus');
+      expect(snapshot.settings['qwenBaseUrl'], 'https://example.com/custom/v1');
+      expect(snapshot.settings['chatGptThinkingEnabled'], false);
+      expect(snapshot.settings['chatGptReasoningEffort'], 'max');
+      expect(snapshot.settings['deepSeekThinkingEnabled'], false);
+      expect(snapshot.settings['deepSeekReasoningEffort'], 'low');
+      expect(snapshot.settings['qwenThinkingEnabled'], true);
+      expect(snapshot.settings['qwenReasoningEffort'], 'medium');
       expect(snapshot.revision, 0);
     },
   );
@@ -833,6 +854,11 @@ void main() {
         {'onboardingDone': 'true'},
         {'budgetCents': 12.5},
         {'themeMode': 'anything'},
+        {'chatGptThinkingEnabled': 'false'},
+        {'chatGptReasoningEffort': 'ultra'},
+        {'chatGptReasoningEffort': 'none'},
+        {'deepSeekReasoningEffort': 'medium'},
+        {'qwenReasoningEffort': 'high'},
         {'notificationCaptureEnabled': true},
         {'qwenBaseUrl': 'http://api.example.com'},
         {'qwenBaseUrl': 'https://api.example.com?key=secret'},

@@ -4,8 +4,13 @@ import '../../core/ledger_controller.dart';
 import '../../ui/common.dart';
 
 class RecognitionSaveNotice extends StatelessWidget {
-  const RecognitionSaveNotice({super.key, required this.controller});
+  const RecognitionSaveNotice({
+    super.key,
+    required this.controller,
+    this.titlePrefix = '已自动记下',
+  });
   final LedgerController controller;
+  final String titlePrefix;
 
   @override
   Widget build(BuildContext context) {
@@ -15,7 +20,7 @@ class RecognitionSaveNotice extends StatelessWidget {
       child: ListTile(
         contentPadding: EdgeInsets.zero,
         leading: const Icon(Icons.check_circle_outline),
-        title: Text('已自动记下 ${controller.lastRecognitionSave!.count} 笔'),
+        title: Text('$titlePrefix ${controller.lastRecognitionSave!.count} 笔'),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

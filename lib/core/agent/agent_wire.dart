@@ -76,10 +76,17 @@ AgentReply agentReplyFromResponses(
   Set<String>? allowedTools,
 }) {
   final text = StringBuffer();
+  final summary = <String>[];
   final calls = <Map<String, dynamic>>[];
   for (final item in items) {
     switch (item['type']) {
       case 'reasoning':
+        for (final raw in item['summary'] as List? ?? const []) {
+          final part = agentMap(raw);
+          if (part['type'] == 'summary_text' && part['text'] is String) {
+            summary.add(part['text'] as String);
+          }
+        }
         break;
       case 'function_call':
         if (item['status'] != null && item['status'] != 'completed' ||
@@ -120,6 +127,7 @@ AgentReply agentReplyFromResponses(
     message: {
       'role': 'assistant',
       'content': text.toString(),
+      if (summary.isNotEmpty) 'reasoning_summary': summary.join('\n\n'),
       if (calls.isNotEmpty) 'tool_calls': calls,
       'responsesItems': items,
       'responsesAccountId': accountId,

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../models.dart';
+import 'assistant_artifacts.dart';
 import 'agent_models.dart';
 import 'agent_store.dart';
 
@@ -26,9 +27,19 @@ class LedgerAgentTools {
   int _evidence = 0;
   bool hasLedgerEvidence = false;
   final _readTransactions = <int>{};
+  // Kept per run: a previous conversation's Q number is not current evidence.
+  final _observations = <String, Map<String, dynamic>>{};
 
-  static Map<String, dynamic> _s(String description, {List<String>? values}) =>
-      {'type': 'string', 'description': description, 'enum': ?values};
+  static Map<String, dynamic> _s(
+    String description, {
+    List<String>? values,
+    int? maxLength,
+  }) => {
+    'type': 'string',
+    'description': description,
+    'enum': ?values,
+    'maxLength': ?maxLength,
+  };
   static Map<String, dynamic> _i(String description) => {
     'type': 'integer',
     'description': description,
@@ -115,6 +126,38 @@ class LedgerAgentTools {
     _tool('get_budget', '读取当前月度预算设置与指定月份的已确认净支出、余额和剩余天数。', {
       'month': _s('YYYY-MM，默认本月'),
     }),
+    _tool(
+      'present_insight',
+      '在当前聊天中呈现原生可交互账本图表。先查询 aggregate_by/compare_periods/get_budget，再引用本轮 evidence_id；数值由应用直接取工具结果，不填写金额。',
+      {
+        'evidence_id': _s('本轮账本查询返回的 Q 编号'),
+        'title': _s('简短标题，最多80字', maxLength: 80),
+        'chart_type': _s(
+          '图表类型；comparison须引用compare_periods，budget须引用get_budget',
+          values: ['bar', 'line', 'pie', 'comparison', 'budget'],
+        ),
+        'metric': _s('金额口径，默认expense', values: ['expense', 'income']),
+      },
+      ['evidence_id', 'title', 'chart_type'],
+    ),
+    _tool(
+      'render_artifact',
+      '在当前聊天中直接展示HTML交互内容或安全SVG，可全屏。账本报告优先template=report，预算模拟用budget_simulator，均引用本轮evidence_id并由应用生成真实数据。custom支持自定义HTML内联JS/CSS或SVG，内容在禁外网、禁原生桥的沙箱中运行。自定义HTML可从只读window.pennyData读取引用的数据；不得编造账本金额或把模拟说成真实账目。',
+      {
+        'format': _s('展示格式', values: ['html', 'svg']),
+        'title': _s('简短标题，最多80字', maxLength: 80),
+        'template': _s(
+          'report引用aggregate_by；budget_simulator引用get_budget；custom提供完整content',
+          values: ['report', 'budget_simulator', 'custom'],
+        ),
+        'evidence_id': _s('涉及账本事实时引用本轮Q编号'),
+        'content': _s(
+          'custom的完整HTML或SVG，最多16000字符，保持简洁自包含，不用Markdown围栏。账本数据读取window.pennyData，不重抄数据；复杂报告用内置template。HTML仅用内联JS/CSS，不能联网、调用原生或修改账本；SVG只用标准几何和文字，不含脚本/外部资源',
+          maxLength: maxArtifactCharacters,
+        ),
+      },
+      ['format', 'title', 'template'],
+    ),
     _tool(
       'search_memory',
       '搜索长期偏好、目标和用户事实；不是账本金额来源。空关键词返回最近记忆。',
@@ -248,7 +291,8 @@ class LedgerAgentTools {
       if (rule['enum'] is List && !(rule['enum'] as List).contains(value)) {
         throw FormatException('$field 必须为 ${rule['enum']} 中的值');
       }
-      if (value is String && value.length > 2000) {
+      if (value is String &&
+          value.length > (rule['maxLength'] as int? ?? 2000)) {
         throw FormatException('$field 过长');
       }
       if (type == 'object') {
@@ -288,12 +332,18 @@ class LedgerAgentTools {
     final data = await _execute(name, args);
     if (ledgerReads.contains(name)) {
       hasLedgerEvidence = true;
-      return {
+      final result = <String, dynamic>{
         'evidence_id': 'Q${++_evidence}',
         'as_of': now.toIso8601String(),
         'ledger_revision': ledger.revision,
         'data': data,
       };
+      _observations[result['evidence_id'] as String] = {
+        ...result,
+        'sourceTool': name,
+        'query': Map<String, dynamic>.from(args),
+      };
+      return result;
     }
     return data;
   }
@@ -303,6 +353,86 @@ class LedgerAgentTools {
     Map<String, dynamic> a,
   ) async {
     switch (name) {
+      case 'present_insight':
+        final observation = _observation(a);
+        final source = observation['sourceTool'] as String;
+        final chartType = a['chart_type'] as String;
+        final expectedSource = switch (chartType) {
+          'comparison' => 'compare_periods',
+          'budget' => 'get_budget',
+          _ => 'aggregate_by',
+        };
+        if (source != expectedSource) {
+          throw FormatException('此图表须引用 $expectedSource 的本轮依据');
+        }
+        final data = agentMap(observation['data']);
+        final metric = a['metric'] as String? ?? 'expense';
+        if (chartType == 'pie') {
+          if (data['next_offset'] != null ||
+              (observation['query'] as Map)['offset'] != null &&
+                  (observation['query'] as Map)['offset'] != 0) {
+            throw const FormatException(
+              '饼图须使用完整分组，请扩大aggregate_by的limit或改用柱状图',
+            );
+          }
+          if ((data['groups'] as List).any((g) => (g[metric] as int) < 0)) {
+            throw const FormatException('包含负净额，不能用饼图表达，请改用柱状图');
+          }
+        }
+        return {
+          'status': 'presented',
+          'presentation': {
+            ..._presentationBase(a, observation),
+            'type': 'chart',
+            'chartType': chartType,
+            'metric': metric,
+          },
+        };
+      case 'render_artifact':
+        final template = a['template'] as String;
+        final format = a['format'] as String;
+        final observation = a['evidence_id'] == null ? null : _observation(a);
+        final data = observation == null ? null : agentMap(observation['data']);
+        final title = _presentationTitle(a);
+        String content;
+        if (template != 'custom') {
+          if (format != 'html' || observation == null) {
+            throw const FormatException('报告和预算模拟须使用HTML，并引用本轮账本依据');
+          }
+          final expectedSource = template == 'report'
+              ? 'aggregate_by'
+              : 'get_budget';
+          if (observation['sourceTool'] != expectedSource) {
+            throw FormatException('此模板须引用 $expectedSource 的本轮依据');
+          }
+          if (template == 'report' &&
+              (data!['next_offset'] != null ||
+                  (observation['query'] as Map)['offset'] != null &&
+                      (observation['query'] as Map)['offset'] != 0)) {
+            throw const FormatException('报告须使用完整分组，请扩大aggregate_by的limit');
+          }
+          content = template == 'report'
+              ? assistantReportHtml(data!, title)
+              : assistantBudgetHtml(data!, title);
+        } else {
+          final raw = a['content'];
+          if (raw is! String) {
+            throw const FormatException('custom须提供完整content');
+          }
+          content = format == 'svg'
+              ? checkedAssistantSvg(raw)
+              : checkedAssistantHtml(raw);
+        }
+        return {
+          'status': 'presented',
+          'presentation': {
+            ..._presentationBase(a, observation),
+            'type': 'artifact',
+            'format': format,
+            'content': content,
+            'template': template,
+          },
+        };
       case 'ask_user':
         final question = (a['question'] as String).trim();
         if (question.isEmpty || question.length > 1000) {
@@ -682,6 +812,39 @@ class LedgerAgentTools {
     }
     throw const FormatException('unknown_tool');
   }
+
+  Map<String, dynamic> _observation(Map<String, dynamic> arguments) {
+    final observation = _observations[arguments['evidence_id']];
+    if (observation == null) {
+      throw const FormatException('evidence_id须引用本轮已完成的账本查询，不能使用历史编号或编造金额');
+    }
+    return observation;
+  }
+
+  String _presentationTitle(Map<String, dynamic> arguments) {
+    final title = (arguments['title'] as String).trim();
+    if (title.isEmpty || title.length > 80) {
+      throw const FormatException('展示标题须为1～80字');
+    }
+    return title;
+  }
+
+  Map<String, dynamic> _presentationBase(
+    Map<String, dynamic> arguments,
+    Map<String, dynamic>? observation,
+  ) => {
+    'id': agentId(),
+    'title': _presentationTitle(arguments),
+    if (observation != null) ...{
+      'evidenceId': observation['evidence_id'],
+      'asOf': observation['as_of'],
+      'ledgerRevision': observation['ledger_revision'],
+      'sourceTool': observation['sourceTool'],
+      // A detached snapshot makes reopened messages stable after ledger edits.
+      'data': jsonDecode(jsonEncode(observation['data'])),
+      'query': observation['query'],
+    },
+  };
 
   void _requireRead(int id) {
     if (!_readTransactions.contains(id)) {

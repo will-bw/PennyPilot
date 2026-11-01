@@ -7,6 +7,7 @@ import 'package:sqflite/sqflite.dart' as sqlite;
 
 import '../ledger_repository.dart';
 import '../models.dart';
+import '../ai/model_reasoning.dart';
 
 part 'portable_validation.dart';
 part 'portable_presets.dart';

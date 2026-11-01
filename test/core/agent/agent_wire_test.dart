@@ -125,6 +125,32 @@ void main() {
                 'model-reasoning',
               );
             }
+            if (payload['stream'] == true) {
+              return http.Response(
+                'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'index': 0,
+                      'finish_reason': requests == 1 ? 'tool_calls' : 'stop',
+                      'delta': requests == 1 ? {
+                              'reasoning_content': 'model-reasoning',
+                              'tool_calls': [
+                                {
+                                  'index': 0,
+                                  'id': 'one',
+                                  'type': 'function',
+                                  'function': {'name': 'get_budget', 'arguments': '{}'},
+                                },
+                              ],
+                            } : {'content': '结果'},
+                    },
+                  ],
+                  'usage': {'prompt_tokens': 100, 'completion_tokens': 20},
+                })}\n\ndata: [DONE]\n\n',
+                200,
+                headers: {'content-type': 'text/event-stream; charset=utf-8'},
+              );
+            }
             return http.Response(
               jsonEncode({
                 'choices': [
