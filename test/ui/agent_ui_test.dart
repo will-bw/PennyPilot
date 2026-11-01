@@ -94,12 +94,14 @@ void main() {
     double width = 390,
     double scale = 1,
     Brightness brightness = Brightness.light,
+    Map<String, dynamic>? action,
   }) async {
     tester.view.physicalSize = Size(width, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final repo = _AgentRepository();
+    if (action != null) (repo.state['session'] as Map)['actions'] = [action];
     final controller = LedgerController(repository: repo);
     await controller.init();
     addTearDown(controller.dispose);
@@ -183,4 +185,40 @@ void main() {
     expect(find.textContaining('净支出：40.00 元'), findsOneWidget);
     expect(find.textContaining('月预算：2,000.00 元'), findsOneWidget);
   });
+  for (final layout in [
+    (320.0, 1.5, Brightness.light),
+    (768.0, 1.3, Brightness.dark),
+  ]) {
+    testWidgets(
+      'transaction assumptions are visible before approval at ${layout.$1}',
+      (tester) async {
+        final result = await open(
+          tester,
+          width: layout.$1,
+          scale: layout.$2,
+          brightness: layout.$3,
+          action: {
+            'id': 'transaction-1',
+            'kind': 'transaction',
+            'title': '新增 2026-10-23 餐饮 17.00 元',
+            'status': 'pending',
+            'payload': {
+              'transaction': {
+                'amount': 1700,
+                'type': 'EXPENSE',
+                'metadataJson': jsonEncode({
+                  'assumptions': ['10月23日按今年理解', '盖饭按餐饮分类'],
+                }),
+              },
+            },
+          },
+        );
+        await tester.ensureVisible(find.text('推断：盖饭按餐饮分类'));
+        expect(find.text('推断：10月23日按今年理解'), findsOneWidget);
+        expect(find.text('推断：盖饭按餐饮分类'), findsOneWidget);
+        expect(result.repo.calls, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 }

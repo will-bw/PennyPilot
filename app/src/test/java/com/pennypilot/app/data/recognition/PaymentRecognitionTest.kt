@@ -15,6 +15,12 @@ class PaymentRecognitionTest {
         val parsed = PaymentProposalValidator.validate("com.tencent.mm", text, good)
         assertNotNull(parsed); assertEquals(1800L, parsed!!.amountCents); assertEquals("EXPENSE", parsed.direction)
     }
+    @Test fun `model missing only purpose does not invalidate verified money movement`() {
+        assertNotNull(PaymentProposalValidator.validate("com.tencent.mm", text,
+            good.copy(valid = false, missingFields = listOf("business_kind", "category_id"))))
+        assertNull(PaymentProposalValidator.validate("com.tencent.mm", text,
+            good.copy(valid = false, missingFields = listOf("business_kind", "amount"))))
+    }
     @Test fun `hallucinated amount evidence state and direction are rejected`() {
         listOf(good.copy(amountCents = 1900), good.copy(amountEvidence = "19元"),
             good.copy(directionEvidence = "小林"), good.copy(statusEvidence = "完成"),
@@ -37,6 +43,38 @@ class PaymentRecognitionTest {
     @Test fun `model merchant without source is discarded`() {
         val result = PaymentProposalValidator.validate("com.tencent.mm", text, good.copy(merchant = "外卖平台", merchantEvidence = "不存在"))
         assertNotNull(result); assertNull(result!!.merchant)
+    }
+    @Test fun `verified payment retains inferred business kind without purpose quotes`() {
+        listOf("expense", "transfer", "receivable").forEach { kind ->
+            val parsed = PaymentProposalValidator.validate("com.tencent.mm", text, good.copy(businessKind = kind,
+                categoryId = 10, accountTag = "零钱", note = "聚餐分摊", assumptions = listOf("根据支付场景推断用途")))
+            assertNotNull(parsed)
+            assertEquals(kind, parsed!!.businessKind)
+        }
+        assertNotNull(PaymentProposalValidator.validate("com.tencent.mm", text, good.copy(missingFields = listOf("business_kind", "category_id"))))
+        assertNull(PaymentProposalValidator.validate("com.tencent.mm", text, good.copy(missingFields = listOf("amount"))))
+    }
+    @Test fun `model receives only bounded semantics and preserves the inferred response fields`() = runTest {
+        var messages = emptyList<Message>()
+        val client = object : LLMClient {
+            override suspend fun chat(input: List<Message>, jsonMode: Boolean): String {
+                messages = input
+                return """{"valid":true,"amount_cents":1800,"direction":"EXPENSE","currency":"CNY","payment_status":"COMPLETED","amount_evidence":"¥18.00","direction_evidence":"转账成功","status_evidence":"转账成功","business_kind":"expense","category_id":1,"account_tag":"零钱","note":"晚餐","assumptions":["小林是常用餐饮收款方"]}"""
+            }
+            override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("No tools")
+        }
+        val context = CaptureSemanticContext("2026-11-01T14:00:00+08:00",
+            listOf(CaptureSemanticCategory(1, "餐饮", "EXPENSE")),
+            List(20) { CaptureSemanticHistory("小林$it", "EXPENSE", "expense", 1) })
+        val result = PaymentRecognitionEngine(client).propose("com.tencent.mm", text, semanticContext = context)
+        assertEquals("expense", result.second!!.businessKind)
+        assertEquals(1L, result.first.categoryId)
+        assertEquals("零钱", result.first.accountTag)
+        assertEquals("晚餐", result.first.note)
+        assertTrue(messages.first().content.contains("语义字段可"))
+        assertTrue(messages.last().content.contains("2026-11-01"))
+        assertTrue(messages.last().content.contains("小林11"))
+        assertFalse(messages.last().content.contains("小林12"))
     }
     @Test fun `real compatible HTTP request returns a validated proposal with no tools`() = runTest {
         var body = ""

@@ -84,6 +84,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         preferences.setScreenCloudParsingEnabled(false)
         preferences.setScreenVisualCaptureEnabled(false)
         preferences.setCloudImageParsingEnabled(false)
+        preferences.setCaptureAutoRecordEnabled(false)
         CaptureDiagnosticStore.clear()
         val directExecutor = Executor { it.run() }
         database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
@@ -689,7 +690,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         awaitStatus("saved")
         val first = rows().single()
         assertEquals(300L,first.amount)
-        assertEquals("unknown",first.businessKind)
+        assertEquals("expense",first.businessKind)
         assertTrue(first.metadataJson!!.contains("red_packet_sent"))
         service.opaqueVisualOcr = { redPacketDetailLines() }
         window.root = { screen("",visible=false,windowId=8) }
@@ -921,7 +922,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(300L, row.amount)
         assertEquals(TxType.EXPENSE, row.type)
         assertEquals(TxStatus.PENDING, row.status)
-        assertEquals("unknown", row.businessKind)
+        assertEquals("transfer", row.businessKind)
         assertTrue(row.metadataJson!!.contains("wechat-opaque-transfer"))
         repeat(2) {
             scheduler.advanceTimeBy(1_000)

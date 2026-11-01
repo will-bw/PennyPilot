@@ -150,8 +150,39 @@ class SharedAiService {
     }
     final role = image == null ? 'text' : 'vision';
     final now = _now();
+    final relatedHistory =
+        snapshot.transactions
+            .where(
+              (tx) =>
+                  tx.status == TxStatus.confirmed &&
+                  tx.merchant?.isNotEmpty == true &&
+                  text.contains(tx.merchant!),
+            )
+            .toList()
+          ..sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
+    final history = relatedHistory
+        .take(8)
+        .map(
+          (tx) => {
+            'merchant': tx.merchant,
+            'date': tx.occurredAt.toIso8601String(),
+            'type': tx.type.wireValue,
+            'businessKind': tx.effectiveKind,
+            'category': snapshot.categories
+                .where((c) => c.id == tx.categoryId)
+                .firstOrNull
+                ?.name,
+            'accountTag': tx.accountTag,
+          },
+        )
+        .toList();
     final messages = <Map<String, dynamic>>[
-      _message('system', RecognitionProtocol.prompt(snapshot, now)),
+      _message(
+        'system',
+        '${RecognitionProtocol.prompt(snapshot, now)}\n'
+            '本次提到的商户的相关已确认账单（只作用户习惯参考，不能把历史当作本次金额或付款证据）：${jsonEncode(history)}。'
+            '结合这些已确认习惯推断分类、账户与资金用途，不要求用户逐项填写。',
+      ),
       image == null
           ? _message('user', text)
           : {
@@ -206,14 +237,28 @@ class SharedAiService {
       try {
         final reviewMessages = [
           ...messages,
+          _message('assistant', response),
           _message(
             'user',
-            '请复核同一份输入。前次结果存在以下问题：${jsonEncode(result['questions'])}。仅修复有原文依据的字段；真正缺失或冲突的信息继续提问。重新返回完整协议JSON。',
+            '请复核同一份输入。前次结果存在以下问题：${jsonEncode(result['questions'])}。结合日常语义和当前日期完成合理推断，保留已识别的其他账单；只针对无法合理推断的金额、资金用途或真实冲突提问。重新返回完整协议JSON。',
           ),
         ];
         final reviewed = await send(reviewMessages, 'review');
-        result = validate(reviewed);
-        result['autoSaveEligible'] = false;
+        final checked = validate(reviewed);
+        final revised = checked['transactions'] as List;
+        final revisedIds = revised
+            .map((row) => jsonDecode(row['metadataJson'])['operationId'])
+            .toSet();
+        // A review of one unresolved item must not discard other valid drafts.
+        checked['transactions'] = [
+          ...revised,
+          ...(result['transactions'] as List).where(
+            (row) => !revisedIds.contains(
+              jsonDecode(row['metadataJson'])['operationId'],
+            ),
+          ),
+        ];
+        result = checked;
       } on LedgerException catch (error) {
         if (error.code == 'CANCELLED' || error.code == 'STALE_LEDGER') rethrow;
         (result['questions'] as List).add('复核服务暂不可用，已保留首次识别结果，请人工核对。');

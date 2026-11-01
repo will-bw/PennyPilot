@@ -64,6 +64,53 @@ class _NativeStore extends TestLedgerRepository {
   }
 }
 
+class _RecordingNativeStore extends _NativeStore {
+  _RecordingNativeStore({required this.automatic}) {
+    (data['settings'] as Map)['activeInputAutoSaveEnabled'] = automatic;
+  }
+  final bool automatic;
+  @override
+  Future<Object?> invoke(String method, Map<String, dynamic> args) async {
+    if (method != 'agentModelTurn') return super.invoke(method, args);
+    if (++turns == 1) {
+      return {
+        'messageJson': jsonEncode({
+          'role': 'assistant',
+          'content': '',
+          'tool_calls': [
+            {
+              'id': 'record-call',
+              'type': 'function',
+              'function': {
+                'name': 'propose_transaction',
+                'arguments': jsonEncode({
+                  'amount': 1700,
+                  'type': 'EXPENSE',
+                  'category_id': 1,
+                  'business_kind': 'expense',
+                  'evidence': '午饭17元',
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    }
+    final messages = jsonDecode(args['messagesJson'] as String) as List;
+    final result = jsonDecode(messages.last['content'] as String) as Map;
+    expect(result['status'], automatic ? 'applied' : 'awaiting_confirmation');
+    if (automatic) expect((result['data'] as Map)['amount'], 1700);
+    return {
+      'messageJson': jsonEncode({
+        'role': 'assistant',
+        'content': automatic
+            ? '已记17元。[依据 ${result['evidence_id']}]'
+            : '账单等待核对。',
+      }),
+    };
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
@@ -94,4 +141,40 @@ void main() {
       expect((state['session'] as Map)['status'], 'completed');
     },
   );
+  for (final automatic in [true, false]) {
+    test(
+      'repository wires chat new-entry saving according to user preference: $automatic',
+      () async {
+        final store = _RecordingNativeStore(automatic: automatic);
+        final credentials = MemoryCredentials();
+        final repo = CrossPlatformLedgerRepository(
+          store: store,
+          agentStore: MemoryAgentStore(),
+          credentials: credentials,
+          ai: SharedAiService(credentials: credentials),
+          platformServices: _Platform(),
+          android: true,
+        );
+        addTearDown(repo.close);
+        addTearDown(store.updates.close);
+        final result =
+            await repo.invoke('ask', {'revision': 0, 'question': '午饭17元'})
+                as Map;
+        expect(result['isError'], false);
+        expect(
+          store.calls.where((c) => c.method == 'saveTransaction'),
+          automatic ? hasLength(1) : isEmpty,
+        );
+        expect(
+          (await store.snapshot()).transactions.where((tx) => tx.id == 99),
+          automatic ? hasLength(1) : isEmpty,
+        );
+        expect(
+          (result['session'] as Map)['status'],
+          automatic ? 'completed' : 'awaiting_confirmation',
+        );
+        if (automatic) expect(result['autoSavedIds'], [99]);
+      },
+    );
+  }
 }

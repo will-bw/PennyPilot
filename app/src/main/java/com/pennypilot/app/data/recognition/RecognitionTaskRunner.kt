@@ -14,7 +14,8 @@ class RecognitionTaskRunner(
     private val isAllowed: suspend (RecognitionTask) -> Boolean,
     private val commit: suspend (RecognitionTask, PaymentProposal, NotificationParseResult, () -> Boolean) -> Boolean,
     private val report: (String) -> Unit,
-    private val onState: (RecognitionTask, String) -> Unit = { _, _ -> }
+    private val onState: (RecognitionTask, String) -> Unit = { _, _ -> },
+    private val semanticContext: suspend (RecognitionTask) -> CaptureSemanticContext = { CaptureSemanticContext() }
 ) {
     /** true finishes/discards; false requests WorkManager backoff. */
     suspend fun run(id: String): Boolean {
@@ -32,13 +33,14 @@ class RecognitionTaskRunner(
             if (!current()) {
                 store.remove(id, task.evidenceVersion); report("识别权限、账本或 AI 配置已改变，旧任务已停止"); return true
             }
+            val semantics = semanticContext(task).bounded()
             val operation = client.forRole(role)
             // Pin the original endpoint/account before the final pre-send authorization check.
             if (!current()) { store.remove(id, task.evidenceVersion); report("AI 配置已改变，旧任务已停止"); return true }
             if (store.get(id)?.evidenceVersion != task.evidenceVersion) return false
             onState(task, "model_processing")
             val (proposal, parsed) = withTimeout(60_000) {
-                PaymentRecognitionEngine(operation).propose(task.packageName, task.text, task.images, task.structure)
+                PaymentRecognitionEngine(operation).propose(task.packageName, task.text, task.images, task.structure, semantics)
             }
             if (!current()) {
                 store.remove(id, task.evidenceVersion); report("识别权限、账本或 AI 配置已改变，旧任务已停止"); return true

@@ -80,7 +80,9 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
             children: [
-              const Text('金额、方向或状态不明确时保留待核对；模型推断不会直接改动已有账目。'),
+              const Text(
+                'AI 会结合时间、支付场景和已有习惯补全账单并自动保存。你可以随时修改；只有确实缺少关键信息时才需要补充。',
+              ),
               const SectionTitle('数据与保存方式'),
               for (final option in const [
                 (
@@ -91,7 +93,7 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                 (
                   'screenCloudParsingEnabled',
                   '云端支付页面识别',
-                  '本地规则无法识别时，将筛选后的支付文字发给 AI。',
+                  '将必要的支付文字和相关记账习惯发给 AI，自动理解资金用途、分类和支付账户。',
                 ),
                 (
                   'cloudImageParsingEnabled',
@@ -100,20 +102,26 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                 ),
                 (
                   'captureAutoRecordEnabled',
-                  '可信支付自动入账',
-                  '已验证的支付结果直接记账，其他结果仍待确认。',
+                  '支付自动记账',
+                  '捕获支付后自动推断用途和分类并记账；仅金额冲突或疑似重复等情况留待处理。',
                 ),
                 (
                   'activeInputAutoSaveEnabled',
-                  '主动输入自动保存',
-                  '文字和语音事实完整时直接保存；图片及复杂关系先核对。',
+                  'AI 自动记账',
+                  '文字、语音和已完成的图片凭证由 AI 补全后直接记账，可撤销。关闭后先展示草稿。',
                 ),
               ])
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: Text(option.$2),
                   subtitle: Text(option.$3),
-                  value: c.settings[option.$1] == true,
+                  value:
+                      const {
+                        'captureAutoRecordEnabled',
+                        'activeInputAutoSaveEnabled',
+                      }.contains(option.$1)
+                      ? c.settings[option.$1] != false
+                      : c.settings[option.$1] == true,
                   onChanged: busy
                       ? null
                       : (value) =>

@@ -257,6 +257,12 @@ class NativeLedgerBridge @Inject constructor(
             NotificationHelper.cancelCaptureNotification(context, row.id, row.captureEventKey)
             null
         }
+        "undoRecognitionSave" -> mutate(args) {
+            val items = args.maps("transactions").map {
+                com.pennypilot.app.data.db.RecognitionUndoItem(it.long("id"), it.long("editVersion"), it.string("operationId"))
+            }
+            mapOf("count" to com.pennypilot.app.data.db.RecognitionSaveUndo.undo(database, args.long("revision"), items))
+        }
         "setTransactionStatus" -> mutate(args) {
             val id = args.long("id")
             val status = args.string("status").let { value ->

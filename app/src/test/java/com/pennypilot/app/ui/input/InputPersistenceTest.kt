@@ -286,6 +286,12 @@ class InputPersistenceTest {
         override suspend fun captureEvidenceByNotification(packageName: String, notificationKey: String, start: Long, end: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun captureEvidenceNear(start: Long, end: Long, amount: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun nonCapturedTransactionsNear(start: Long, end: Long, amount: Long, type: TxType) = emptyList<TransactionEntity>()
+        override suspend fun relatedCaptureHistory(merchant: String, type: TxType) = saved.filter {
+            it.merchant == merchant && it.type == type && it.status == TxStatus.CONFIRMED && it.duplicateOf == null &&
+                !(it.editVersion == 0L && it.source in setOf(TxSource.NOTIFICATION, TxSource.ACCESSIBILITY) &&
+                    it.businessKind == "transfer" &&
+                    (it.note.orEmpty().contains("用途暂按资金转移") || it.metadataJson.orEmpty().contains("用途暂按资金转移")))
+        }.takeLast(12).reversed()
         override suspend fun updateCaptureEvidence(evidence: com.pennypilot.app.data.db.entity.CaptureEvidenceEntity) {}
         override suspend fun getByOperationKey(key: String) = saved.firstOrNull { it.operationKey == key }
         override suspend fun tombstone(key: String): com.pennypilot.app.data.db.entity.CaptureTombstoneEntity? = null

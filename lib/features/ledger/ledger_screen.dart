@@ -4,6 +4,7 @@ import '../../core/models.dart';
 import '../../ui/common.dart';
 import '../../ui/theme.dart';
 import '../entry/entry_screen.dart';
+import '../entry/recognition_save_notice.dart';
 
 class LedgerScreen extends StatefulWidget {
   const LedgerScreen({
@@ -80,6 +81,7 @@ class _LedgerScreenState extends State<LedgerScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      RecognitionSaveNotice(controller: c),
                       SectionSurface(
                         padding: const EdgeInsets.fromLTRB(18, 2, 18, 16),
                         child: Column(

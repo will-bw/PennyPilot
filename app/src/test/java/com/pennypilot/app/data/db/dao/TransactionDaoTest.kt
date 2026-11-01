@@ -61,6 +61,20 @@ class TransactionDaoTest {
     )
 
     @Test
+    fun `semantic history excludes automatic placeholders but keeps corrected and explicit transfers`() = runTest {
+        val provisional = tx(1700, source = TxSource.ACCESSIBILITY).copy(merchant = "小林",
+            businessKind = "transfer", note = "用途暂按资金转移记录")
+        dao.insert(provisional)
+        dao.insert(provisional.copy(note = null, metadataJson = """{"assumptions":["用途暂按资金转移，不计入消费"]}"""))
+        val corrected = dao.insert(provisional.copy(editVersion = 1))
+        val deliberate = dao.insert(provisional.copy(note = "本人账户转移"))
+        val manual = dao.insert(provisional.copy(source = TxSource.MANUAL))
+        val expense = dao.insert(provisional.copy(businessKind = "expense", note = "晚餐"))
+        val history = dao.relatedCaptureHistory("小林", TxType.EXPENSE)
+        assertEquals(setOf(corrected, deliberate, manual, expense), history.map { it.id }.toSet())
+    }
+
+    @Test
     fun `pending can transition to confirmed and ignored`() = runTest {
         val pendingId = dao.insert(tx(1800, status = TxStatus.PENDING))
         assertEquals(1, dao.observePendingCount().first())

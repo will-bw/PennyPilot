@@ -232,6 +232,87 @@ void main() {
     },
   );
   test(
+    'automatic input can be undone atomically without deleting other records',
+    () async {
+      final auto = {
+        ..._transaction(),
+        'source': 'AI_TEXT',
+        'businessKind': 'expense',
+        'metadataJson': jsonEncode({'operationId': 'automatic:1'}),
+      };
+      final saved =
+          await store.invoke('saveTransaction', {'revision': 0, ...auto})
+              as Map;
+      await store.invoke('saveTransaction', {'revision': 0, ..._transaction()});
+      expect(
+        await store.invoke('undoRecognitionSave', {
+          'revision': 0,
+          'transactions': [
+            {'id': saved['id'], 'editVersion': 0, 'operationId': 'automatic:1'},
+          ],
+        }),
+        {'count': 1},
+      );
+      expect(
+        (await store.snapshot()).transactions.single.source,
+        TxSource.manual,
+      );
+      await expectLater(
+        store.invoke('saveTransaction', {'revision': 0, ...auto}),
+        throwsA(_error('CANCELLED')),
+      );
+    },
+  );
+  test('an edited automatic row prevents a partial undo', () async {
+    final ids = <int>[];
+    for (var i = 0; i < 2; i++) {
+      final saved =
+          await store.invoke('saveTransaction', {
+                'revision': 0,
+                ..._transaction(),
+                'source': 'AI_VOICE',
+                'businessKind': 'expense',
+                'metadataJson': jsonEncode({'operationId': 'automatic:$i'}),
+              })
+              as Map;
+      ids.add(saved['id'] as int);
+    }
+    await store.invoke('saveTransaction', {
+      'revision': 0,
+      ..._transaction(),
+      'id': ids.last,
+      'editVersion': 0,
+      'note': '用户手工更正',
+    });
+    await expectLater(
+      store.invoke('undoRecognitionSave', {
+        'revision': 0,
+        'transactions': [
+          for (var i = 0; i < ids.length; i++)
+            {'id': ids[i], 'editVersion': 0, 'operationId': 'automatic:$i'},
+        ],
+      }),
+      throwsA(_error('INVALID_ARGUMENT')),
+    );
+    expect((await store.snapshot()).transactions, hasLength(2));
+    expect((await export())['captureTombstones'], isEmpty);
+  });
+  test('automatic defaults respect a saved manual-review preference', () async {
+    expect(
+      (await store.snapshot()).settings['activeInputAutoSaveEnabled'],
+      true,
+    );
+    expect((await store.snapshot()).settings['captureAutoRecordEnabled'], true);
+    await store.invoke('updateSettings', {'activeInputAutoSaveEnabled': false});
+    await store.close();
+    store = open();
+    expect(
+      (await store.snapshot()).settings['activeInputAutoSaveEnabled'],
+      false,
+    );
+  });
+
+  test(
     'new recognition metadata and tombstones roundtrip losslessly',
     () async {
       final backup = await export();
