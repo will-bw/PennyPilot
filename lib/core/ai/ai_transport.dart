@@ -460,12 +460,16 @@ class ChatCompletionStreamDecoder {
       if (call['type'] != null && call['type'] != 'function') {
         aiFailure('模型工具类型无效。');
       }
-      if (call['id'] != null) {
-        if (call['id'] is! String) aiFailure('模型工具标识无效。');
-        if (target['id'] != '' && target['id'] != call['id']) {
-          aiFailure('模型工具标识发生变化。');
+      final id = call['id'];
+      if (id != null) {
+        if (id is! String) aiFailure('模型工具标识无效。');
+        // Qwen uses an empty ID on later argument-only chunks.
+        if (id.isNotEmpty) {
+          if (target['id'] != '' && target['id'] != id) {
+            aiFailure('模型工具标识发生变化。');
+          }
+          target['id'] = id;
         }
-        target['id'] = call['id'];
       }
       if (call['function'] != null) {
         final function = aiObject(call['function']);

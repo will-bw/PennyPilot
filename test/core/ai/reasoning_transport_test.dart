@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -229,6 +230,145 @@ void main() {
       },
     );
   }
+
+  test(
+    'Qwen SSE parallel queries accept empty continuation ids after previews',
+    () async {
+      final body = StreamController<List<int>>();
+      final started = Completer<void>();
+      final previewed = Completer<void>();
+      final text = <String>[], reasoning = <String>[];
+      final client = MockClient.streaming((request, requestBody) async {
+        final payload =
+            jsonDecode(utf8.decode(await requestBody.toBytes())) as Map;
+        expect(payload['model'], 'qwen3.8-flash');
+        expect(payload['enable_thinking'], true);
+        expect(payload['stream'], true);
+        started.complete();
+        return http.StreamedResponse(
+          body.stream,
+          200,
+          headers: {'content-type': 'text/event-stream; charset=utf-8'},
+        );
+      });
+      final service = SharedAiService(
+        credentials: fixtures.MemoryCredentials(),
+        client: client,
+      );
+      addTearDown(service.dispose);
+      addTearDown(client.close);
+      addTearDown(() async {
+        if (!body.isClosed) await body.close();
+      });
+      final model = await service.openAgentModel(
+        LedgerSnapshot(
+          revision: 0,
+          settings: {
+            'activeProvider': 'qwen',
+            'qwenModel': 'qwen3.8-flash',
+            'qwenThinkingEnabled': true,
+            'qwenBaseUrl': 'https://example.test/v1',
+          },
+        ),
+        guard: () async {},
+      );
+      final tools = [
+        for (final name in ['get_ledger_overview', 'query_transactions'])
+          {
+            'type': 'function',
+            'function': {
+              'name': name,
+              'parameters': {'type': 'object', 'properties': {}},
+            },
+          },
+      ];
+      var completed = false;
+      final pending = model
+          .turn(
+            [
+              {'role': 'user', 'content': '今晚2元这笔改成彩票'},
+            ],
+            tools,
+            onTextDelta: (delta) {
+              text.add(delta);
+              if (!previewed.isCompleted) previewed.complete();
+            },
+            onReasoningDelta: reasoning.add,
+          )
+          .then((reply) {
+            completed = true;
+            return reply;
+          });
+      await started.future;
+      body.add(
+        utf8.encode(
+          'data: ${_chunk({'reasoning_content': '先查现有记录，避免重复记账。'}).data}\n\n'
+          'data: ${_chunk({
+            'content': '我先查今天的记录和可用分类。',
+            'tool_calls': [
+              {
+                'index': 0,
+                'id': 'call-overview',
+                'type': 'function',
+                'function': {'name': 'get_ledger_overview', 'arguments': '{'},
+              },
+              {
+                'index': 1,
+                'id': 'call-query',
+                'type': 'function',
+                'function': {'name': 'query_transactions', 'arguments': '{"start":"2026-11-'},
+              },
+            ],
+          }).data}\n\n',
+        ),
+      );
+      await previewed.future;
+      expect(text, ['我先查今天的记录和可用分类。']);
+      expect(reasoning, ['先查现有记录，避免重复记账。']);
+      expect(
+        completed,
+        false,
+        reason: 'streamed previews must not finish a partial tool response',
+      );
+      body.add(
+        utf8.encode(
+          'data: ${_chunk({
+            'tool_calls': [
+              {
+                'index': 1,
+                'id': '',
+                'type': 'function',
+                'function': {'name': null, 'arguments': '04","end":"2026-11-04"}'},
+              },
+              {
+                'index': 0,
+                'id': '',
+                'type': 'function',
+                'function': {'name': null, 'arguments': '}'},
+              },
+            ],
+          }).data}\n\n'
+          'data: ${_chunk({}, finish: 'tool_calls').data}\n\ndata: [DONE]\n\n',
+        ),
+      );
+      await body.close();
+      final reply = await pending;
+      expect(completed, true);
+      expect(reply.text, '我先查今天的记录和可用分类。');
+      expect(reply.message['reasoning_content'], '先查现有记录，避免重复记账。');
+      expect(reply.calls.map((call) => call['id']), [
+        'call-overview',
+        'call-query',
+      ]);
+      expect(reply.calls.map((call) => call['function']), [
+        {'name': 'get_ledger_overview', 'arguments': '{}'},
+        {
+          'name': 'query_transactions',
+          'arguments': '{"start":"2026-11-04","end":"2026-11-04"}',
+        },
+      ]);
+    },
+  );
 
   test(
     'Qwen repeated tool ids remain stable while reasoning and arguments stream separately',
