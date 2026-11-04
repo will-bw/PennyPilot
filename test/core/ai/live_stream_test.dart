@@ -227,6 +227,253 @@ void main() {
   );
 
   test(
+    'argument-only chunks keep the first tool id for empty, null and omitted ids',
+    () {
+      for (final idFields in [
+        <String, dynamic>{'id': ''},
+        <String, dynamic>{'id': null},
+        <String, dynamic>{},
+      ]) {
+        final decoder = ChatCompletionStreamDecoder();
+        decoder.accept(
+          _chunk({
+            'tool_calls': [
+              {
+                'index': 0,
+                'id': 'call-budget',
+                'type': 'function',
+                'function': {'name': 'get_budget', 'arguments': '{"month":'},
+              },
+            ],
+          }),
+        );
+        decoder.accept(
+          _chunk({
+            'tool_calls': [
+              {
+                'index': 0,
+                ...idFields,
+                'function': {'name': null, 'arguments': '"2026-11"}'},
+              },
+            ],
+          }, finish: 'tool_calls'),
+        );
+        final calls =
+            (decoder.finish({'get_budget'})['message'] as Map)['tool_calls']
+                as List;
+        expect(calls.single['id'], 'call-budget', reason: '$idFields');
+        expect(calls.single['function'], {
+          'name': 'get_budget',
+          'arguments': '{"month":"2026-11"}',
+        });
+      }
+    },
+  );
+
+  test('a later nonempty tool id completes an initially empty id', () {
+    final decoder = ChatCompletionStreamDecoder();
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 0,
+            'id': '',
+            'function': {'name': 'get_budget', 'arguments': '{'},
+          },
+        ],
+      }),
+    );
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 0,
+            'id': 'call-budget',
+            'function': {'arguments': '}'},
+          },
+        ],
+      }, finish: 'tool_calls'),
+    );
+    final call =
+        ((decoder.finish({'get_budget'})['message'] as Map)['tool_calls']
+                as List)
+            .single;
+    expect(call['id'], 'call-budget');
+    expect(call['function']['arguments'], '{}');
+  });
+
+  test('interleaved parallel calls retain their own ids and arguments', () {
+    final decoder = ChatCompletionStreamDecoder();
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 0,
+            'id': 'call-overview',
+            'function': {'name': 'get_ledger_overview', 'arguments': '{'},
+          },
+          {
+            'index': 1,
+            'id': 'call-query',
+            'function': {
+              'name': 'query_transactions',
+              'arguments': '{"limit":',
+            },
+          },
+        ],
+      }),
+    );
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 1,
+            'id': '',
+            'function': {'arguments': '10'},
+          },
+          {
+            'index': 0,
+            'id': '',
+            'function': {'arguments': '}'},
+          },
+        ],
+      }),
+    );
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 1,
+            'id': null,
+            'function': {'arguments': '}'},
+          },
+        ],
+      }, finish: 'tool_calls'),
+    );
+    final calls =
+        (decoder.finish({
+                  'get_ledger_overview',
+                  'query_transactions',
+                })['message']
+                as Map)['tool_calls']
+            as List;
+    expect(calls.map((call) => call['id']), ['call-overview', 'call-query']);
+    expect(calls.map((call) => call['function']), [
+      {'name': 'get_ledger_overview', 'arguments': '{}'},
+      {'name': 'query_transactions', 'arguments': '{"limit":10}'},
+    ]);
+  });
+
+  test('a genuinely changed nonempty tool id still rejects the stream', () {
+    final decoder = ChatCompletionStreamDecoder();
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 0,
+            'id': 'call-original',
+            'function': {'name': 'get_budget', 'arguments': '{'},
+          },
+        ],
+      }),
+    );
+    expect(
+      () => decoder.accept(
+        _chunk({
+          'tool_calls': [
+            {
+              'index': 0,
+              'id': 'call-replaced',
+              'function': {'arguments': '}'},
+            },
+          ],
+        }, finish: 'tool_calls'),
+      ),
+      throwsA(
+        isA<LedgerException>().having(
+          (error) => error.message,
+          'message',
+          '模型工具标识发生变化。',
+        ),
+      ),
+    );
+    expect(
+      () => decoder.finish({'get_budget'}),
+      throwsA(isA<LedgerException>()),
+    );
+  });
+
+  test('tool calls with no usable id cannot leave the decoder', () {
+    final decoder = ChatCompletionStreamDecoder();
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 0,
+            'id': '',
+            'function': {'name': 'get_budget', 'arguments': '{'},
+          },
+        ],
+      }),
+    );
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          {
+            'index': 0,
+            'id': '',
+            'function': {'arguments': '}'},
+          },
+        ],
+      }, finish: 'tool_calls'),
+    );
+    expect(
+      () => decoder.finish({'get_budget'}),
+      throwsA(isA<LedgerException>()),
+    );
+  });
+
+  test('non-string tool ids remain invalid', () {
+    for (final id in [42, false]) {
+      final decoder = ChatCompletionStreamDecoder();
+      expect(
+        () => decoder.accept(
+          _chunk({
+            'tool_calls': [
+              {
+                'index': 0,
+                'id': id,
+                'function': {'name': 'get_budget', 'arguments': '{}'},
+              },
+            ],
+          }, finish: 'tool_calls'),
+        ),
+        throwsA(isA<LedgerException>()),
+      );
+    }
+  });
+
+  test('parallel calls cannot reuse the same nonempty id', () {
+    final decoder = ChatCompletionStreamDecoder();
+    decoder.accept(
+      _chunk({
+        'tool_calls': [
+          for (final index in [0, 1])
+            {
+              'index': index,
+              'id': 'call-duplicate',
+              'function': {'name': 'get_budget', 'arguments': '{}'},
+            },
+        ],
+      }, finish: 'tool_calls'),
+    );
+    expect(
+      () => decoder.finish({'get_budget'}),
+      throwsA(isA<LedgerException>()),
+    );
+  });
+
+  test(
     'unknown tools, truncated JSON and failed completion never produce executable calls',
     () {
       for (final arguments in ['{', '{}']) {
