@@ -78,6 +78,175 @@ void main() {
     source: source,
   );
 
+  Map<String, dynamic> aa(
+    String evidence, {
+    int count = 4,
+    int amount = 2500,
+  }) => {
+    ...meal(evidence),
+    'amount': amount,
+    'aa_total_amount': 10000,
+    'aa_participant_count': count,
+  };
+
+  test('AA advance collections preserve the collected amount', () async {
+    const text = '收回AA垫付75元';
+    final incomeCategory = (await ledger.snapshot()).categories.firstWhere(
+      (category) => category.type == TxType.income,
+    );
+    var step = 0;
+    final result = await run((messages, _) async {
+      if (++step == 1) {
+        return _call('collection', 'propose_transaction', {
+          ...meal(text),
+          'amount': 7500,
+          'type': 'INCOME',
+          'business_kind': 'receivable',
+          'category_id': incomeCategory.id,
+        });
+      }
+      expect(_observation(messages)['status'], 'applied');
+      return _answer('已记录收回应收款75元。');
+    }, question: text);
+    expect(result['isError'], false);
+    expect(writes, 1);
+    final saved = (await ledger.snapshot()).transactions.single;
+    expect(saved.amountFen, 7500);
+    expect(saved.expenseSplit, isNull);
+    expect(saved.countsAsIncome, false);
+  });
+
+  test(
+    'AA saves one personal expense and statistics use only that amount',
+    () async {
+      var step = 0;
+      final result = await run((messages, _) async {
+        switch (++step) {
+          case 1:
+            return _call('aa', 'propose_transaction', aa('午饭100元，4人AA'));
+          case 2:
+            expect(_observation(messages)['status'], 'applied');
+            return _call('total', 'aggregate_by', {
+              'start': '2026-10-24',
+              'end': '2026-10-24',
+              'group_by': 'category',
+            });
+          default:
+            expect((_observation(messages)['data'] as Map)['expense'], 2500);
+            return _answer('已记个人支出25元。');
+        }
+      }, question: '午饭100元，4人AA');
+      expect(result['isError'], false);
+      expect(writes, 1);
+      final saved = (await ledger.snapshot()).transactions.single;
+      expect(saved.amountFen, 2500);
+      expect(saved.expenseSplit?.totalAmountFen, 10000);
+      expect(saved.expenseSplit?.participantCount, 4);
+    },
+  );
+
+  for (final reply in ['4人', '4', '四个']) {
+    test('AA count clarification preserves original total: $reply', () async {
+      await run(
+        (_, _) async =>
+            _call('clarify', 'ask_user', {'question': '包含本人共几人 AA？'}),
+        question: '午饭100元AA',
+      );
+      var step = 0;
+      final result = await run((messages, _) async {
+        if (++step == 1) return _call('aa', 'propose_transaction', aa(reply));
+        expect(_observation(messages)['status'], 'applied');
+        return _answer('已记个人支出25元。');
+      }, question: reply);
+      expect(result['isError'], false);
+      expect(writes, 1);
+      expect(
+        (await ledger.snapshot())
+            .transactions
+            .single
+            .expenseSplit
+            ?.participantCount,
+        4,
+      );
+    });
+  }
+
+  test('an unlinked one-digit reply cannot authorize an AA record', () async {
+    var step = 0;
+    final result = await run((messages, _) async {
+      if (++step == 1) return _call('aa', 'propose_transaction', aa('4'));
+      expect(_observation(messages)['error'], 'validation_error');
+      return _answer('请补充记账内容。');
+    }, question: '4');
+    expect(result['isError'], false);
+    expect(writes, 0);
+  });
+
+  for (final scenario in [
+    (text: '午饭100元AA', args: <String, dynamic>{'amount': 10000}),
+    (
+      text: '午饭100元AA',
+      args: <String, dynamic>{
+        'amount': 2500,
+        'aa_total_amount': 10000,
+        'aa_participant_count': 4,
+      },
+    ),
+    (
+      text: '午饭100元4人AA',
+      args: <String, dynamic>{
+        'amount': 10000,
+        'aa_total_amount': 10000,
+        'aa_participant_count': 4,
+      },
+    ),
+  ]) {
+    test(
+      'AA invalid evidence or division never auto-saves: ${scenario.text} ${scenario.args}',
+      () async {
+        var step = 0;
+        await run((messages, _) async {
+          if (++step == 1) {
+            return _call('aa', 'propose_transaction', {
+              ...meal(scenario.text),
+              ...scenario.args,
+            });
+          }
+          expect(_observation(messages)['error'], 'validation_error');
+          return _answer('需要补充或修正分摊信息。');
+        }, question: scenario.text);
+        expect(writes, 0);
+        expect((await ledger.snapshot()).transactions, isEmpty);
+      },
+    );
+  }
+
+  test(
+    'mixed entries do not apply AA to an unrelated ordinary transaction',
+    () async {
+      var step = 0;
+      await run((messages, _) async {
+        switch (++step) {
+          case 1:
+            return _call('aa', 'propose_transaction', aa('午饭100元4人AA'));
+          case 2:
+            expect(_observation(messages)['status'], 'applied');
+            return _call('subway', 'propose_transaction', {
+              ...meal('地铁4元'),
+              'amount': 400,
+            });
+          default:
+            expect(_observation(messages)['status'], 'applied');
+            return _answer('已记两笔。');
+        }
+      }, question: '午饭100元4人AA；地铁4元');
+      expect(writes, 2);
+      final saved = (await ledger.snapshot()).transactions;
+      expect(saved.map((tx) => tx.amountFen), unorderedEquals([2500, 400]));
+      expect(saved.where((tx) => tx.expenseSplit != null), hasLength(1));
+    },
+  );
+
   test(
     'voice recording source survives the shared agent and ledger save',
     () async {

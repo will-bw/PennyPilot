@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../models.dart';
+import '../recognition/recognition_protocol.dart';
 import 'assistant_artifacts.dart';
 import 'agent_models.dart';
 import 'agent_store.dart';
@@ -12,7 +13,8 @@ class LedgerAgentTools {
     required this.ledger,
     required this.question,
     required this.now,
-  }) {
+    String? entryInput,
+  }) : entryInput = entryInput ?? question {
     for (final trace in session.trace) {
       final id = trace['evidenceId'] as String?;
       final number = id == null ? 0 : int.tryParse(id.substring(1)) ?? 0;
@@ -23,6 +25,7 @@ class LedgerAgentTools {
   final AgentSession session;
   LedgerSnapshot ledger;
   final String question;
+  final String entryInput;
   final DateTime now;
   int _evidence = 0;
   bool hasLedgerEvidence = false;
@@ -222,7 +225,13 @@ class LedgerAgentTools {
       '新增在启用自动记账时可直接保存，修改始终等待核对；以返回的applied或awaiting_confirmation状态为准。普通消费描述即可记录，合理推断写入assumptions。修改前先get_transaction；金额或账务用途有实质歧义才询问。',
       {
         'transaction_id': _i('修改目标id；新增时不传'),
-        'amount': _i('正整数分'),
+        'amount': _i('个人承担的正整数分；AA 时必须等于总额除以总人数后四舍五入到分的金额'),
+        'aa_total_amount': _i('AA 实付总额，整数分；须与 aa_participant_count 同时提供'),
+        'aa_participant_count': _i('AA 总人数，包含本人，至少2；必须有用户原文依据'),
+        'clear_aa_split': {
+          'type': 'boolean',
+          'description': '修改已有账目时取消 AA；取消后 amount 为完整个人支出',
+        },
         'type': _s('方向', values: ['EXPENSE', 'INCOME']),
         'category_id': _i('从真实分类中推荐；省略时修改保留原分类，新增优先使用其他分类'),
         'date': _s(
@@ -284,6 +293,7 @@ class LedgerAgentTools {
       final type = rule['type'];
       if (type == 'string' && value is! String ||
           type == 'integer' && value is! int ||
+          type == 'boolean' && value is! bool ||
           type == 'array' && value is! List ||
           type == 'object' && value is! Map) {
         throw FormatException('$field 的类型须为 $type');
@@ -736,7 +746,7 @@ class LedgerAgentTools {
           {'transactionId': tx.id, 'before': tx.toMap()},
         );
       case 'propose_transaction':
-        _evidenceQuote(a);
+        _evidenceQuote(a, allowShortReply: entryInput != question);
         final amount = _int(a, 'amount', -1, 1, maxTransactionFen);
         final type = TxType.fromWire(a['type']);
         final old = a['transaction_id'] == null ? null : _transaction(a);
@@ -772,6 +782,76 @@ class LedgerAgentTools {
             (kind == 'income' || kind == 'refund') && type != TxType.income) {
           throw const FormatException('账务用途与方向不一致');
         }
+        final metadata = {...?old?.recognitionMetadata};
+        final hasSplit =
+            a.containsKey('aa_total_amount') ||
+            a.containsKey('aa_participant_count');
+        ExpenseSplit? split;
+        final entryContext = RecognitionProtocol.entryContext(
+          entryInput,
+          a['aa_total_amount'] is int ? a['aa_total_amount'] as int : amount,
+          a['evidence'] as String,
+        );
+        if (hasSplit) {
+          if (a['clear_aa_split'] == true ||
+              kind != 'expense' ||
+              type != TxType.expense) {
+            throw const FormatException('AA 仅用于消费支出，不能同时取消分摊。');
+          }
+          split = ExpenseSplit(
+            totalAmountFen: _int(
+              a,
+              'aa_total_amount',
+              -1,
+              1,
+              maxTransactionFen,
+            ),
+            participantCount: _int(
+              a,
+              'aa_participant_count',
+              -1,
+              2,
+              maxTransactionFen,
+            ),
+          );
+          if (amount != split.personalAmountFen) {
+            throw FormatException(
+              'AA 个人金额应为 ${split.personalAmountFen} 分，请按总额和人数修正 amount。',
+            );
+          }
+          final oldSplit = old?.expenseSplit;
+          final knownTotal = oldSplit?.totalAmountFen ?? old?.amountFen;
+          if ((!ExpenseSplit.isRequested(entryContext) && oldSplit == null) ||
+              (!split.hasParticipantEvidence(entryContext) &&
+                  (ExpenseSplit.hasParticipantDeclaration(entryContext) ||
+                      oldSplit?.participantCount != split.participantCount)) ||
+              (!RecognitionProtocol.amountMatchesQuote(
+                    split.totalAmountFen,
+                    entryContext,
+                  ) &&
+                  knownTotal != split.totalAmountFen)) {
+            throw const FormatException('请先补充 AA 实付总额和包含本人在内的总人数。');
+          }
+          metadata['aaSplit'] = split.toMap();
+          assumptions.add(
+            'AA 实付 ${formatMoney(split.totalAmountFen)} 元，含本人 ${split.participantCount} 人均摊，个人 ${formatMoney(amount)} 元（四舍五入到分）。',
+          );
+        } else if (a['clear_aa_split'] == true ||
+            kind != 'expense' ||
+            type != TxType.expense ||
+            old?.expenseSplit?.personalAmountFen != amount) {
+          metadata.remove('aaSplit');
+        }
+        if (old == null &&
+            kind == 'expense' &&
+            ExpenseSplit.isRequested(entryContext) &&
+            split == null &&
+            !RecognitionProtocol.hasExplicitPersonalAmount(
+              entryContext,
+              amount,
+            )) {
+          throw const FormatException('AA 记账需要实付总额和包含本人在内的总人数，请先询问缺失信息。');
+        }
         final id = agentId();
         final payload = {
           'id': old?.id ?? 0,
@@ -792,7 +872,7 @@ class LedgerAgentTools {
           'source': 'AI_TEXT',
           if (old != null) 'editVersion': old.editVersion,
           'metadataJson': jsonEncode({
-            ...?old?.recognitionMetadata,
+            ...metadata,
             'operationId': 'agent:$id',
             'agentSessionId': session.id,
             'evidence': a['evidence'],
@@ -852,9 +932,12 @@ class LedgerAgentTools {
     }
   }
 
-  void _evidenceQuote(Map<String, dynamic> a) {
+  void _evidenceQuote(Map<String, dynamic> a, {bool allowShortReply = false}) {
     final evidence = (a['evidence'] as String).trim();
-    if (evidence.length < 2 || !question.contains(evidence)) {
+    final completeReply = allowShortReply && evidence == question.trim();
+    if (evidence.isEmpty ||
+        evidence.length < 2 && !completeReply ||
+        !question.contains(evidence)) {
       throw const FormatException('evidence必须是当前用户请求中的逐字原文，不能来自商户备注或历史回答');
     }
   }
@@ -955,6 +1038,7 @@ class LedgerAgentTools {
     'status': t.status.wireValue,
     'merchant': _clip(t.merchant, full ? 200 : 100),
     'note': _clip(t.note, full ? 2000 : 250),
+    if (t.expenseSplit case final split?) 'aa_split': split.toMap(),
     if (full) ...{'editVersion': t.editVersion, 'source': t.source.wireValue},
   };
   static String? _clip(String? value, int max) => value == null

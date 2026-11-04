@@ -546,9 +546,11 @@ class TransactionRow extends StatelessWidget {
     final title = tx.merchant?.isNotEmpty == true
         ? tx.merchant!
         : category?.name ?? '未分类';
+    final split = tx.expenseSplit;
     final detail = [
       if (!tx.countsAsExpense && !tx.countsAsIncome) tx.businessLabel,
       category?.name ?? '未分类',
+      if (split != null) 'AA · ${split.participantCount} 人',
       if (tx.note?.isNotEmpty == true) tx.note!,
       if (tx.status != TxStatus.confirmed) tx.status.label,
     ].join(' · ');

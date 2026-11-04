@@ -219,6 +219,57 @@ void main() {
   );
 
   test(
+    'AA personal expense and original split survive edit and backup restore',
+    () async {
+      final metadata = {
+        'operationId': 'aa-dinner',
+        'aaSplit': {'totalAmountFen': 10000, 'participantCount': 3},
+      };
+      final saved =
+          await store.invoke('saveTransaction', {
+                'revision': 0,
+                ..._transaction(amount: 3333),
+                'businessKind': 'expense',
+                'metadataJson': jsonEncode(metadata),
+              })
+              as Map;
+      var tx = (await store.snapshot()).transactions.single;
+      expect(tx.amountFen, 3333);
+      expect(tx.countsAsExpense, true);
+      expect(tx.expenseSplit!.totalAmountFen, 10000);
+      expect(tx.expenseSplit!.participantCount, 3);
+
+      await store.invoke('saveTransaction', {
+        'revision': 0,
+        ...tx.toMap(),
+        'id': saved['id'],
+        'note': '聚餐',
+      });
+      final backup = await export();
+      await restore(backup);
+      await store.close();
+      store = open();
+      tx = (await store.snapshot()).transactions.single;
+      expect(tx.amountFen, 3333);
+      expect(tx.note, '聚餐');
+      expect(tx.recognitionMetadata, metadata);
+      expect(tx.expenseSplit!.personalAmountFen, 3333);
+
+      // Removing AA must replace the metadata rather than leaving a stale split.
+      await store.invoke('saveTransaction', {
+        'revision': (await store.snapshot()).revision,
+        ...tx.toMap(),
+        'amount': 10000,
+        'metadataJson': jsonEncode({'operationId': 'aa-dinner'}),
+      });
+      tx = (await store.snapshot()).transactions.single;
+      expect(tx.amountFen, 10000);
+      expect(tx.expenseSplit, isNull);
+      expect(tx.recognitionMetadata.containsKey('aaSplit'), false);
+    },
+  );
+
+  test(
     'recognition operations are idempotent and cannot resurrect after deletion',
     () async {
       final row = {

@@ -507,6 +507,7 @@ class LedgerAgentRuntime {
         session: session,
         ledger: ledger,
         question: question,
+        entryInput: entryContext.turns.join('\n补充：'),
         now: started,
       );
       final allMemories = await store.scan('memory:${ledger.revision}:');
@@ -963,10 +964,13 @@ class LedgerAgentRuntime {
     final payload = agentMap(agentMap(action['payload'])['transaction']);
     final evidence = args['evidence'] as String;
     final input = entryContext.turns.join('\n补充：');
+    final split = ExpenseSplit.fromMap(
+      agentMap(jsonDecode(payload['metadataJson'] as String))['aaSplit'],
+    );
     final amountEvidence = _entryAmount(
       entryContext.turns,
       evidence,
-      payload['amount'] as int,
+      split?.totalAmountFen ?? payload['amount'] as int,
     );
     final operationId =
         '${entryContext.operationId}:amount@${amountEvidence.offset}';
@@ -987,6 +991,7 @@ class LedgerAgentRuntime {
         'proposals': [
           {
             'amount': payload['amount'],
+            if (split != null) 'aaSplit': split.toMap(),
             'currency': 'CNY',
             'type': payload['type'],
             'businessKind': payload['businessKind'],
@@ -999,7 +1004,10 @@ class LedgerAgentRuntime {
               DateTime.fromMillisecondsSinceEpoch(payload['occurredAt'] as int),
             ),
             'fieldEvidence': {
-              'amount': {'quote': amountEvidence.quote, 'source': 'user'},
+              'amount': {
+                'quote': amountEvidence.quote,
+                'source': split == null ? 'user' : 'derived',
+              },
               'type': {'quote': evidence, 'source': 'inference'},
             },
           },

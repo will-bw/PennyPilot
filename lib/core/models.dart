@@ -2,7 +2,10 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-const maxTransactionFen = 999999999;
+import 'expense_split.dart';
+export 'expense_split.dart';
+
+const maxTransactionFen = ExpenseSplit.maxTotalAmountFen;
 
 /// Converts decimal yuan to integer fen without floating point rounding.
 int? parseMoney(String input) {
@@ -132,6 +135,12 @@ class LedgerTransaction {
       : businessKind!;
   bool get countsAsExpense => effectiveKind == 'expense';
   bool get countsAsIncome => effectiveKind == 'income';
+  ExpenseSplit? get expenseSplit {
+    if (!countsAsExpense || type != TxType.expense) return null;
+    final split = ExpenseSplit.fromMap(recognitionMetadata['aaSplit']);
+    return split?.personalAmountFen == amountFen ? split : null;
+  }
+
   String get businessLabel =>
       const {
         'expense': '消费',

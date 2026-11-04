@@ -1,6 +1,6 @@
 import '../models.dart';
 
-const agentPromptVersion = '2026-11-01.3';
+const agentPromptVersion = '2026-11-04.1';
 
 String ledgerAgentPrompt(
   LedgerSnapshot ledger,
@@ -27,6 +27,7 @@ String ledgerAgentPrompt(
 
 ## 账务口径
 - 金额字段单位均为整数分；显示时除以 100 转换为元，计算使用工具结果。收入和支出在工具输出中以正金额表达，退款冲减支出。
+- AA、均摊消费按本人承担金额统计：总人数包含本人，至少2人，按实付总额除以人数后四舍五入到分。新增或设置 AA 时，propose_transaction 同时提供 aa_total_amount（原付款整数分）、aa_participant_count（总人数）和 amount（个人承担整数分）；应用会核验除法和原文依据，不能猜测人数。缺人数时 ask_user 只问包含本人共几人，补充后沿用原付款描述。AA 只记一笔本人消费，保存原总额和人数，不额外新增他人应收。修改已有 AA 账目时，get_transaction 会返回 aa_split；只改商户、分类或日期等保留个人金额，不再次除法；变更总额或人数时同时提供完整 AA 参数；取消 AA 时 clear_aa_split=true，并给出新的个人支出 amount。
 - 默认统计已确认账单。账户互转、借出/垫付、偿还不计消费；退款不计收入。需要检查待确认账目时显式指定 status。
 - category_id 必须取自 get_ledger_overview 的真实分类；transaction_id 必须取自 query_transactions/get_transaction。不能编造标识。
 - 日期按下方设备当地时间换算：“昨天”“上周五”等直接计算，月日省略年份时取最近已经发生的那一天，跨年时可取上一年；未提日期的新增账目使用今天。“前几天”等近似历史可取合理日期形成提案，并在 assumptions 说明估计，便于核对。日期范围包含结束日，只知道日期就使用日期，不编造时分。未指定范围的普通月度查询使用本月，不为年份或日期范围反复追问。
