@@ -48,6 +48,125 @@ Map<String, dynamic> validate(
   operationId: 'request',
 );
 void main() {
+  Map<String, dynamic> aa({int amount = 2500, int count = 4}) => {
+    ...proposal(amount: amount, quote: '100元'),
+    'aaSplit': {'totalAmountFen': 10000, 'participantCount': count},
+    'fieldEvidence': {
+      'amount': {'quote': '100元', 'source': 'derived'},
+      'type': {'quote': '午饭', 'source': 'user'},
+    },
+  };
+  test('AA records only the locally verified personal share', () {
+    final result = validate([aa()], input: '午饭我付了100元，4人AA');
+    expect(result['questions'], isEmpty);
+    final tx = LedgerTransaction.fromMap(
+      stringMap((result['transactions'] as List).single),
+    );
+    expect(tx.amountFen, 2500);
+    expect(tx.expenseSplit?.totalAmountFen, 10000);
+    expect(tx.expenseSplit?.participantCount, 4);
+    expect(result['autoSaveEligible'], true);
+    final rounded = validate([
+      aa(amount: 3333, count: 3),
+    ], input: '午饭100元，三人AA');
+    expect(rounded['transactions'], hasLength(1));
+  });
+  test('ordinary output may include a null AA field', () {
+    expect(
+      validate([
+        {...proposal(), 'aaSplit': null},
+      ])['transactions'],
+      hasLength(1),
+    );
+  });
+  test('collecting an AA advance does not divide the collected amount', () {
+    final result = validate([
+      {
+        ...proposal(
+          amount: 7500,
+          type: 'INCOME',
+          kind: 'receivable',
+          quote: '75元',
+        ),
+        'fieldEvidence': {
+          'amount': {'quote': '75元', 'source': 'user'},
+          'type': {'quote': '收回AA垫付', 'source': 'user'},
+        },
+      },
+    ], input: '收回AA垫付75元');
+    expect(result['questions'], isEmpty);
+    final tx = LedgerTransaction.fromMap(
+      stringMap((result['transactions'] as List).single),
+    );
+    expect(tx.amountFen, 7500);
+    expect(tx.expenseSplit, isNull);
+    expect(tx.countsAsIncome, false);
+  });
+  test(
+    'AA cannot fabricate a count, ignore sharing or supply wrong division',
+    () {
+      for (final result in [
+        validate([aa()], input: '午饭100元AA'),
+        validate([aa(amount: 10000)], input: '午饭100元4人AA'),
+        validate([proposal(amount: 10000, quote: '100元')], input: '午饭100元AA'),
+        validate([aa()], input: '午饭100元'),
+      ]) {
+        expect(result['transactions'], isEmpty);
+        expect(result['questions'], isNotEmpty);
+      }
+    },
+  );
+  for (final kind in [null, 'unknown']) {
+    test('inferred expense kind still requires AA allocation: $kind', () {
+      final result = validate([
+        {...proposal(amount: 10000, quote: '100元'), 'businessKind': kind},
+      ], input: '午饭100元AA');
+      expect(result['transactions'], isEmpty);
+      expect(result['autoSaveEligible'], false);
+      expect((result['questions'] as List).join(), contains('AA'));
+    });
+  }
+  test(
+    'latest count clarification rejects the old share and accepts the new one',
+    () {
+      const input = '午饭100元4人AA\n补充：改成3人';
+      final stale = validate([aa()], input: input);
+      expect(stale['transactions'], isEmpty);
+      final corrected = validate([aa(amount: 3333, count: 3)], input: input);
+      expect(corrected['questions'], isEmpty);
+      expect(corrected['transactions'], hasLength(1));
+    },
+  );
+  test('AA and ordinary records keep separate scopes in one input', () {
+    final result = validate([
+      aa(),
+      {
+        ...proposal(amount: 400, quote: '4元'),
+        'fieldEvidence': {
+          'amount': {'quote': '4元', 'source': 'user'},
+          'type': {'quote': '地铁', 'source': 'user'},
+        },
+      },
+    ], input: '午饭100元4人AA；地铁4元');
+    expect(result['questions'], isEmpty);
+    expect((result['transactions'] as List).map((row) => row['amount']), [
+      2500,
+      400,
+    ]);
+  });
+  test('explicit personal amount can be recorded without AA count', () {
+    final result = validate([
+      {
+        ...proposal(amount: 2500, quote: '25元'),
+        'fieldEvidence': {
+          'amount': {'quote': '25元', 'source': 'user'},
+          'type': {'quote': '午饭', 'source': 'user'},
+        },
+      },
+    ], input: '午饭AA，我自己承担25元');
+    expect(result['questions'], isEmpty);
+    expect(result['transactions'], hasLength(1));
+  });
   for (final text in ['昨天午饭12元，不记得几点吃的', '昨天午饭12元，还没吃完', '昨天午饭12元，准备回宿舍']) {
     test(
       'nonfinancial uncertainty does not block an actual expense: $text',

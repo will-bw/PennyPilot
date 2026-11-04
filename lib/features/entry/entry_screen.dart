@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../core/ledger_controller.dart';
@@ -24,20 +26,38 @@ class _EntryScreenState extends State<EntryScreen> {
   final amount = TextEditingController(),
       merchant = TextEditingController(),
       note = TextEditingController(),
-      account = TextEditingController();
+      account = TextEditingController(),
+      participants = TextEditingController();
   late TxType type = widget.transaction?.type ?? TxType.expense;
   late int? categoryId = widget.transaction?.categoryId;
   late DateTime occurredAt = widget.transaction?.occurredAt ?? DateTime.now();
   late final int openingRevision;
   late String businessKind = widget.transaction?.effectiveKind ?? 'expense';
+  bool splitEnabled = false;
   bool saving = false;
+
+  bool get canSplit => type == TxType.expense && businessKind == 'expense';
+
+  ExpenseSplit? get split => !splitEnabled || !canSplit
+      ? null
+      : ExpenseSplit.fromMap({
+          'totalAmountFen': parseMoney(amount.text),
+          'participantCount': int.tryParse(participants.text),
+        });
+
   @override
   void initState() {
     super.initState();
     openingRevision = widget.controller.revision;
     final tx = widget.transaction;
     if (tx != null) {
-      amount.text = formatMoney(tx.amountFen, group: false);
+      final storedSplit = tx.expenseSplit;
+      splitEnabled = storedSplit != null;
+      amount.text = formatMoney(
+        storedSplit?.totalAmountFen ?? tx.amountFen,
+        group: false,
+      );
+      participants.text = storedSplit?.participantCount.toString() ?? '';
       merchant.text = tx.merchant ?? '';
       note.text = tx.note ?? '';
       account.text = tx.accountTag ?? '';
@@ -50,20 +70,31 @@ class _EntryScreenState extends State<EntryScreen> {
     merchant.dispose();
     note.dispose();
     account.dispose();
+    participants.dispose();
     super.dispose();
   }
 
   Future<void> save() async {
     if (!form.currentState!.validate()) return;
+    final currentSplit = split;
+    if (splitEnabled && canSplit && currentSplit == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请核对 AA 总额和人数，个人分摊至少为 0.01 元')),
+      );
+      return;
+    }
     if (categoryId == null) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('请先选择分类')));
       return;
     }
+    final metadata = {...?widget.transaction?.recognitionMetadata}
+      ..remove('aaSplit');
+    if (currentSplit != null) metadata['aaSplit'] = currentSplit.toMap();
     final tx = LedgerTransaction(
       id: widget.transaction?.id ?? 0,
-      amountFen: parseMoney(amount.text)!,
+      amountFen: currentSplit?.personalAmountFen ?? parseMoney(amount.text)!,
       type: type,
       categoryId: categoryId!,
       occurredAt: occurredAt,
@@ -73,7 +104,9 @@ class _EntryScreenState extends State<EntryScreen> {
       source: widget.transaction?.source ?? TxSource.manual,
       status: widget.transaction?.status ?? TxStatus.confirmed,
       businessKind: businessKind,
-      metadataJson: widget.transaction?.metadataJson,
+      metadataJson: metadata.isEmpty && widget.transaction?.metadataJson == null
+          ? null
+          : jsonEncode(metadata),
       editVersion: widget.transaction?.editVersion ?? 0,
     );
     if (widget.onDraftSaved != null) {
@@ -206,12 +239,15 @@ class _EntryScreenState extends State<EntryScreen> {
                                 : 'income';
                           }
                           categoryId = null;
+                          if (!canSplit) splitEnabled = false;
                         }),
                 ),
               ),
               const SizedBox(height: 24),
               TextFormField(
+                key: const ValueKey('entry-amount'),
                 controller: amount,
+                onChanged: (_) => setState(() {}),
                 keyboardType: const TextInputType.numberWithOptions(
                   decimal: true,
                 ),
@@ -226,7 +262,7 @@ class _EntryScreenState extends State<EntryScreen> {
                   fontFeatures: moneyFigures,
                 ),
                 decoration: InputDecoration(
-                  labelText: '金额',
+                  labelText: splitEnabled && canSplit ? '实付总额' : '金额',
                   floatingLabelBehavior: FloatingLabelBehavior.always,
                   prefixText: '¥ ',
                   prefixStyle: TextStyle(
@@ -252,6 +288,67 @@ class _EntryScreenState extends State<EntryScreen> {
                     ? '请输入 0.01 至 9,999,999.99 元，最多两位小数'
                     : null,
               ),
+              if (canSplit) ...[
+                const SizedBox(height: 8),
+                SwitchListTile.adaptive(
+                  key: const ValueKey('entry-aa-switch'),
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('AA 制'),
+                  subtitle: const Text('只计入自己承担的部分'),
+                  value: splitEnabled,
+                  onChanged: saving
+                      ? null
+                      : (value) => setState(() => splitEnabled = value),
+                ),
+                if (splitEnabled) ...[
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    key: const ValueKey('entry-aa-participants'),
+                    controller: participants,
+                    enabled: !saving,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(
+                      labelText: '总人数（含自己）',
+                      hintText: '至少 2 人',
+                    ),
+                    onChanged: (_) => setState(() {}),
+                    validator: (value) {
+                      final count = int.tryParse(value ?? '');
+                      if (count == null || count < 2) {
+                        return '请输入包含自己在内的总人数，至少 2 人';
+                      }
+                      if (parseMoney(amount.text) != null && split == null) {
+                        return '分摊后不足 0.01 元，请减少人数';
+                      }
+                      return null;
+                    },
+                  ),
+                  if (split case final currentSplit?)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '自己承担 ${money(currentSplit.personalAmountFen)}',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: colors.onSurface,
+                              fontFeatures: moneyFigures,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '仅此金额计入支出，按分四舍五入。',
+                            style: TextStyle(color: colors.onSurfaceVariant),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ],
               const SizedBox(height: 20),
               DropdownButtonFormField<String>(
                 key: ValueKey('business-kind-$businessKind'),
@@ -295,6 +392,7 @@ class _EntryScreenState extends State<EntryScreen> {
                           type = nextType;
                           categoryId = null;
                         }
+                        if (!canSplit) splitEnabled = false;
                       }),
               ),
               if (!const {'expense', 'income', 'refund'}.contains(businessKind))
@@ -532,7 +630,15 @@ class _StoredEvidence extends StatelessWidget {
         ? stringMap(metadata['fieldEvidence'])
         : <String, dynamic>{};
     final questions = (metadata['questions'] as List? ?? [])
-        .whereType<String>();
+        .whereType<String>()
+        .where((question) => question.trim().isNotEmpty);
+    final paymentStatus =
+        metadata['paymentStatus'] ?? metadata['payment_status'];
+    if (facts.isEmpty &&
+        questions.isEmpty &&
+        (paymentStatus == null || paymentStatus.toString().trim().isEmpty)) {
+      return const SizedBox.shrink();
+    }
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       title: const Text('识别依据与待核对信息'),
@@ -541,7 +647,7 @@ class _StoredEvidence extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           title: Text(transaction.businessLabel),
           subtitle: Text(
-            '${transaction.source.label} · ${metadata['paymentStatus'] ?? metadata['payment_status'] ?? '请核对凭证'}',
+            '${transaction.source.label} · ${paymentStatus ?? '请核对凭证'}',
           ),
         ),
         for (final question in questions)
