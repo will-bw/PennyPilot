@@ -30,6 +30,9 @@ import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -258,7 +261,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         awaitStatus("saved")
         window.root = { screen("转账成功\n¥18.00\n收款方\n小明\n订单号 202610240001\n完成") }
         sendEvent()
-        awaitStatus("duplicate")
+        awaitCondition("late receipt did not enrich the original transaction") { rows().singleOrNull()?.merchant == "小明" }
         assertEquals(1, rows().size)
         assertEquals("202610240001", runBlocking { database.backupDao().captureEvents() }.single().orderId)
         window.root = { screen("转账成功\n¥18.00\n收款方\n小明\n订单号 202610240002\n完成") }
@@ -277,7 +280,9 @@ class PaymentAccessibilityServiceIntegrationTest {
         val event = rows().single().captureEventKey
         detailed = true
         scheduler.advanceTimeBy(250)
-        awaitStatus("duplicate")
+        awaitCondition("late evidence was not retained") {
+            runBlocking { database.backupDao().captureEvents() }.singleOrNull()?.orderId == "202610240001"
+        }
         val evidence = runBlocking { database.backupDao().captureEvents() }.single()
         assertEquals(event, evidence.eventKey)
         assertEquals("202610240001", evidence.orderId)
@@ -358,18 +363,269 @@ class PaymentAccessibilityServiceIntegrationTest {
         drainRetries()
         sendEvent()
         awaitStatus("duplicate")
-        assertEquals(1, screenshots)
+        // A new event may change an image-only amount even when text nodes are identical.
+        assertEquals(2, screenshots)
         assertEquals(1, rows().size)
         assertEquals("duplicate", monitor.health.value.screenCaptureStatus)
         // A second real transfer with the same image-only amount must not share the cooldown.
+        val beforeNextTransfer = screenshots
         window.root = { screen("转账", editableChild = true) }
         sendEvent()
         awaitStatus("input_page")
         window.root = { screen("转账成功\n完成") }
         sendEvent()
         awaitStatus("saved")
-        assertEquals(2, screenshots)
+        // A read already suspended on DataStore can be invalidated by the navigation event.
+        // It may consume an attempt, but the new flow still has a bounded recovery budget.
+        assertTrue(screenshots - beforeNextTransfer in 1..3)
         assertEquals(2, rows().size)
+    }
+
+    @Test fun `visual cooldown on a completed result cannot turn delayed OCR into a second payment`() {
+        var elapsed = 0L
+        service.elapsedMillis = { elapsed }
+        service.nowMillis = { startedAt + elapsed }
+        var screenshots = 0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "￥18.00" }
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        connect(enabled = true)
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        val eventKey = rows().single().captureEventKey
+
+        // A redraw invalidates the old image, but the 750 ms budget cannot read a new one yet.
+        sendEvent()
+        awaitStatus("not_receipt")
+        assertEquals(1, screenshots)
+        assertEquals(1, rows().size)
+
+        // Model a delayed executor independently of retry timers: the result never left the window.
+        elapsed = 2_000
+        sendEvent()
+        awaitStatus("duplicate")
+        assertEquals(2, screenshots)
+        assertEquals(eventKey, rows().single().captureEventKey)
+    }
+
+    @Test fun `ordinary navigation still separates two image amount payments`() {
+        assertNonReceiptSeparatesPayments("微信\n通讯录\n发现\n我")
+    }
+
+    @Test fun `chat content still separates two image amount payments`() {
+        assertNonReceiptSeparatesPayments("聊天记录\n转账成功\n完成")
+    }
+
+    @Test fun `failed result still separates two image amount payments`() {
+        assertNonReceiptSeparatesPayments("转账失败\n余额不足\n重新转账")
+    }
+
+    private fun assertNonReceiptSeparatesPayments(intermediate: String) {
+        var elapsed = 0L
+        service.elapsedMillis = { elapsed }
+        service.nowMillis = { startedAt + elapsed }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "￥18.00" }
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        connect(enabled = true)
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        val firstEvent = rows().single().captureEventKey
+        elapsed = 1_000
+        window.root = { screen(intermediate) }
+        sendEvent()
+        awaitStatus("not_receipt")
+        elapsed = 3_000
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(2, rows().size)
+        assertEquals(2, rows().map { it.captureEventKey }.distinct().size)
+        assertTrue(rows().any { it.captureEventKey != firstEvent })
+    }
+
+    @Test fun `readable amount is saved then local OCR enriches merchant and product on the same receipt`() {
+        connect(enabled = true)
+        var screenshots = 0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            assertEquals(1800L, rows().single().amount)
+            "商户名称：东街餐厅\n商品说明：午餐套餐\n付款方式：零钱"
+        }
+        window.root = { screen("支付成功\n实付金额：18.00元\n订单号：202611061234567890\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(0, screenshots)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        sendEvent()
+        awaitCondition("OCR details did not enrich the original receipt") {
+            rows().singleOrNull()?.merchant == "东街餐厅"
+        }
+        val row = rows().single()
+        assertEquals(1800L, row.amount)
+        assertEquals(TxType.EXPENSE, row.type)
+        assertEquals("午餐套餐", receiptDetail("productDescription"))
+        assertTrue(row.note.orEmpty().contains("午餐套餐"))
+        assertEquals(1, screenshots)
+        drainRetries()
+        assertEquals(1, screenshots)
+        assertEquals(1, rows().size)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `OCR merchant name complements a known collecting company without changing receipt identity`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "商户名称：东街餐厅\n商品说明：午餐套餐" }
+        window.root = { screen("支付成功\n￥18.00\n收款方：东街餐饮有限公司\n订单号：202611061234567890\n完成") }
+        sendEvent()
+        awaitCondition("store name was rejected as a conflicting collecting company") {
+            receiptDetail("merchantName") == "东街餐厅"
+        }
+        val row = rows().single()
+        assertEquals(1800L, row.amount)
+        assertEquals("东街餐饮有限公司", receiptDetail("payeeName"))
+        assertEquals("午餐套餐", receiptDetail("productDescription"))
+        assertTrue(row.note.orEmpty().contains("午餐套餐"))
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `known product does not stop bounded OCR from collecting store and more items`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var screenshots = 0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "门店名称：示例广场店\n商品名称：酸奶\n规格：原味\n数量：2" }
+        window.root = { screen("支付成功\n实付金额：18.00元\n商户名称：示例餐厅\n商品说明：午餐套餐\n订单号：202611061234567890\n完成") }
+        sendEvent()
+        awaitCondition("existing product blocked richer details") {
+            rows().singleOrNull()?.metadataJson?.contains("酸奶") == true
+        }
+        assertEquals(1800L, rows().single().amount)
+        assertEquals("午餐套餐", receiptDetail("productDescription"))
+        assertTrue(rows().single().metadataJson!!.contains("示例广场店"))
+        drainRetries()
+        assertEquals(1, rows().size)
+        assertTrue(screenshots in 1..3)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `OCR cannot fill product when its explicit merchant contradicts the known merchant`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "商户名称：错误店铺\n商品说明：错误商品" }
+        window.root = { screen("支付成功\n￥18.00\n商户名称：东街餐厅\n完成") }
+        sendEvent()
+        awaitCondition("same-role merchant conflict was not rejected") {
+            monitor.health.value.screenReadDiagnostics["detailFieldsConflict"] == 1
+        }
+        val row = rows().single()
+        assertEquals("东街餐厅", row.merchant)
+        assertEquals("东街餐厅", receiptDetail("merchantName"))
+        assertNull(receiptDetail("productDescription"))
+        assertEquals(1800L, row.amount)
+    }
+
+    @Test fun `conflicting OCR cannot replace or add details to a verified amount`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "支付成功\n实付金额：88.00元\n商户名称：错误店铺\n商品说明：错误商品" }
+        window.root = { screen("支付成功\n实付金额：18.00元\n订单号：202611061234567890\n完成") }
+        sendEvent()
+        awaitCondition("conflicting OCR was not diagnosed") {
+            monitor.health.value.screenReadDiagnostics["detailFactsConflict"] == 1
+        }
+        val row = rows().single()
+        assertEquals(1800L, row.amount)
+        assertNull(row.merchant)
+        assertNull(receiptDetail("merchantName"))
+        assertNull(receiptDetail("productDescription"))
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `OCR exception preserves the already saved amount and bounded retries`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var calls = 0
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { calls++; error("test-owned local OCR failure") }
+        window.root = { screen("支付成功\n￥18.00\n完成") }
+        sendEvent()
+        awaitCondition("detail OCR failure was not diagnosed") {
+            monitor.health.value.screenReadDiagnostics["detailOcrFailure"] == 1
+        }
+        repeat(20) {
+            scheduler.advanceTimeBy(1_000)
+            sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        assertEquals(3, calls)
+        assertEquals(1800L, rows().single().amount)
+        assertNull(rows().single().merchant)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `new frame discards in flight details while preserving original readable evidence`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            "商户名称：上一帧店铺\n商品说明：上一帧商品"
+        }
+        window.root = { screen("支付成功\n￥18.00\n完成") }
+        sendEvent()
+        awaitCondition("changed OCR frame was not rejected") {
+            monitor.health.value.screenReadHistory.any { it.diagnostics["detailSnapshotChanged"] == 1 }
+        }
+        assertEquals(1800L, rows().single().amount)
+        assertNull(rows().single().merchant)
+        assertNull(receiptDetail("merchantName"))
+        assertNull(receiptDetail("productDescription"))
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `same window and amount can try details again after the original bounded budget expires`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var calls = 0
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { calls++; "" }
+        window.root = { screen("支付成功\n￥18.00\n完成") }
+        sendEvent()
+        awaitCondition("first detail attempt was not made") { calls == 1 }
+        repeat(20) {
+            scheduler.advanceTimeBy(1_000)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        assertEquals(3, calls)
+        scheduler.advanceTimeBy(60_001)
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        awaitCondition("expired detail budget blocked a later receipt") { calls == 4 }
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `detail screenshot failure records system error and keeps verified receipt`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var ocrCalls = 0
+        service.visualOcr = { ocrCalls++; "商户名称：不会读取" }
+        window.root = { screen("支付成功\n￥18.00\n完成") }
+        sendEvent()
+        awaitCondition("window screenshot error was lost") {
+            monitor.health.value.screenReadDiagnostics["visualScreenshotErrorCode"] ==
+                AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR
+        }
+        assertEquals(listOf(7), window.screenshotWindows)
+        assertEquals(1800L, rows().single().amount)
+        assertEquals(0, ocrCalls)
     }
 
     @Test fun `visual recovery refuses a changed window before using OCR output`() {
@@ -383,6 +639,68 @@ class PaymentAccessibilityServiceIntegrationTest {
         window.root = { screen("转账成功\n完成") }
         sendEvent()
         drainRetries()
+        assertTrue(rows().isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `temporary screenshot failure recovers without another accessibility event`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var screenshots = 0
+        service.visualCapture = {
+            screenshots++
+            if (screenshots == 1) null else Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888)
+        }
+        service.visualOcr = { "￥18.00" }
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("first screenshot was not attempted") { screenshots == 1 }
+        repeat(20) {
+            scheduler.advanceTimeBy(250)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        awaitCondition("delayed screenshot was not recovered") { rows().size == 1 }
+        assertEquals(2, screenshots)
+        assertEquals(1800L, rows().single().amount)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `empty first OCR frame is retried and successful facts are reused`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var ocrCalls = 0
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { if (++ocrCalls == 1) "" else "￥28.00" }
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("first OCR was not attempted") { ocrCalls == 1 }
+        repeat(20) {
+            scheduler.advanceTimeBy(250)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        awaitCondition("delayed OCR was not recovered") { rows().size == 1 }
+        assertEquals(2800L, rows().single().amount)
+        assertEquals(2, ocrCalls)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `unreadable OCR has a bounded retry budget`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var screenshots = 0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "" }
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("first screenshot was not attempted") { screenshots == 1 }
+        repeat(40) {
+            scheduler.advanceTimeBy(500)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        assertEquals(3, screenshots)
         assertTrue(rows().isEmpty())
         assertEquals(0, cloudCalls)
     }
@@ -401,9 +719,56 @@ class PaymentAccessibilityServiceIntegrationTest {
         connect(enabled = true)
         window.root = { screen("转账成功\n完成") }
         sendEvent()
+        awaitCondition("old OCR was not attempted") { screenshots == 1 }
+        repeat(8) {
+            scheduler.advanceTimeBy(250)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
         awaitStatus("saved")
         assertEquals(2, screenshots)
         assertEquals(2800L, rows().single().amount)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `completed OCR cache cannot supply an amount after a new frame`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var screenshots = 0
+        var amount = "￥18.00"
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { amount }
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("first receipt was not saved") { rows().size == 1 }
+        scheduler.advanceTimeBy(1_000)
+        amount = "￥28.00"
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        awaitCondition("cached amount was reused for a new frame") { rows().size == 2 }
+        assertEquals(listOf(1800L, 2800L), rows().map { it.amount }.sorted())
+        assertEquals(2, screenshots)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `continuous content events cannot reset the OCR attempt budget`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var screenshots = 0
+        service.visualCapture = { screenshots++; Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            "￥18.00"
+        }
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("OCR was not attempted") { screenshots == 1 }
+        repeat(40) {
+            scheduler.advanceTimeBy(500)
+            scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        assertEquals(3, screenshots)
+        assertTrue(rows().isEmpty())
         assertEquals(0, cloudCalls)
     }
 
@@ -752,9 +1117,9 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(0,cloudCalls)
     }
 
-    @Test fun `alipay and meituan amount-first payment nodes reach Room through the service`() {
+    @Test fun `supported wallet amount-first payment nodes reach Room through the service`() {
         connect(enabled = true)
-        val packages = listOf("com.eg.android.AlipayGphone", "com.sankuai.meituan", "com.sankuai.meituan.takeoutnew")
+        val packages = listOf("com.eg.android.AlipayGphone", "com.unionpay", "com.sankuai.meituan", "com.sankuai.meituan.takeoutnew")
         for ((index, packageName) in packages.withIndex()) {
             window.root = { amountFirstPaymentScreen(packageName, "18.5$index", "SC20261101000$index") }
             sendEvent(packageName = packageName)
@@ -770,7 +1135,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         sendEvent(packageName = packages.first())
         awaitStatus("input_page")
         drainRetries()
-        assertEquals(3, rows().size)
+        assertEquals(packages.size, rows().size)
         assertTrue(window.screenshotWindows.isEmpty())
         assertEquals(0, cloudCalls)
     }
@@ -1080,6 +1445,12 @@ class PaymentAccessibilityServiceIntegrationTest {
 
     private fun rows() = runBlocking { database.backupDao().transactions() }
 
+    private fun receiptDetail(field: String): String? {
+        val raw = rows().singleOrNull()?.metadataJson ?: return null
+        val details = (Json.parseToJsonElement(raw) as? JsonObject)?.get("receiptDetails") as? JsonObject
+        return (details?.get(field) as? JsonPrimitive)?.content
+    }
+
     private fun destroyService() {
         if (!serviceDestroyed) {
             serviceDestroyed = true
@@ -1099,7 +1470,8 @@ class PaymentAccessibilityServiceIntegrationTest {
             if (condition()) return
             Thread.sleep(5)
         }
-        fail(message)
+        fail("$message; finalHealth=${monitor.health.value}; reads=${window.reads}; " +
+            "cacheClears=${window.cacheClears}; virtualTime=${scheduler.currentTime}; rows=${rows().size}")
     }
 
     private fun drainRetries() {

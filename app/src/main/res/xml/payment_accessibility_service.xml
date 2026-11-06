@@ -8,5 +8,5 @@
     android:canTakeScreenshot="true"
     android:canPerformGestures="false"
     android:isAccessibilityTool="false"
-    android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone,com.sankuai.meituan,com.sankuai.meituan.takeoutnew,com.ss.android.ugc.aweme,com.ss.android.ugc.aweme.lite"
+    android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone,com.unionpay,com.sankuai.meituan,com.sankuai.meituan.takeoutnew,com.ss.android.ugc.aweme,com.ss.android.ugc.aweme.lite"
     android:description="@string/payment_capture_service_description" />

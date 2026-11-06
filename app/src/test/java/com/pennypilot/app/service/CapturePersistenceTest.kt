@@ -14,6 +14,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -45,6 +48,191 @@ class CapturePersistenceTest {
     private suspend fun capture(
         evidence: CaptureEvidence = evidence(), transaction: TransactionEntity = tx()
     ): CaptureResult = CapturePersistence.capture(db, LedgerRevision.current, transaction, evidence)
+
+    @Test fun `same order from another channel fills missing facts without semantic replacement`() = runTest {
+        val original = tx(merchant = " ").copy(accountTag = "", note = " ", businessKind = "transfer",
+            metadataJson = """{"fieldEvidence":{"amount":"通知·实付18元","merchant":""}}""")
+        val first = capture(evidence(orderId = "ORDER202611060001"), original) as CaptureResult.Inserted
+        val page = tx(TxSource.ACCESSIBILITY).copy(accountTag = "储蓄卡", note = "午餐", categoryId = 2,
+            businessKind = "expense", status = TxStatus.CONFIRMED,
+            metadataJson = """{"fieldEvidence":{"amount":"页面·18元","merchant":"页面·小王面馆","paymentMethod":"页面·储蓄卡"}}""")
+
+        val result = capture(evidence(event = "page", notificationKey = null, orderId = "ORDER202611060001"), page)
+
+        assertEquals(CaptureResult.Enriched(first.transactionId), result)
+        val saved = db.transactionDao().getById(first.transactionId)!!
+        assertEquals("小王面馆", saved.merchant)
+        assertEquals("储蓄卡", saved.accountTag)
+        assertEquals("午餐", saved.note)
+        assertEquals(original.amount, saved.amount)
+        assertEquals(original.type, saved.type)
+        assertEquals(original.categoryId, saved.categoryId)
+        assertEquals(original.businessKind, saved.businessKind)
+        assertEquals(original.status, saved.status)
+        val fields = (Json.parseToJsonElement(saved.metadataJson!!) as JsonObject)["fieldEvidence"] as JsonObject
+        assertEquals(JsonPrimitive("通知·实付18元"), fields["amount"])
+        assertEquals(JsonPrimitive("页面·小王面馆"), fields["merchant"])
+        assertEquals(JsonPrimitive("页面·储蓄卡"), fields["paymentMethod"])
+        assertEquals(1, db.backupDao().transactions().size)
+        assertEquals(2, db.backupDao().captureEvents().size)
+    }
+
+    @Test fun `same order local field conflicts never replace existing nonempty facts`() = runTest {
+        val original = tx().copy(accountTag = "银行卡", note = "原备注", businessKind = "expense")
+        val first = capture(evidence(orderId = "ORDER202611060002"), original) as CaptureResult.Inserted
+        val incoming = original.copy(source = TxSource.ACCESSIBILITY, merchant = "其他商户", accountTag = "余额", note = "新备注")
+
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(
+            evidence(event = "page", notificationKey = null, orderId = "ORDER202611060002"), incoming))
+        assertEquals(original.copy(id = first.transactionId, captureEventKey = "first"),
+            db.transactionDao().getById(first.transactionId))
+    }
+
+    @Test fun `strong matching receipt upgrades only explicit observed time and its field evidence`() = runTest {
+        val original = tx().copy(metadataJson = """{"transactionTimeSource":"observed","timePrecision":"unspecified","observedAt":$time,"fieldEvidence":{"amount":"通知·18元"}}""")
+        val first = capture(evidence(orderId = "ORDER202611060003"), original) as CaptureResult.Inserted
+        val receiptTime = time - 60_000
+        val observedAt = time + 2_000
+        val page = original.copy(source = TxSource.ACCESSIBILITY, occurredAt = receiptTime,
+            metadataJson = """{"transactionTimeSource":"receipt","timePrecision":"exact","observedAt":$observedAt,"fieldEvidence":{"amount":"页面·18元","occurredAt":"页面·支付时间"}}""")
+
+        assertEquals(CaptureResult.Enriched(first.transactionId), capture(
+            evidence(event = "receipt", notificationKey = null, at = observedAt, orderId = "ORDER202611060003"), page))
+
+        val saved = db.transactionDao().getById(first.transactionId)!!
+        assertEquals(receiptTime, saved.occurredAt)
+        assertEquals(original.createdAt, saved.createdAt)
+        assertEquals(original.source, saved.source)
+        val metadata = Json.parseToJsonElement(saved.metadataJson!!) as JsonObject
+        assertEquals(JsonPrimitive("receipt"), metadata["transactionTimeSource"])
+        assertEquals(JsonPrimitive("exact"), metadata["timePrecision"])
+        assertEquals(JsonPrimitive(observedAt), metadata["observedAt"])
+        val fields = metadata["fieldEvidence"] as JsonObject
+        assertEquals(JsonPrimitive("通知·18元"), fields["amount"])
+        assertEquals(JsonPrimitive("页面·支付时间"), fields["occurredAt"])
+
+        assertEquals(CaptureResult.Duplicate(first.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, original, evidence(orderId = "ORDER202611060003"), enrichSemantics = true))
+        val replayed = db.transactionDao().getById(first.transactionId)!!
+        assertEquals(receiptTime, replayed.occurredAt)
+        assertEquals(metadata["transactionTimeSource"], (Json.parseToJsonElement(replayed.metadataJson!!) as JsonObject)["transactionTimeSource"])
+    }
+
+    @Test fun `receipt does not guess the time source of legacy records`() = runTest {
+        val first = capture(evidence(orderId = "ORDER202611060004")) as CaptureResult.Inserted
+        val incoming = tx(TxSource.ACCESSIBILITY).copy(occurredAt = time - 60_000,
+            metadataJson = """{"transactionTimeSource":"receipt","timePrecision":"exact","observedAt":$time,"fieldEvidence":{"occurredAt":"页面·支付时间"}}""")
+
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(
+            evidence(event = "receipt", notificationKey = null, orderId = "ORDER202611060004"), incoming))
+        val saved = db.transactionDao().getById(first.transactionId)!!
+        assertEquals(time, saved.occurredAt)
+        val metadata = Json.parseToJsonElement(saved.metadataJson!!) as JsonObject
+        assertFalse(metadata.containsKey("transactionTimeSource"))
+        assertFalse((metadata["fieldEvidence"] as JsonObject).containsKey("occurredAt"))
+    }
+
+    @Test fun `late facts cannot alter user decisions manual records or unresolved duplicates`() = runTest {
+        val base = tx(merchant = null).copy(metadataJson = """{"transactionTimeSource":"observed"}""")
+        val changes: List<(TransactionEntity) -> TransactionEntity> = listOf(
+            { it.copy(editVersion = 1, status = TxStatus.CONFIRMED) },
+            { it.copy(status = TxStatus.IGNORED) },
+            { it.copy(duplicateOf = 999) },
+            { it.copy(source = TxSource.MANUAL) }
+        )
+        changes.forEachIndexed { index, change ->
+            val order = "ORDER202611060010$index"
+            val first = capture(evidence(event = "initial-$index", orderId = order), base) as CaptureResult.Inserted
+            val protected = change(db.transactionDao().getById(first.transactionId)!!)
+            db.transactionDao().update(protected)
+            val page = tx(TxSource.ACCESSIBILITY).copy(accountTag = "银行卡", note = "新备注", occurredAt = time - 1_000,
+                metadataJson = """{"transactionTimeSource":"receipt","timePrecision":"exact"}""")
+
+            assertEquals(CaptureResult.Duplicate(first.transactionId), capture(
+                evidence(event = "receipt-$index", notificationKey = null, orderId = order), page))
+            assertEquals(protected, db.transactionDao().getById(first.transactionId))
+        }
+    }
+
+    @Test fun `local receipt can fill merchant without replacing completed model semantics`() = runTest {
+        val original = tx(merchant = null).copy(categoryId = 2, accountTag = "储蓄卡", note = "午餐", businessKind = "expense",
+            metadataJson = """{"semanticModelApplied":true,"fieldEvidence":{"amount":"通知·18元"}}""")
+        val first = capture(evidence(orderId = "ORDER202611060005"), original) as CaptureResult.Inserted
+        val page = tx(TxSource.ACCESSIBILITY).copy(accountTag = "微信支付", note = "转账", businessKind = "transfer")
+
+        assertEquals(CaptureResult.Enriched(first.transactionId), CapturePersistence.capture(db, LedgerRevision.current,
+            page, evidence(event = "page", notificationKey = null, orderId = "ORDER202611060005"), enrichSemantics = true))
+        val saved = db.transactionDao().getById(first.transactionId)!!
+        assertEquals("小王面馆", saved.merchant)
+        assertEquals(original.categoryId, saved.categoryId)
+        assertEquals(original.accountTag, saved.accountTag)
+        assertEquals(original.note, saved.note)
+        assertEquals(original.businessKind, saved.businessKind)
+    }
+
+    @Test fun `late details deep merge without replacing captured facts or completed model semantics`() = runTest {
+        val original = tx().copy(categoryId = 2, accountTag = "招商银行", note = "午餐AA", businessKind = "expense",
+            metadataJson = """{"semanticModelApplied":true,"receiptDetails":{"merchantName":"小王面馆","productDescription":"牛肉面","paymentChannel":"微信支付","fieldSources":{"merchantName":"通知·商户","productDescription":"页面·商品"}}}""")
+        val first = capture(evidence(orderId = "ORDER202611060030"), original) as CaptureResult.Inserted
+        val page = tx(TxSource.ACCESSIBILITY).copy(categoryId = 3, accountTag = "零钱", note = "新商品", businessKind = "transfer",
+            metadataJson = """{"receiptDetails":{"merchantName":"错误商户","productDescription":"其他商品","remark":"少辣","fundingAccount":"招商银行(1234)","fieldSources":{"merchantName":"重绘商户","productDescription":"重绘商品","remark":"本地OCR·备注","fundingAccount":"页面·付款方式"}}}""")
+        val later = evidence(event = "detail-page", notificationKey = null, orderId = "ORDER202611060030")
+        assertEquals(CaptureResult.Duplicate(first.transactionId), CapturePersistence.capture(db, LedgerRevision.current,
+            page, later, enrichSemantics = true))
+        val saved = db.transactionDao().getById(first.transactionId)!!
+        assertEquals(original.categoryId, saved.categoryId)
+        assertEquals(original.note, saved.note)
+        assertEquals(original.accountTag, saved.accountTag)
+        assertEquals(original.businessKind, saved.businessKind)
+        val details = (Json.parseToJsonElement(saved.metadataJson!!) as JsonObject)["receiptDetails"] as JsonObject
+        assertEquals(JsonPrimitive("小王面馆"), details["merchantName"])
+        assertEquals(JsonPrimitive("牛肉面"), details["productDescription"])
+        assertEquals(JsonPrimitive("少辣"), details["remark"])
+        assertEquals(JsonPrimitive("招商银行(1234)"), details["fundingAccount"])
+        val sources = details["fieldSources"] as JsonObject
+        assertEquals(JsonPrimitive("页面·商品"), sources["productDescription"])
+        assertEquals(JsonPrimitive("本地OCR·备注"), sources["remark"])
+        CapturePersistence.capture(db, LedgerRevision.current, original,
+            evidence(orderId = "ORDER202611060030"), enrichSemantics = true)
+        val replayed = db.transactionDao().getById(first.transactionId)!!
+        assertEquals(details, (Json.parseToJsonElement(replayed.metadataJson!!) as JsonObject)["receiptDetails"])
+        assertEquals(original.note, replayed.note)
+        assertEquals(1, db.backupDao().transactions().size)
+    }
+
+    @Test fun `late funding account replaces channel placeholder and new remark extends only generated receipt note`() = runTest {
+        val original = tx().copy(accountTag = "微信", note = "商品：牛肉面", businessKind = "expense",
+            metadataJson = """{"receiptDetails":{"productDescription":"牛肉面","paymentChannel":"微信","fieldSources":{"productDescription":"页面·商品"}}}""")
+        val first = capture(transaction = original) as CaptureResult.Inserted
+        val page = original.copy(source = TxSource.ACCESSIBILITY, accountTag = "招商银行(1234)", note = "备注：少辣",
+            metadataJson = """{"receiptDetails":{"remark":"少辣","fundingAccount":"招商银行(1234)","fieldSources":{"remark":"本地OCR·备注","fundingAccount":"本地OCR·付款方式"}}}""")
+        assertEquals(CaptureResult.Enriched(first.transactionId), capture(transaction = page))
+        val saved = db.transactionDao().getById(first.transactionId)!!
+        assertEquals("招商银行(1234)", saved.accountTag)
+        assertEquals("商品：牛肉面；备注：少辣", saved.note)
+        assertEquals(CaptureResult.Duplicate(first.transactionId), CapturePersistence.capture(db, LedgerRevision.current,
+            original, evidence(), enrichSemantics = true))
+        assertEquals(saved.note, db.transactionDao().getById(first.transactionId)!!.note)
+        assertEquals(saved.accountTag, db.transactionDao().getById(first.transactionId)!!.accountTag)
+
+        val edited = saved.copy(note = "我自己改的用途", accountTag = "现金", editVersion = 1)
+        db.transactionDao().update(edited)
+        capture(transaction = page.copy(note = "不应覆盖", metadataJson = """{"receiptDetails":{"remark":"后来文字"}}"""))
+        assertEquals(edited, db.transactionDao().getById(first.transactionId))
+        assertEquals(1, db.backupDao().transactions().size)
+    }
+
+    @Test fun `equal split refunds retain separate refund identities and never fill each other`() = runTest {
+        val refund = tx(TxSource.ACCESSIBILITY, null).copy(type = TxType.INCOME, amount = -500, businessKind = "refund")
+        val firstEvidence = evidence(event = "refund-1", notificationKey = null, orderId = "REFUND202611060001")
+            .copy(orderDomain = "alipay:refund")
+        val first = capture(firstEvidence, refund) as CaptureResult.Inserted
+        val second = capture(firstEvidence.copy(eventKey = "refund-2", orderId = "REFUND202611060002"),
+            refund.copy(merchant = "小王面馆")) as CaptureResult.Inserted
+        assertNull(second.duplicateOf)
+        assertNull(db.transactionDao().getById(first.transactionId)!!.merchant)
+        assertEquals(2, db.backupDao().transactions().size)
+    }
 
     @Test fun `AI semantics enrich one event and promote the untouched pending record`() = runTest {
         val initial = tx().copy(businessKind = "unknown", metadataJson = """{"scene":"transfer_sent"}""")

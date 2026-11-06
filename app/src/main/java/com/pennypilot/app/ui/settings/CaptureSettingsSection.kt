@@ -75,7 +75,7 @@ internal fun CaptureSettingsSection(viewModel: SettingsViewModel, onOpenBackgrou
         CaptureSettingsCard(Icons.Outlined.NotificationsActive, "支付通知捕获") {
             CaptureToggle(
                 title = "读取支付通知",
-                description = "支持微信、支付宝、美团、抖音的支付通知。应用没有发通知或隐藏金额时，通知捕获无法识别。",
+                description = "支持微信、支付宝、云闪付、美团、抖音的支付通知。应用没有发通知或隐藏金额时，通知捕获无法识别。",
                 checked = notificationEnabled, enabled = !saving,
                 onCheckedChange = viewModel::setNotificationCaptureEnabled
             )
@@ -110,7 +110,7 @@ internal fun CaptureSettingsSection(viewModel: SettingsViewModel, onOpenBackgrou
         CaptureSettingsCard(Icons.Outlined.TouchApp, "支付页面捕获") {
             CaptureToggle(
                 title = "读取可见支付结果",
-                description = "没有支付通知时，可补充识别微信、支付宝、美团和抖音的可见支付结果。默认关闭。",
+                description = "没有支付通知时，可补充识别微信、支付宝、云闪付、美团和抖音的可见支付结果。默认关闭。",
                 checked = screenEnabled, enabled = !saving,
                 onCheckedChange = { enabled ->
                     if (enabled) {
@@ -130,7 +130,7 @@ internal fun CaptureSettingsSection(viewModel: SettingsViewModel, onOpenBackgrou
                 color = if (screenEnabled && (!accessibilityGranted || !health.isAccessibilityBound)) MaterialTheme.pendingAmberColor
                     else MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text("读取支持应用的可见文字，在本机判断是否为支付结果；只保存识别出的交易字段，不保存或上传整页，不读取密码或输入内容，也不截图。系统或应用可能限制读取，仍可能需要手动记账。",
+            Text("读取支持应用的可见文字，在本机判断是否为支付结果；只保存识别出的交易字段，不保存或上传整页，不读取密码或输入内容。截图补充需单独开启，图片云端识别还需另行授权。系统或应用可能限制读取，仍可能需要手动记账。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (screenEnabled || accessibilityGranted) {
                 OutlinedButton(onClick = { enableAfterDisclosure = false; showDisclosure = true }, enabled = !saving,
@@ -189,8 +189,8 @@ internal fun CaptureSettingsSection(viewModel: SettingsViewModel, onOpenBackgrou
             onDismissRequest = { showDisclosure = false },
             title = { Text("支付页面捕获使用说明") },
             text = {
-                Text("开启后，PennyPilot 会通过系统无障碍服务，读取微信、支付宝、美团、抖音的屏幕可见文字，在本机判断是否为支付结果，生成待确认账目。\n\n" +
-                    "只保存识别出的交易字段，不保存或上传整页。不读取密码或输入内容，不截图，也不会代你点击、付款或操作其他应用。\n\n" +
+                Text("开启后，PennyPilot 会通过系统无障碍服务，读取微信、支付宝、云闪付、美团、抖音的屏幕可见文字，在本机判断是否为支付结果，按你的设置自动记账或生成待确认账目。\n\n" +
+                    "只保存识别出的交易字段，不保存或上传整页。不读取密码或输入内容，也不会代你点击、付款或操作其他应用。截图补充需单独开启，图片云端识别还需另行授权。\n\n" +
                     "请在系统设置中自行确认授权。部分页面可能无法读取，不能保证覆盖每笔支付。你可随时在本页暂停，或在系统设置中撤销授权。",
                     modifier = Modifier.verticalScroll(rememberScrollState()))
             },

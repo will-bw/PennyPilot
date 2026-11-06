@@ -1,6 +1,8 @@
 package com.pennypilot.app.data.recognition
 
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentReceiptDetails
+import com.pennypilot.app.data.parser.PaymentReceiptContext
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -122,5 +124,101 @@ class CaptureSemanticResolverTest {
         assertEquals(12, bounded.preferences.size)
         assertEquals(80, bounded.deviceTime.length)
         assertEquals(120, bounded.relatedHistory.first().note!!.length)
+    }
+
+    @Test fun `receipt product and remark inform category and note while funding account outranks channel`() {
+        val receipt = parsed("小林").copy(paymentMethod = "微信支付",
+            details = PaymentReceiptDetails(productDescription = "鸡腿饭套餐", remark = "少辣",
+                paymentChannel = "微信支付", fundingAccount = "招商银行储蓄卡(1234)"))
+        val result = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "支付成功17元", context)
+        assertEquals("expense", result.businessKind)
+        assertEquals(1L, result.categoryId)
+        assertEquals("招商银行储蓄卡(1234)", result.accountTag)
+        assertEquals("商品：鸡腿饭套餐；备注：少辣", result.note)
+        assertFalse(result.assumptions.any { it.contains("支付账户") })
+        assertEquals(1700L, receipt.amountCents)
+        assertEquals("EXPENSE", receipt.direction)
+    }
+
+    @Test fun `receipt detail context retains model summary and adds uncovered details without inventing an account`() {
+        val receipt = parsed("小林").copy(details = PaymentReceiptDetails(
+            productDescription = "聚餐套餐", remark = "同事AA", paymentChannel = "微信"))
+        val result = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "支付成功17元", context,
+            PaymentProposal(businessKind = "expense", categoryId = 1, note = "工作日晚餐AA"))
+        assertEquals("工作日晚餐AA；商品：聚餐套餐；备注：同事AA", result.note)
+        assertEquals("微信", result.accountTag)
+        assertNull(receipt.details.fundingAccount)
+    }
+
+    @Test fun `late store name informs category while the original payee remains the transaction identity`() {
+        val receipt = parsed("晨光经营有限公司").copy(details = PaymentReceiptDetails(
+            merchantName = "街角面馆", payeeName = "晨光经营有限公司"))
+        val result = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "支付成功17元", context)
+        assertEquals(1L, result.categoryId)
+        assertEquals("expense", result.businessKind)
+        assertEquals("晨光经营有限公司", receipt.merchant)
+    }
+
+    @Test fun `AI meaning takes precedence over broad consumption keywords while explicit scenes remain authoritative`() {
+        val receipt = parsed("小林", scene = "merchant_payment").copy(details = PaymentReceiptDetails(
+            productDescription = "午餐套餐", context = listOf(PaymentReceiptContext("用途", "替同事垫付", "页面"))))
+        val result = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "支付成功17元", context,
+            PaymentProposal(businessKind = "receivable", categoryId = 1, note = "替同事垫付午餐"))
+        assertEquals("receivable", result.businessKind)
+        assertEquals(1L, result.categoryId)
+        assertEquals("替同事垫付午餐；商品：午餐套餐", result.note)
+        val redPacket = CaptureSemanticResolver.resolve(parsed(direction = "INCOME", scene = "red_packet_received"),
+            "com.tencent.mm", "收款成功17元", context, PaymentProposal(businessKind = "transfer"))
+        assertEquals("income", redPacket.businessKind)
+        val selfTransfer = CaptureSemanticResolver.resolve(parsed(scene = "account_transfer"),
+            "com.tencent.mm", "支付成功17元", context, PaymentProposal(businessKind = "expense"))
+        assertEquals("transfer", selfTransfer.businessKind)
+        val retainedScene = CaptureSemanticResolver.resolve(parsed(direction = "INCOME", scene = "payment_received"),
+            "com.tencent.mm", "收款成功17元", context.copy(receipt = CaptureSemanticReceipt(scene = "red_packet_received")),
+            PaymentProposal(businessKind = "transfer"))
+        assertEquals("income", retainedScene.businessKind)
+    }
+
+    @Test fun `captured semantic snapshot informs classification and rich note without modifying parsed facts`() {
+        val receipt = parsed("经营公司")
+        val snapshot = CaptureSemanticReceipt(details = mapOf("productDescription" to "牛肉面", "remark" to "少辣"),
+            context = listOf(PaymentReceiptContext("门店名称", "街角面馆", "本地OCR")))
+        val local = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "转账成功17元", context.copy(receipt = snapshot))
+        assertEquals(1L, local.categoryId)
+        assertEquals("商品：牛肉面；备注：少辣", local.note)
+        val modeled = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "转账成功17元", context.copy(receipt = snapshot),
+            PaymentProposal(businessKind = "expense", categoryId = 1, note = "街角面馆午餐，牛肉面，少辣"))
+        assertEquals("街角面馆午餐，牛肉面，少辣", modeled.note)
+        assertTrue(receipt.details.isEmpty())
+        assertEquals(1700L, receipt.amountCents)
+    }
+
+    @Test fun `receipt snapshot bounds and redacts identifying values while retaining semantic context`() {
+        val receipt = CaptureSemanticReceipt(
+            details = mapOf("merchantName" to "街角面馆", "fundingAccount" to "招商银行(1234) 6222021234567890123",
+                "remark" to "联系13800138000，订单号ORDER1234567890AB，邮箱hello@example.invalid", "rawPage" to "不得保留的整页内容"),
+            context = listOf(PaymentReceiptContext("订单号", "ORDER1234567890AB", "页面")) +
+                List(30) { PaymentReceiptContext("附加字段$it", "明细".repeat(250), "页面") },
+            occurredAt = "2026-11-07T12:30:00+08:00", scene = "merchant_payment")
+        val bounded = context.copy(receipt = receipt).bounded().receipt!!
+        val serialized = kotlinx.serialization.json.Json.encodeToString(CaptureSemanticReceipt.serializer(), bounded)
+        listOf("6222021234567890123", "13800138000", "ORDER1234567890AB", "hello@example.invalid", "不得保留的整页内容")
+            .forEach { assertFalse(it, serialized.contains(it)) }
+        assertTrue(serialized.contains("招商银行(1234)"))
+        assertTrue(serialized.contains("2026-11-07T12:30:00+08:00"))
+        assertTrue(bounded.context.size <= 16)
+        assertTrue(bounded.context.all { it.label.length <= 40 && it.value.length <= 300 })
+        assertTrue(bounded.context.sumOf { it.label.length + it.value.length } <= 2400)
+        assertEquals(bounded, bounded.bounded())
+    }
+
+    @Test fun `rich note reserves space for uncovered receipt details within five hundred characters`() {
+        val result = CaptureSemanticResolver.resolve(parsed().copy(details = PaymentReceiptDetails(
+            productDescription = "牛肉面", remark = "不要香菜")), "com.tencent.mm", "转账成功17元", context,
+            PaymentProposal(businessKind = "expense", note = "长摘要".repeat(200)))
+        assertTrue(result.note!!.length <= 500)
+        assertTrue(result.note!!.startsWith("长摘要"))
+        assertTrue(result.note!!.contains("商品：牛肉面"))
+        assertTrue(result.note!!.contains("备注：不要香菜"))
     }
 }

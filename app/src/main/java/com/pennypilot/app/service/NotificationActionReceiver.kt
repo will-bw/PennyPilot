@@ -15,12 +15,23 @@ class NotificationActionReceiver : BroadcastReceiver() {
         const val ACTION_CONFIRM = "com.pennypilot.app.CONFIRM_TX"
         const val ACTION_IGNORE = "com.pennypilot.app.IGNORE_TX"
         const val ACTION_UNDO = "com.pennypilot.app.UNDO_TX"
+        const val ACTION_DISMISS_RECOGNITION_PENDING = "com.pennypilot.app.DISMISS_RECOGNITION_PENDING"
         const val EXTRA_TX_ID = "tx_id"
         const val EXTRA_CAPTURE_EVENT_KEY = "capture_event_key"
         const val EXTRA_LEDGER_REVISION = "ledger_revision"
+        const val EXTRA_PENDING_HISTORY_KEY = "pending_history_key"
+        const val EXTRA_PENDING_POSTED_AT = "pending_posted_at"
+        const val EXTRA_PENDING_POSTED_ELAPSED = "pending_posted_elapsed"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == ACTION_DISMISS_RECOGNITION_PENDING) {
+            NotificationHelper.recordPendingDismissal(context,
+                intent.getStringExtra(EXTRA_PENDING_HISTORY_KEY) ?: return,
+                intent.getLongExtra(EXTRA_PENDING_POSTED_AT, -1L),
+                intent.getLongExtra(EXTRA_PENDING_POSTED_ELAPSED, -1L))
+            return
+        }
         val txId = intent.getLongExtra(EXTRA_TX_ID, -1L)
         if (txId < 0) return
         // 老版本通知没有事件身份，无法判断 ID 是否已被恢复后的账目复用。

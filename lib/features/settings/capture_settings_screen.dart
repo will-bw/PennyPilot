@@ -102,6 +102,7 @@ String? screenReadDiagnosticsSummary(Object? diagnostics) {
 String captureAppLabel(String packageName) => switch (packageName) {
   'com.tencent.mm' => '微信',
   'com.eg.android.AlipayGphone' => '支付宝',
+  'com.unionpay' => '云闪付',
   'com.sankuai.meituan' => '美团',
   'com.sankuai.meituan.takeoutnew' => '美团外卖',
   'com.ss.android.ugc.aweme' => '抖音',
@@ -345,6 +346,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
           capabilities['notificationListenerGranted'] == true;
       final accessibilityGranted = capabilities['accessibilityGranted'] == true;
       final reminders = capabilities['remindersEnabled'] == true;
+      final headsUp = capabilities['captureHeadsUpEnabled'] == true;
       final listenerConnected =
           capabilities['notificationServiceConnected'] == true;
       final accessibilityConnected =
@@ -438,7 +440,9 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                       vertical: 10,
                     ),
                     title: const Text('读取支付通知'),
-                    subtitle: const Text('支持微信、支付宝、美团和抖音。未发通知或通知隐藏金额时，可能无法识别。'),
+                    subtitle: const Text(
+                      '支持微信、支付宝、云闪付、美团和抖音。未发通知或通知隐藏金额时，可能无法识别。',
+                    ),
                     value: notification,
                     onChanged: _busy
                         ? null
@@ -522,12 +526,15 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                 title: '提醒与后台',
                 children: [
                   _permission(
-                    title: '记账确认提醒',
+                    title: '支付提醒',
                     granted: reminders,
-                    target: 'notifications',
-                    detail:
-                        '这是 PennyPilot 发出的提醒，与读取支付通知的通知使用权独立。关闭提醒时，账单仍会保存在待确认列表。',
-                    button: '查看提醒设置',
+                    target: 'captureNotifications',
+                    detail: !reminders
+                        ? '通知尚未允许。开启后可及时看到支付识别进度和记账结果；关闭提醒不影响账单保存。'
+                        : headsUp
+                        ? '已允许即时提醒。分类和详情在后台补充，同一笔不会反复弹出；免打扰和系统横幅设置仍会影响显示。'
+                        : '当前允许通知，但提醒优先级较低。前往设置开启横幅或悬浮通知，支付后更容易及时看到。',
+                    button: '设置支付提醒',
                   ),
                   if (!reminders)
                     Padding(

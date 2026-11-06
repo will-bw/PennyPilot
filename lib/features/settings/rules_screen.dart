@@ -8,6 +8,7 @@ import 'settings_widgets.dart';
 const _paymentApps = {
   'com.tencent.mm': '微信',
   'com.eg.android.AlipayGphone': '支付宝',
+  'com.unionpay': '云闪付',
   'com.sankuai.meituan': '美团',
   'com.ss.android.ugc.aweme': '抖音',
 };

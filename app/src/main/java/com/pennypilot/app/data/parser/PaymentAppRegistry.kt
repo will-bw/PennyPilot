@@ -5,6 +5,7 @@ object PaymentAppRegistry {
     private val names = linkedMapOf(
         "com.tencent.mm" to "微信",
         "com.eg.android.AlipayGphone" to "支付宝",
+        "com.unionpay" to "云闪付",
         "com.sankuai.meituan" to "美团",
         "com.sankuai.meituan.takeoutnew" to "美团外卖",
         "com.ss.android.ugc.aweme" to "抖音",

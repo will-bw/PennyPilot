@@ -1,6 +1,9 @@
 package com.pennypilot.app.data.recognition
 
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentReceiptContext
+import com.pennypilot.app.data.parser.PaymentReceiptDetails
+import com.pennypilot.app.data.parser.PaymentTextParser
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -26,11 +29,42 @@ data class CaptureSemanticPreference(
 )
 
 @Serializable
+data class CaptureSemanticReceipt(
+    val details: Map<String, String> = emptyMap(),
+    val context: List<PaymentReceiptContext> = emptyList(),
+    val occurredAt: String? = null,
+    val scene: String? = null
+) {
+    fun bounded(): CaptureSemanticReceipt {
+        val fields = setOf("merchantName", "payeeName", "productDescription", "remark", "paymentChannel", "fundingAccount")
+        return copy(
+            details = details.filterKeys(fields::contains).mapNotNull { (key, value) ->
+                val limit = if (key in setOf("productDescription", "remark")) 300 else 120
+                semanticText(value).trim().take(limit).takeIf(String::isNotBlank)?.let { key to it }
+            }.toMap(),
+            context = PaymentReceiptDetails.normalizeContext(context.take(16).map { field ->
+                // Include the label so a separately captured order identifier is redacted too.
+                val value = RecognitionRedactor.redact("${field.label}：${field.value}", null)
+                    .text.substringAfter('：', "")
+                field.copy(label = semanticText(field.label), value = semanticText(value),
+                    source = semanticText(field.source).take(80))
+            }),
+            occurredAt = occurredAt?.take(80), scene = scene?.take(80)
+        )
+    }
+
+    private fun semanticText(value: String): String = RecognitionRedactor.redact(value, null).text
+        .replace(Regex("(?<![0-9０-９])(?:[0-9０-９][ \\-]?){7,}[0-9０-９](?![0-9０-９])"), "[号码已隐去]")
+        .replace(Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"), "[邮箱已隐去]")
+}
+
+@Serializable
 data class CaptureSemanticContext(
     val deviceTime: String = "",
     val allowedCategories: List<CaptureSemanticCategory> = emptyList(),
     val relatedHistory: List<CaptureSemanticHistory> = emptyList(),
-    val preferences: List<CaptureSemanticPreference> = emptyList()
+    val preferences: List<CaptureSemanticPreference> = emptyList(),
+    val receipt: CaptureSemanticReceipt? = null
 ) {
     /** Context is selected locally; never send a full ledger to classify one payment. */
     fun bounded() = copy(
@@ -41,7 +75,8 @@ data class CaptureSemanticContext(
         },
         preferences = preferences.take(12).map {
             it.copy(merchant = it.merchant.take(120), accountTag = it.accountTag?.take(100))
-        }
+        },
+        receipt = receipt?.bounded()
     )
 }
 
@@ -80,26 +115,35 @@ object CaptureSemanticResolver {
             merchant.isNotEmpty() && it.merchant.trim() == merchant && it.direction == parsed.direction
         }
         val assumptions = mutableListOf<String>()
-        val description = "$merchant\n$text"
+        val description = (listOfNotNull(merchant, text, parsed.details.merchantName, parsed.details.payeeName,
+            parsed.details.productDescription, parsed.details.remark) +
+            parsed.details.context.map { "${it.label}：${it.value}" } +
+            bounded.receipt?.details.orEmpty().values +
+            bounded.receipt?.context.orEmpty().map { "${it.label}：${it.value}" }).joinToString("\n")
         val current = currentMeaning(parsed, description)
+        val explicit = explicitMeaning(parsed, text, bounded.receipt?.scene)
         val stableKind = history.map { it.businessKind }.distinct().singleOrNull()
             ?.takeIf { history.size >= 2 && compatible(it, parsed.direction) }
         val kind = when {
-            current?.first == "refund" -> {
-                assumptions += current.second
-                current.first
+            explicit?.first == "refund" -> {
+                assumptions += explicit.second
+                explicit.first
             }
             compatible(preference?.businessKind, parsed.direction) -> {
                 assumptions += "用途沿用你为“$merchant”设置的偏好"
                 preference!!.businessKind!!
             }
-            current != null -> {
-                assumptions += current.second
-                current.first
+            explicit != null -> {
+                assumptions += explicit.second
+                explicit.first
             }
             compatible(proposal?.businessKind, parsed.direction) -> {
                 assumptions += "用途结合本次支付场景推断"
                 proposal!!.businessKind
+            }
+            current != null -> {
+                assumptions += current.second
+                current.first
             }
             stableKind != null -> {
                 assumptions += "用途沿用“$merchant”最近 ${history.size} 笔同方向已确认记录"
@@ -130,7 +174,8 @@ object CaptureSemanticResolver {
         }
         val historyAccount = history.mapNotNull { it.accountTag?.takeIf(String::isNotBlank) }
             .distinct().singleOrNull()?.takeIf { history.size >= 2 }
-        val account = parsed.paymentMethod?.takeIf(String::isNotBlank)
+        val receiptAccount = parsed.details.fundingAccount?.takeIf(String::isNotBlank)
+        val account = receiptAccount ?: parsed.paymentMethod?.takeIf(String::isNotBlank)
             ?: preference?.accountTag?.takeIf(String::isNotBlank)?.take(100)
             ?: proposal?.accountTag?.takeIf(String::isNotBlank)?.take(100)
             ?: historyAccount
@@ -139,15 +184,45 @@ object CaptureSemanticResolver {
                 "com.eg.android.AlipayGphone" -> "支付宝"
                 else -> null
             }
-        if (parsed.paymentMethod.isNullOrBlank() && account != null) {
+        if (receiptAccount == null && parsed.paymentMethod.isNullOrBlank() && account != null) {
             assumptions += "支付账户按本次渠道或已有习惯推断为“$account”"
         }
         assumptions += proposal?.assumptions.orEmpty().take(8).map { it.take(200) }
-        val note = proposal?.note?.takeIf(String::isNotBlank)?.take(500)
+        val note = receiptNote(
+            parsed.details.productDescription ?: bounded.receipt?.details?.get("productDescription"),
+            parsed.details.remark ?: bounded.receipt?.details?.get("remark"), proposal?.note)
             ?: if (kind == "transfer" && current == null && stableKind == null &&
                 !compatible(preference?.businessKind, parsed.direction) &&
                 !compatible(proposal?.businessKind, parsed.direction)) "用途暂按资金转移记录" else null
         return CaptureSemanticResolution(kind, categoryId, account, note, assumptions.distinct().take(12))
+    }
+
+    internal fun receiptNote(productDescription: String?, remark: String?, summary: String? = null): String? {
+        val main = summary?.trim()?.takeIf(String::isNotBlank)
+        fun comparable(value: String) = value.replace(Regex("[\\s\\p{P}]+"), "")
+        val covered = main?.let(::comparable).orEmpty()
+        val details = listOfNotNull(
+            productDescription?.takeIf(String::isNotBlank)?.takeUnless { comparable(it) in covered }?.let { "商品：$it" },
+            remark?.takeIf(String::isNotBlank)?.takeUnless { comparable(it) in covered }?.let { "备注：$it" }
+        ).joinToString("；")
+        if (main == null) return details.take(500).takeIf(String::isNotBlank)
+        if (details.isEmpty()) return main.take(500)
+        val detailBudget = minOf(details.length, 250)
+        return main.take(499 - detailBudget) + "；" + details.take(detailBudget)
+    }
+
+    private fun explicitMeaning(parsed: NotificationParseResult, text: String, capturedScene: String?): Pair<String, String>? {
+        val facts = PaymentTextParser.receiptFacts(text)
+        val scenes = setOfNotNull(parsed.scene, capturedScene)
+        return when {
+            parsed.direction == "INCOME" && (parsed.businessKind == "refund" || scenes.any { it in setOf("refund_received", "red_packet_returned") } ||
+                Regex("(?:退款|退回|退还)(?:已)?(?:成功|到账|完成)|款项已退回|已原路退回").containsMatchIn(facts)) ->
+                "refund" to "退款到账用于冲减支出"
+            "account_transfer" in scenes -> "transfer" to "已识别本人账户调拨，按资金转移记录"
+            parsed.direction == "EXPENSE" && "red_packet_sent" in scenes -> "expense" to "发出红包按人情支出记录"
+            parsed.direction == "INCOME" && "red_packet_received" in scenes -> "income" to "收到红包按收入记录"
+            else -> null
+        }
     }
 
     private fun currentMeaning(parsed: NotificationParseResult, text: String): Pair<String, String>? {

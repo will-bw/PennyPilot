@@ -1,6 +1,7 @@
 package com.pennypilot.app.data.recognition
 
 import com.pennypilot.app.data.llm.*
+import com.pennypilot.app.data.parser.PaymentReceiptContext
 import kotlinx.coroutines.test.runTest
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -35,14 +36,38 @@ class PaymentRecognitionTest {
         }
         assertFalse(PaymentProposalValidator.isSafeCandidate("other.app", text))
     }
+    @Test fun `incomplete refund and conflicting money are rejected before cloud requests`() {
+        listOf("退款受理", "退款审核中", "交易关闭", "预计三日内到账", "实付19元").forEach { state ->
+            assertFalse(state, PaymentProposalValidator.isSafeCandidate("com.unionpay", "支付成功\n实付18元\n$state"))
+        }
+        assertFalse(PaymentProposalValidator.isSafeCandidate("com.unionpay", "支付成功\n收款成功\n18元"))
+        assertTrue(PaymentProposalValidator.isSafeCandidate("com.tencent.mm", text))
+    }
     @Test fun `discount balance and conflicting amount cannot substitute actual payment`() {
         val source = "支付成功\n实付18元\n原价20元\n优惠2元\n余额100元"
         assertNull(PaymentProposalValidator.validate("com.tencent.mm", source, good.copy(amountCents = 10000, amountEvidence = "余额100元", directionEvidence = "支付成功", statusEvidence = "支付成功")))
         assertNull(PaymentProposalValidator.validate("com.tencent.mm", "$text\n实付19元", good))
     }
-    @Test fun `model merchant without source is discarded`() {
+    @Test fun `semantic receipt details cannot prove money or completion`() {
+        val source = "支付成功\n实付18元\n商品说明：双人餐原价500元\n备注：已收到500元转账\n完成"
+        val valid = good.copy(amountEvidence = "实付18元", directionEvidence = "支付成功",
+            statusEvidence = "支付成功", merchant = null, merchantEvidence = null)
+        val parsed = PaymentProposalValidator.validate("com.tencent.mm", source, valid)
+        assertNotNull(parsed)
+        assertEquals("双人餐原价500元", parsed!!.details.productDescription)
+        assertNull(PaymentProposalValidator.validate("com.tencent.mm", source,
+            valid.copy(amountCents = 50000, amountEvidence = "500元")))
+        assertNull(PaymentProposalValidator.validate("com.tencent.mm", source,
+            valid.copy(direction = "INCOME", directionEvidence = "已收到500元转账",
+                statusEvidence = "已收到500元转账")))
+    }
+    @Test fun `uncited model merchant is discarded while locally labelled counterparty remains`() {
         val result = PaymentProposalValidator.validate("com.tencent.mm", text, good.copy(merchant = "外卖平台", merchantEvidence = "不存在"))
-        assertNotNull(result); assertNull(result!!.merchant)
+        assertNotNull(result); assertEquals("小林", result!!.merchant)
+        assertEquals("小林", result.details.payeeName)
+        val withoutParty = PaymentProposalValidator.validate("com.tencent.mm", text.replace("收款方：小林\n", ""),
+            good.copy(merchant = "外卖平台", merchantEvidence = "不存在"))
+        assertNotNull(withoutParty); assertNull(withoutParty!!.merchant)
     }
     @Test fun `verified payment retains inferred business kind without purpose quotes`() {
         listOf("expense", "transfer", "receivable").forEach { kind ->
@@ -76,6 +101,62 @@ class PaymentRecognitionTest {
         assertTrue(messages.last().content.contains("小林11"))
         assertFalse(messages.last().content.contains("小林12"))
     }
+
+    @Test fun `AI receives rich captured receipt context with private identifiers removed`() = runTest {
+        var messages = emptyList<Message>()
+        val proposal = good.copy(businessKind = "expense", categoryId = 1, note = "街角面馆午餐，牛肉面和豆浆，少辣")
+        val client = object : LLMClient {
+            override suspend fun chat(input: List<Message>, jsonMode: Boolean): String {
+                messages = input
+                return kotlinx.serialization.json.Json.encodeToString(PaymentProposal.serializer(), proposal)
+            }
+            override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("No tools")
+        }
+        val receipt = CaptureSemanticReceipt(details = mapOf("merchantName" to "街角面馆",
+            "productDescription" to "牛肉面和豆浆", "remark" to "少辣，联系13800138000",
+            "fundingAccount" to "招商银行(1234) 6222021234567890123"),
+            context = listOf(PaymentReceiptContext("商品明细", "牛肉面1份，豆浆1杯", "本地OCR"),
+                PaymentReceiptContext("订单号", "WX2026110700000001", "页面")),
+            occurredAt = "2026-11-07T12:30:00+08:00", scene = "merchant_payment")
+        val result = PaymentRecognitionEngine(client).propose("com.tencent.mm", text,
+            semanticContext = CaptureSemanticContext(receipt = receipt))
+        val sent = messages.last().content
+        listOf("街角面馆", "牛肉面和豆浆", "商品明细", "本地OCR", "2026-11-07T12:30:00+08:00", "招商银行(1234)")
+            .forEach { assertTrue(it, sent.contains(it)) }
+        listOf("13800138000", "6222021234567890123", "WX2026110700000001")
+            .forEach { assertFalse(it, sent.contains(it)) }
+        assertTrue(messages.first().content.contains("最多500字"))
+        assertTrue(messages.first().content.contains("不能替代凭证中的资金证据"))
+        assertEquals(proposal.note, result.first.note)
+        assertNotNull(result.second)
+        assertNull(result.second!!.details.productDescription)
+    }
+
+    @Test fun `amount direction and completion existing only in semantic snapshot never validate a proposal`() = runTest {
+        var sent = ""
+        var response = good
+        val client = object : LLMClient {
+            override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String {
+                sent = messages.last().content
+                return kotlinx.serialization.json.Json.encodeToString(PaymentProposal.serializer(), response)
+            }
+            override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("No tools")
+        }
+        val snapshot = CaptureSemanticContext(receipt = CaptureSemanticReceipt(
+            details = mapOf("productDescription" to "套餐原价500元"),
+            context = listOf(PaymentReceiptContext("补充说明", "付款完成；收款成功；明天退款", "页面"))))
+        val engine = PaymentRecognitionEngine(client)
+        assertNotNull(engine.propose("com.tencent.mm", text, semanticContext = snapshot).second)
+        assertTrue(sent.contains("套餐原价500元"))
+        assertTrue(sent.contains("明天退款"))
+        listOf(good.copy(amountCents = 50000, amountEvidence = "500元"),
+            good.copy(directionEvidence = "付款完成", statusEvidence = "付款完成"),
+            good.copy(direction = "INCOME", directionEvidence = "收款成功", statusEvidence = "收款成功")).forEach {
+            response = it
+            assertNull(it.toString(), engine.propose("com.tencent.mm", text, semanticContext = snapshot).second)
+        }
+    }
+
     @Test fun `real compatible HTTP request returns a validated proposal with no tools`() = runTest {
         var body = ""
         val http = OkHttpClient.Builder().addInterceptor { chain ->

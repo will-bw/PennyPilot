@@ -16,7 +16,8 @@ data class NotificationParseResult(
     // Only a locally validated receipt timestamp; observation time remains separate evidence.
     val occurredAt: Long? = null,
     // Refund identities use a separate namespace; the original payment is only related evidence.
-    val orderIdKind: String? = null
+    val orderIdKind: String? = null,
+    val details: PaymentReceiptDetails = PaymentReceiptDetails()
 )
 
 object ParseRuleEngine {

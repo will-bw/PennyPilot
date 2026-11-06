@@ -208,7 +208,7 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
                       _PermissionItem(
                         title: '支付通知',
                         detail:
-                            '通过通知使用权读取微信、支付宝、美团和抖音的支付通知，在本机识别金额。没有通知或金额被隐藏时可能漏记。',
+                            '通过通知使用权读取微信、支付宝、云闪付、美团和抖音的支付通知，在本机识别金额。没有通知或金额被隐藏时可能漏记。',
                         status: _captureStatus(
                           'notificationCaptureEnabled',
                           'notificationListenerGranted',
