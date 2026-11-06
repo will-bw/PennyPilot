@@ -8,17 +8,17 @@ import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import androidx.core.app.NotificationManagerCompat
 
-/** 开机后恢复已有系统授权的监听连接；未授权时提供设置入口。 */
+/** 开机或应用升级后恢复已有系统授权的监听连接。 */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        if (intent.action !in setOf(Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED)) return
         val component = ComponentName(context, NotificationCaptorService::class.java)
         val listenerEnabled = Settings.Secure
             .getString(context.contentResolver, "enabled_notification_listeners")
             ?.split(':')?.any { ComponentName.unflattenFromString(it) == component } == true
         if (listenerEnabled) {
             runCatching { NotificationListenerService.requestRebind(component) }
-        } else if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+        } else if (intent.action == Intent.ACTION_BOOT_COMPLETED && NotificationManagerCompat.from(context).areNotificationsEnabled()) {
             // 输出提醒权限可能在检查后被系统撤销，不能使开机接收器崩溃。
             runCatching {
                 NotificationHelper.postSystemReminder(context, "通知捕获未开启",

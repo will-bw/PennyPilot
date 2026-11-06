@@ -72,4 +72,19 @@ class RecognitionTaskStoreTest {
         try { store.enqueue(task("oversized").copy(structure = "x".repeat(32_769))); fail() } catch (_: IllegalArgumentException) { }
     }
 
+    @Test fun `richer semantic snapshot changes version even when financial text is unchanged`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val first = task().copy(receipt = CaptureSemanticReceipt(details = mapOf("merchantName" to "示例商户")), semanticFingerprint = "first")
+        store.enqueue(first)
+        val rich = first.copy(receipt = first.receipt!!.copy(context = listOf(
+            com.pennypilot.app.data.parser.PaymentReceiptContext("门店", "示例广场店"))), semanticFingerprint = "rich")
+        assertEquals(RecognitionTaskStore.EnqueueResult.UPDATED, store.enqueue(rich))
+        assertEquals(2, store.get("a")!!.evidenceVersion)
+        assertEquals(rich.receipt, RecognitionTaskStore(file, cipher).get("a")!!.receipt)
+        assertFalse(file.readText().contains("示例广场店"))
+        assertEquals(RecognitionTaskStore.EnqueueResult.ALREADY_QUEUED, store.enqueue(rich))
+        store.remove("a", 1)
+        assertEquals("rich", store.get("a")!!.semanticFingerprint)
+    }
+
 }

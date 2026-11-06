@@ -23,6 +23,25 @@ data class PaymentScreenNode(
 data class PaymentScreenStructure(val nodes: List<PaymentScreenNode>) {
     fun toJson(): String = Json.encodeToString(this)
 
+    /** Field values may precede their label in accessibility traversal order. */
+    internal fun labelledTextFields(labels: Set<String>): Map<String, List<String>> {
+        val siblings = nodes.filter { it.visible }.groupBy { it.parentId }
+        val fields = nodes.filter { it.visible && it.labels.any(labels::contains) }.mapNotNull { label ->
+            val row = siblings[label.parentId].orEmpty()
+            if (label.parentId == null || row.size !in 2..4) return@mapNotNull null
+            val values = row.filter { it.id != label.id }.flatMap { it.labels }
+                .map(String::trim).filter { it.isNotBlank() && it !in labels }.distinct()
+            label.labels.first(labels::contains) to values
+        }
+        return fields.groupBy({ it.first }, { it.second }).mapValues { (_, values) -> values.flatten().distinct() }
+    }
+
+    /** A semantic resource ID on a verified receipt is evidence; an unlabelled heading alone is not. */
+    internal fun namedReceiptField(resourceNames: Set<String>): String? = nodes.asSequence()
+        .filter { it.visible && it.resourceId?.substringAfterLast('/')?.let(resourceNames::contains) == true }
+        .flatMap { it.labels.asSequence() }.map(String::trim)
+        .filter { it.length in 1..120 && !it.all(Char::isDigit) }.distinct().toList().singleOrNull()
+
     /** Labels in the same small row may arrive amount-first or through contentDescription. */
     fun labelledAmounts(): List<String> {
         val labels = setOf("实付", "实付金额", "实际支付", "实际付款", "实付款", "实扣金额", "实扣",

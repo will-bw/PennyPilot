@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="sharedpref" path="capture_notification_history.xml" />
         <exclude domain="sharedpref" path="pennypilot_secrets.xml" />
         <exclude domain="sharedpref" path="pennypilot_chatgpt_auth.xml" />
         <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
     </cloud-backup>
     <device-transfer>
+        <exclude domain="sharedpref" path="capture_notification_history.xml" />
         <exclude domain="sharedpref" path="pennypilot_secrets.xml" />
         <exclude domain="sharedpref" path="pennypilot_chatgpt_auth.xml" />
         <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />

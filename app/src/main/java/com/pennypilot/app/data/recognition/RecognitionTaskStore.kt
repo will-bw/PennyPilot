@@ -30,7 +30,9 @@ data class RecognitionTask(
     val attempts: Int = 0,
     val images: List<String> = emptyList(),
     val evidenceVersion: Int = 1,
-    val structure: String? = null
+    val structure: String? = null,
+    val receipt: CaptureSemanticReceipt? = null,
+    val semanticFingerprint: String? = null
 )
 
 internal interface TaskCipher { fun encrypt(bytes: ByteArray): ByteArray; fun decrypt(bytes: ByteArray): ByteArray }
@@ -61,16 +63,21 @@ class RecognitionTaskStore internal constructor(private val file: File, private 
 
     fun enqueue(task: RecognitionTask, now: Long = System.currentTimeMillis()): EnqueueResult = synchronized(lock) {
         require(task.text.length in 1..12_000 && task.eventKey.length in 1..512 && task.configurationId.isNotBlank() && (task.structure?.length ?: 0) <= 32_768)
+        require(task.receipt == CaptureSemanticContext(receipt = task.receipt).bounded().receipt &&
+            (task.semanticFingerprint?.length ?: 0) <= 128)
         com.pennypilot.app.data.llm.MultimodalMessages.validate(listOf(com.pennypilot.app.data.llm.Message("user", task.text, imageDataUrls = task.images)))
         val tasks = read().filter { fresh(it, now) }
         val existing = tasks.firstOrNull { it.id == task.id }
         if (existing != null && ((existing.configurationId != task.configurationId && !(existing.images.isEmpty() && task.images.isNotEmpty())) || existing.ledgerRevision != task.ledgerRevision ||
-                existing.source != task.source || existing.text == task.text && existing.images == task.images && existing.structure == task.structure)) return@synchronized EnqueueResult.ALREADY_QUEUED
+                existing.source != task.source || existing.text == task.text && existing.images == task.images && existing.structure == task.structure &&
+                existing.semanticFingerprint == task.semanticFingerprint && existing.receipt == task.receipt)) return@synchronized EnqueueResult.ALREADY_QUEUED
         val others = tasks.filterNot { it.id == task.id }
-        if (others.size >= MAX_TASKS || others.sumOf { it.text.length + it.images.sumOf(String::length) + (it.structure?.length ?: 0) } + task.text.length + task.images.sumOf(String::length) + (task.structure?.length ?: 0) > MAX_CACHE_CHARACTERS) return@synchronized EnqueueResult.FULL
+        if (others.size >= MAX_TASKS || others.sumOf(::characterCount) + characterCount(task) > MAX_CACHE_CHARACTERS) return@synchronized EnqueueResult.FULL
         if (existing != null) {
             // New evidence shares one logical event and original TTL; it cannot reset a live request's identity.
-            write(others + existing.copy(text = task.text, images = task.images, structure = task.structure, configurationId = task.configurationId, evidenceVersion = existing.evidenceVersion + 1, attempts = 0))
+            write(others + existing.copy(text = task.text, images = task.images, structure = task.structure,
+                receipt = task.receipt, semanticFingerprint = task.semanticFingerprint,
+                configurationId = task.configurationId, evidenceVersion = existing.evidenceVersion + 1, attempts = 0))
             EnqueueResult.UPDATED
         } else { write(tasks + task); EnqueueResult.ENQUEUED }
     }
@@ -83,6 +90,8 @@ class RecognitionTaskStore internal constructor(private val file: File, private 
     fun remove(id: String, expectedVersion: Int? = null) = synchronized(lock) { write(read().filterNot { it.id == id && (expectedVersion == null || it.evidenceVersion == expectedVersion) }) }
     fun incrementAttempts(id: String, expectedVersion: Int? = null) = synchronized(lock) { write(read().map { if (it.id == id && (expectedVersion == null || it.evidenceVersion == expectedVersion)) it.copy(attempts = it.attempts + 1) else it }) }
     fun clear() = synchronized(lock) { AtomicFile(file).delete() }
+    private fun characterCount(task: RecognitionTask): Int = task.text.length + task.images.sumOf(String::length) +
+        (task.structure?.length ?: 0) + (task.receipt?.let { json.encodeToString(CaptureSemanticReceipt.serializer(), it).length } ?: 0)
     private fun fresh(task: RecognitionTask, now: Long): Boolean = now - task.createdAt in 0..RETENTION_MS
     private fun read(): List<RecognitionTask> {
         if (!file.exists() && !File(file.path + ".bak").exists()) return emptyList()

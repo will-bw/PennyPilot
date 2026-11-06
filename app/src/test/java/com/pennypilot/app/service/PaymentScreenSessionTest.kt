@@ -1,6 +1,7 @@
 package com.pennypilot.app.service
 
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentReceiptDetails
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -58,6 +59,90 @@ class PaymentScreenSessionTest {
         assertNull(session.observe(pkg, 1, payment.copy(merchant = null), 1500))
         assertEquals("202610240001", session.evidence(key)?.orderId)
         assertEquals("麦当劳", session.evidence(key)?.merchant)
+    }
+
+    @Test fun `late transaction time and field evidence survive a partial redraw`() {
+        val session = PaymentScreenSession()
+        val amountEvidence = mapOf("amount" to "页面·实付18元", "paymentStatus" to "页面·支付成功")
+        val initial = payment.copy(fieldEvidence = amountEvidence)
+        val key = session.observe(pkg, 1, initial, 1000)!!
+        session.markHandled(key)
+        val detailed = initial.copy(occurredAt = 900L, paymentMethod = "银行卡",
+            fieldEvidence = amountEvidence + mapOf("occurredAt" to "页面·交易时间", "paymentMethod" to "页面·银行卡"))
+        assertEquals(key, session.observe(pkg, 1, detailed, 1200))
+        session.markHandled(key)
+
+        assertNull(session.observe(pkg, 1, initial.copy(paymentMethod = "",
+            fieldEvidence = mapOf("occurredAt" to "")), 1300))
+        assertEquals(detailed, session.evidence(key))
+    }
+
+    @Test fun `retained transaction time distinguishes a later equal amount receipt`() {
+        val session = PaymentScreenSession()
+        val first = session.observe(pkg, 1, payment.copy(occurredAt = 900L), 1000)!!
+        session.markHandled(first)
+        assertNull(session.observe(pkg, 1, payment, 1100))
+
+        val second = session.observe(pkg, 1, payment.copy(occurredAt = 1200L), 1300)!!
+        assertNotEquals(first, second)
+        assertEquals(1200L, session.evidence(second)?.occurredAt)
+    }
+
+    @Test fun `late receipt details enrich one session and survive incomplete or conflicting redraws`() {
+        val session = PaymentScreenSession()
+        val key = session.observe(pkg, 1, payment, 1000)!!
+        session.markHandled(key)
+        val details = PaymentReceiptDetails(productDescription = "鸡腿饭套餐", paymentChannel = "微信支付",
+            fieldSources = mapOf("productDescription" to "页面·商品说明", "paymentChannel" to "页面·支付渠道"))
+        assertEquals(key, session.observe(pkg, 1, payment.copy(details = details), 1200))
+        session.markHandled(key)
+        val late = PaymentReceiptDetails(remark = "少辣", fundingAccount = "招商银行储蓄卡(1234)",
+            fieldSources = mapOf("remark" to "本地OCR·备注", "fundingAccount" to "本地OCR·付款方式"))
+        assertEquals(key, session.observe(pkg, 1, payment.copy(details = late), 1300))
+        session.markHandled(key)
+        val retained = details.mergeMissing(late)
+        assertEquals(retained, session.evidence(key)!!.details)
+        assertNull(session.observe(pkg, 1, payment, 1400))
+        assertNull(session.observe(pkg, 1, payment.copy(details = PaymentReceiptDetails(
+            productDescription = "重绘错误文字", fieldSources = mapOf("productDescription" to "后续页面"))), 1500))
+        assertEquals(retained, session.evidence(key)!!.details)
+
+        session.onInputPage(pkg, 1, 1600)
+        val next = session.observe(pkg, 1, payment, 1700)!!
+        assertNotEquals(key, next)
+        assertTrue(session.evidence(next)!!.details.isEmpty())
+    }
+
+    @Test fun `late store name supplements payee details without changing the established event`() {
+        val session = PaymentScreenSession()
+        val receipt = payment.copy(merchant = "晨光经营有限公司", details = PaymentReceiptDetails(payeeName = "晨光经营有限公司"))
+        val key = session.observe(pkg, 1, receipt, 1000)!!
+        session.markHandled(key)
+        assertEquals(key, session.observe(pkg, 1, receipt.copy(details = PaymentReceiptDetails(
+            merchantName = "街角面馆", fieldSources = mapOf("merchantName" to "本地OCR·商户"))), 1200))
+        assertEquals("晨光经营有限公司", session.evidence(key)!!.merchant)
+        assertEquals("晨光经营有限公司", session.evidence(key)!!.details.payeeName)
+        assertEquals("街角面馆", session.evidence(key)!!.details.merchantName)
+    }
+
+    @Test fun `new order and explicit navigation do not inherit prior receipt evidence`() {
+        val session = PaymentScreenSession()
+        val detailed = payment.copy(orderId = "202611060001", occurredAt = 900L,
+            fieldEvidence = mapOf("occurredAt" to "页面·第一笔交易时间"))
+        val first = session.observe(pkg, 1, detailed, 1000)!!
+        session.markHandled(first)
+        val second = session.observe(pkg, 1, payment.copy(orderId = "202611060002"), 1100)!!
+        assertNotEquals(first, second)
+        assertNull(session.evidence(second)?.occurredAt)
+        assertTrue(session.evidence(second)!!.fieldEvidence.isEmpty())
+
+        assertEquals(second, session.observe(pkg, 1, detailed.copy(orderId = "202611060002"), 1200))
+        session.markHandled(second)
+        session.onInputPage(pkg, 1, 1250)
+        val third = session.observe(pkg, 1, payment, 1300)!!
+        assertNotEquals(second, third)
+        assertNull(session.evidence(third)?.occurredAt)
+        assertTrue(session.evidence(third)!!.fieldEvidence.isEmpty())
     }
 
     @Test fun `model candidate and later rule receipt share one identity`() {

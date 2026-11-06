@@ -416,6 +416,7 @@ class NativeLedgerBridge @Inject constructor(
             "automaticCaptureSupported" to true, "chatGptSupported" to true,
             "accessibilityGranted" to accessibilityGranted,
             "remindersEnabled" to runCatching { NotificationHelper.captureNotificationsEnabled(context) }.getOrDefault(false),
+            "captureHeadsUpEnabled" to runCatching { NotificationHelper.captureHeadsUpEnabled(context) }.getOrDefault(false),
             "microphoneGranted" to isGranted(Manifest.permission.RECORD_AUDIO),
             "batteryExempt" to runCatching { context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName) }.getOrDefault(false),
             "speechAvailable" to runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false),
@@ -818,6 +819,9 @@ class NativeLedgerBridge @Inject constructor(
             "notificationListener" -> Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
             "accessibility" -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             "notifications" -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            "captureNotifications" -> Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                .putExtra(Settings.EXTRA_CHANNEL_ID, NotificationHelper.captureChannelId(context))
             "battery" -> Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
             "app", "microphone" -> Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
             else -> throw IllegalArgumentException("不支持此系统设置入口。")

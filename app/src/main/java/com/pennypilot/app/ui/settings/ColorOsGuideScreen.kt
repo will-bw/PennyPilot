@@ -122,7 +122,7 @@ fun NotificationAccessGuideStep() {
         granted = isNotificationListenerGranted(context)
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        GuideStep(1, "通知使用权", if (granted) "已授权。服务连接与应用内捕获开关请在「我的 → 自动捕获」查看；可随时撤销授权。" else "尚未授权。用于识别微信、支付宝、美团和抖音的支付通知。不授权也能手动记账；此权限不会开启 PennyPilot 自己的记账提醒。",
+        GuideStep(1, "通知使用权", if (granted) "已授权。服务连接与应用内捕获开关请在「我的 → 自动捕获」查看；可随时撤销授权。" else "尚未授权。用于识别微信、支付宝、云闪付、美团和抖音的支付通知。不授权也能手动记账；此权限不会开启 PennyPilot 自己的记账提醒。",
             if (granted) "查看授权" else "开启通知使用权", complete = granted) {
             error = try {
                 context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)); null

@@ -15,6 +15,7 @@ import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ToolDefinition
 import com.pennypilot.app.data.parser.NotificationParseResult
 import com.pennypilot.app.data.parser.PaymentTextParser
+import com.pennypilot.app.data.parser.WalletReceiptDetailsParser
 import com.pennypilot.app.data.settings.AppPreferences
 import com.pennypilot.app.data.recognition.PaymentProposal
 import com.pennypilot.app.data.recognition.PaymentProposalValidator
@@ -25,6 +26,9 @@ import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -49,6 +53,148 @@ class CaptureProcessorTest {
             error("本地凭证不得调用云端")
         }
         override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("not used")
+    }
+
+    @Test fun `identified later receipt replaces observation time and adds field evidence without another transaction`() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+            preferences.setNotificationCaptureEnabled(true)
+            preferences.setNotificationCloudParsingEnabled(false)
+            preferences.setScreenCaptureEnabled(true)
+            preferences.setScreenCloudParsingEnabled(false)
+            preferences.setCaptureAutoRecordEnabled(false)
+            val monitor = CaptureServiceMonitor()
+            val processor = CaptureProcessor(context, database, preferences, cloud, monitor)
+            val now = System.currentTimeMillis() / 1000 * 1000
+            val paidAt = now - 60_000
+            val order = "202611060000001"
+            processor.processNotification(CapturedNotification("com.eg.android.AlipayGphone", "later-receipt", now,
+                "支付宝", "支付成功，实付18.00元，订单号：$order"), LedgerRevision.current)
+            val initial = database.backupDao().transactions().single()
+            assertEquals(now, initial.occurredAt)
+            assertEquals("observed", Json.parseToJsonElement(initial.metadataJson!!).jsonObject["transactionTimeSource"]!!.jsonPrimitive.content)
+            val date = java.time.Instant.ofEpochMilli(paidAt).atZone(java.time.ZoneId.systemDefault())
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+            val receipt = WalletReceiptDetailsParser.parse("com.eg.android.AlipayGphone",
+                "账单详情\n支付成功\n实付金额：18.00元\n商户：测试咖啡店\n订单号：$order\n交易时间：$date\n完成", now)!!
+            assertTrue(processor.processScreen("com.eg.android.AlipayGphone", receipt, "later-receipt-page", now, LedgerRevision.current))
+            val enriched = database.backupDao().transactions().single()
+            assertEquals(initial.id, enriched.id)
+            assertEquals(initial.amount, enriched.amount)
+            assertEquals(paidAt, enriched.occurredAt)
+            assertEquals("测试咖啡店", enriched.merchant)
+            val metadata = Json.parseToJsonElement(enriched.metadataJson!!).jsonObject
+            assertEquals("receipt", metadata["transactionTimeSource"]!!.jsonPrimitive.content)
+            assertEquals("exact", metadata["timePrecision"]!!.jsonPrimitive.content)
+            assertTrue(metadata["fieldEvidence"]!!.jsonObject.containsKey("occurredAt"))
+            assertEquals(2, database.backupDao().captureEvents().size)
+            assertEquals(1, monitor.health.value.todayCaptureCount)
+            assertEquals(0, cloudCalls)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            preferences.setNotificationCloudParsingEnabled(false)
+            database.close()
+        }
+    }
+
+    @Test fun `future receipt time is rejected before persistence`() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+            preferences.setScreenCaptureEnabled(true)
+            preferences.setScreenCloudParsingEnabled(false)
+            val processor = CaptureProcessor(context, database, preferences, cloud, CaptureServiceMonitor())
+            val now = System.currentTimeMillis()
+            assertFalse(processor.processScreen("com.eg.android.AlipayGphone",
+                NotificationParseResult(1800, "测试商户", "EXPENSE", occurredAt = now + 1),
+                "future-receipt", now, LedgerRevision.current))
+            assertTrue(database.backupDao().transactions().isEmpty())
+            assertEquals(0, cloudCalls)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            database.close()
+        }
+    }
+
+    @Test fun `wechat receipt details flow through session classification and persistence without another transaction`() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val file = File.createTempFile("capture-receipt-details", ".enc").apply { delete() }
+        val store = RecognitionTaskStore(file, object : TaskCipher {
+            override fun encrypt(bytes: ByteArray) = bytes
+            override fun decrypt(bytes: ByteArray) = bytes
+        })
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+            val food = database.categoryDao().insert(CategoryEntity(name = "餐饮", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 1))
+            preferences.setScreenCaptureEnabled(true)
+            preferences.setScreenCloudParsingEnabled(true)
+            preferences.setCaptureAutoRecordEnabled(false)
+            val monitor = CaptureServiceMonitor()
+            val processor = CaptureProcessor(context, database, preferences, cloud, monitor, store)
+            val session = PaymentScreenSession()
+            val now = System.currentTimeMillis()
+            val first = PaymentTextParser.parseScreen("com.tencent.mm", "支付成功\n实付金额：18元\n完成")!!
+            val key = session.observe("com.tencent.mm", 7, first, now)!!
+            assertTrue(processor.processScreen("com.tencent.mm", session.evidence(key)!!, key, now, LedgerRevision.current))
+            session.markHandled(key)
+            val original = database.backupDao().transactions().single()
+            val initialTask = store.pending().single()
+
+            val page = """
+                支付成功
+                实付金额：18元
+                商户名称：晨光经营部
+                收款方：晨光餐饮有限公司
+                商品说明：鸡腿饭套餐
+                备注：少辣
+                付款方式：招商银行储蓄卡（1234）
+                交易单号：WX202611060030
+                完成
+                服务入口：查看会员权益
+            """.trimIndent()
+            val complete = PaymentTextParser.parseScreen("com.tencent.mm", page)
+            assertNotNull("完整支付凭证应先通过本地解析", complete)
+            assertEquals(key, session.observe("com.tencent.mm", 7, complete, now + 300))
+            assertTrue(processor.processScreen("com.tencent.mm", session.evidence(key)!!, key, now + 300, LedgerRevision.current))
+            session.markHandled(key)
+            assertNull(session.observe("com.tencent.mm", 7, first, now + 500))
+
+            val saved = database.backupDao().transactions().single()
+            assertEquals(original.id, saved.id)
+            assertEquals(1800L, saved.amount)
+            assertEquals("晨光经营部", saved.merchant)
+            assertEquals(food, saved.categoryId)
+            assertEquals("expense", saved.businessKind)
+            assertEquals("招商银行储蓄卡（1234）", saved.accountTag)
+            assertEquals("商品：鸡腿饭套餐；备注：少辣", saved.note)
+            val details = Json.parseToJsonElement(saved.metadataJson!!).jsonObject["receiptDetails"]!!.jsonObject
+            assertEquals("晨光餐饮有限公司", details["payeeName"]!!.jsonPrimitive.content)
+            assertEquals("鸡腿饭套餐", details["productDescription"]!!.jsonPrimitive.content)
+            assertEquals("微信支付", details["paymentChannel"]!!.jsonPrimitive.content)
+            assertEquals("页面·明确标签", details["fieldSources"]!!.jsonObject["fundingAccount"]!!.jsonPrimitive.content)
+            val evidenceDetails = Json.parseToJsonElement(database.transactionDao().captureEvidenceByKey(key)!!.metadataJson!!)
+                .jsonObject["receiptDetails"]!!.jsonObject
+            assertEquals(details, evidenceDetails)
+            assertFalse(saved.rawPayload.orEmpty().contains("会员权益"))
+            assertFalse(saved.metadataJson!!.contains("会员权益"))
+            val task = store.pending().single()
+            assertEquals(initialTask.id, task.id)
+            assertEquals(initialTask.evidenceVersion + 1, task.evidenceVersion)
+            assertEquals("鸡腿饭套餐", task.receipt!!.details["productDescription"])
+            assertEquals("少辣", task.receipt!!.details["remark"])
+            assertFalse(task.text.contains("鸡腿饭套餐"))
+            assertTrue(task.text.contains("扣款账户：招商银行储蓄卡（1234）"))
+            assertFalse(task.text.contains("会员权益"))
+            assertEquals(1, database.backupDao().captureEvents().size)
+            assertEquals(1, monitor.health.value.todayCaptureCount)
+            assertEquals(0, cloudCalls)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            preferences.setScreenCloudParsingEnabled(false)
+            file.delete()
+            database.close()
+        }
     }
 
     @Test fun `same refund from notification and page merges but a second installment and payment namespace stay separate`() = runBlocking {

@@ -3,6 +3,7 @@ package com.pennypilot.app.data.recognition
 import android.content.Context
 import androidx.work.*
 import com.pennypilot.app.service.CaptureProcessor
+import com.pennypilot.app.service.NotificationHelper
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -18,6 +19,11 @@ interface RecognitionEntryPoint {
 }
 
 class RecognitionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    // Android 26–30 implements expedited work with a foreground service for this task only.
+    override suspend fun getForegroundInfo(): ForegroundInfo = ForegroundInfo(
+        FOREGROUND_NOTIFICATION_ID, NotificationHelper.recognitionForegroundNotification(applicationContext)
+    )
+
     override suspend fun doWork(): Result {
         val id = inputData.getString("task_id") ?: return Result.failure()
         return try {
@@ -27,6 +33,8 @@ class RecognitionWorker(context: Context, params: WorkerParameters) : CoroutineW
         catch (_: Exception) { if (runAttemptCount < 3) Result.retry() else Result.failure() }
     }
     companion object {
+        private const val FOREGROUND_NOTIFICATION_ID = -90004
+
         fun schedule(context: Context, id: String, enqueueSuccessor: Boolean = false) {
             WorkManager.getInstance(context).enqueueUniquePeriodicWork("recognition_expiry", ExistingPeriodicWorkPolicy.KEEP,
                 PeriodicWorkRequestBuilder<RecognitionCleanupWorker>(12, TimeUnit.HOURS).build())
@@ -35,6 +43,7 @@ class RecognitionWorker(context: Context, params: WorkerParameters) : CoroutineW
                 OneTimeWorkRequestBuilder<RecognitionWorker>()
                     .setInputData(workDataOf("task_id" to id))
                     .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                    .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                     .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build())
         }
         /** Repairs the narrow process-death gap between durable enqueue and WorkManager scheduling. */

@@ -44,5 +44,14 @@ class CaptureEventIdentityTest {
             CaptureEventIdentity.domainFor("com.sankuai.meituan"))
         assertNotEquals(CaptureEventIdentity.domainFor("com.eg.android.AlipayGphone"),
             CaptureEventIdentity.domainFor("com.tencent.mm"))
+        assertNotEquals(CaptureEventIdentity.domainFor("com.unionpay"),
+            CaptureEventIdentity.domainFor("com.eg.android.AlipayGphone"))
+        assertNotEquals(CaptureEventIdentity.domainFor("com.unionpay"),
+            CaptureEventIdentity.domainFor("com.tencent.mm"))
+    }
+
+    @Test fun `wallet name is not a merchant identity for weak matching`() {
+        assertNull(CaptureEventIdentity.merchantFingerprint(" 云闪付 "))
+        assertEquals("面馆", CaptureEventIdentity.merchantFingerprint("面馆"))
     }
 }

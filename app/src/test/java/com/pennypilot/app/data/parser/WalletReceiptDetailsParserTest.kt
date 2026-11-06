@@ -39,7 +39,7 @@ class WalletReceiptDetailsParserTest {
 
     @Test fun `refund details require their own identity and settlement timestamp not original payment time`() {
         val text = "退款详情\n退款已到账\n退款金额5元\n原支付金额30元\n退款到账时间：2026-10-24 16:58:30\n退款单号RF202610240123\n交易单号PAY202610240123"
-        for (pkg in listOf("com.tencent.mm", "com.eg.android.AlipayGphone")) {
+        for (pkg in listOf("com.tencent.mm", "com.eg.android.AlipayGphone", "com.unionpay")) {
             val result = parse(text, pkg)!!
             assertEquals(500L, result.amountCents)
             assertEquals("refund", result.businessKind)
@@ -66,5 +66,49 @@ class WalletReceiptDetailsParserTest {
         for (extra in listOf("聊天记录", "订单列表", "支付失败", "收款失败", "退款申请中", "验证码", "收款金额28元"))
             assertNull(extra, parse(income + "\n" + extra))
         assertNull(parse(income, "com.example.chat"))
+    }
+
+    @Test fun `unionpay detail recovery still requires fresh transaction time order and completion`() {
+        val text = income.replace("账单详情", "交易详情").replace("二维码收款", "商品购买")
+            .replace("+18.00", "-1,234.56").replace("收入", "支出").replace("付款方：小明", "收款方：测试商户")
+        val result = parse(text, "com.unionpay")!!
+        assertEquals(123456L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("云闪付", result.paymentMethod)
+        assertEquals(now - 90_000, result.occurredAt)
+        assertEquals("20261024000012345678", result.orderId)
+        assertNull(parse(text, "com.unionpay", now + 31 * 60_000))
+        assertNull(parse(text.replace("交易时间", "创建时间"), "com.unionpay"))
+        assertNull(parse(text.replace("交易成功", "退款受理"), "com.unionpay"))
+        assertNull(parse(text.replace("交易单号20261024000012345678", ""), "com.unionpay"))
+        assertNull(parse(text + "\n交易状态：处理中", "com.unionpay"))
+        assertNull(parse(text + "\n已全额退款", "com.unionpay"))
+    }
+
+    @Test fun `receipt remarks cannot change settlement type identity or timestamp`() {
+        val withRemark = income + "\n备注：退款成功，退款金额88元，退款单号FAKE202611060001"
+        val result = parse(withRemark)!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("20261024000012345678", result.orderId)
+        assertNull(result.orderIdKind)
+        assertEquals(now - 90_000, result.occurredAt)
+        assertNull(parse(income.replace("交易时间\n2026-10-24 16:58:30", "提示，备注：交易时间2026-10-24 16:58:30")))
+    }
+
+    @Test fun `validated details page restores descriptions after financial validation`() {
+        val text = income.replace("二维码收款", "商品购买").replace("+18.00", "-18.00")
+            .replace("收入", "支出").replace("付款方：小明", "收款方：样例商家") +
+            "\n商品说明：午餐套餐\n备注：退款成功99元\n付款方式：招商银行储蓄卡(1234)"
+        val result = parse(text)!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("20261024000012345678", result.orderId)
+        assertEquals(now - 90_000, result.occurredAt)
+        assertEquals("午餐套餐", result.details.productDescription)
+        assertEquals("退款成功99元", result.details.remark)
+        assertEquals("样例商家", result.details.payeeName)
+        assertEquals("招商银行储蓄卡(1234)", result.details.fundingAccount)
+        assertEquals("支付宝", result.details.paymentChannel)
+        assertNull(parse(text.replace("交易成功", "支付失败")))
     }
 }

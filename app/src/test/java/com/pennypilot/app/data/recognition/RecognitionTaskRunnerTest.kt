@@ -4,6 +4,7 @@ import android.app.Application
 import com.pennypilot.app.data.llm.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
@@ -32,8 +33,23 @@ class RecognitionTaskRunnerTest {
         override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("Models must never receive writing tools")
     }
     private val reports = mutableListOf<String>()
+    private val states = mutableListOf<String>()
     private fun enqueue() { store.enqueue(RecognitionTask("task", "event", "com.tencent.mm", "转账成功\n¥18.00\n待对方收款", System.currentTimeMillis(), 0, "A", "ACCESSIBILITY")) }
-    private fun runner(restored: RecognitionTaskStore = store) = RecognitionTaskRunner(restored, client, { allowed }, { _, _, _, isCurrent -> if (isCurrent()) { commits++; true } else false }, reports::add)
+    private fun runner(restored: RecognitionTaskStore = store) = RecognitionTaskRunner(restored, client, { allowed }, { _, _, _, isCurrent -> if (isCurrent()) { commits++; true } else false }, reports::add,
+        onState = { _, state -> states += state })
+    private fun addEvidence() {
+        val original = store.get("task")!!
+        assertEquals(RecognitionTaskStore.EnqueueResult.UPDATED,
+            store.enqueue(original.copy(text = original.text + "\n收款方：小林")))
+    }
+    private fun assertSuccessorPreserved() {
+        assertEquals(2, store.get("task")!!.evidenceVersion)
+        assertEquals(0, store.get("task")!!.attempts)
+        assertEquals(0, commits)
+        assertTrue(reports.isEmpty())
+        assertEquals("model_superseded", states.last())
+        assertFalse(states.contains("model_failed"))
+    }
     @Test fun `recreated worker retries and commits same event once`() = runTest {
         enqueue(); response = { error("offline") }
         assertFalse(runner().run("task")); assertEquals(1, store.get("task")!!.attempts); assertEquals(0, commits)
@@ -69,6 +85,7 @@ class RecognitionTaskRunnerTest {
         enqueue(); response = { error("offline") }
         repeat(3) { assertFalse(runner().run("task")) }
         assertTrue(runner().run("task")); assertEquals(3, calls); assertEquals(0, commits); assertNull(store.get("task")); assertTrue(reports.last().contains("重试未完成"))
+        assertEquals("model_exhausted", states.last())
     }
     @Test fun `uncertain and injected models cannot write`() = runTest {
         enqueue(); response = { """{"valid":true,"amount_cents":9900,"direction":"EXPENSE","currency":"CNY","payment_status":"COMPLETED","amount_evidence":"99元","direction_evidence":"转账成功","status_evidence":"转账成功"}""" }
@@ -82,14 +99,14 @@ class RecognitionTaskRunnerTest {
     @Test fun `late evidence supersedes in flight proposal without deleting new job`() = runTest {
         enqueue(); val old = response
         response = {
-            val original = store.get("task")!!
-            store.enqueue(original.copy(text = original.text + "\n收款方：小林"))
+            addEvidence()
             old()
         }
-        assertFalse(runner().run("task")); assertEquals(0, commits)
-        assertEquals(2, store.get("task")!!.evidenceVersion)
+        assertTrue(runner().run("task"))
+        assertSuccessorPreserved()
         response = old
         assertTrue(runner().run("task")); assertEquals(1, commits); assertNull(store.get("task"))
+        assertEquals("model_completed", states.last())
     }
 
     @Test fun `evidence changing while writer is suspended prevents old amount commit`() = runTest {
@@ -100,15 +117,74 @@ class RecognitionTaskRunnerTest {
             enteredWriter.complete(Unit)
             resumeWriter.await() // Mirrors category/preferences/Room suspension before the final guarded insert.
             if (isCurrent()) { commits++; true } else false
-        }, reports::add)
+        }, reports::add, onState = { _, state -> states += state })
         val result = async { guardedRunner.run("task") }
         enteredWriter.await()
         val original = store.get("task")!!
         store.enqueue(original.copy(text = "转账成功\n¥28.00\n待对方收款"))
         resumeWriter.complete(Unit)
-        assertFalse(result.await()); assertEquals(0, commits)
-        assertEquals(2, store.get("task")!!.evidenceVersion)
+        assertTrue(result.await())
+        assertSuccessorPreserved()
         assertTrue(store.get("task")!!.text.contains("28.00"))
+    }
+
+    @Test fun `evidence received before sending finishes predecessor without a model call`() = runTest {
+        enqueue()
+        val guarded = RecognitionTaskRunner(store, client, { allowed },
+            { _, _, _, _ -> commits++; true }, reports::add,
+            onState = { _, state -> states += state },
+            semanticContext = { addEvidence(); CaptureSemanticContext() })
+        assertTrue(guarded.run("task"))
+        assertEquals(0, calls)
+        assertSuccessorPreserved()
+        assertTrue(runner().run("task"))
+        assertEquals(1, commits)
+    }
+
+    @Test fun `timeout of superseded response does not back off successor`() = runTest {
+        enqueue(); val old = response
+        response = { addEvidence(); delay(60_001); old() }
+        assertTrue(runner().run("task"))
+        assertSuccessorPreserved()
+        response = old
+        assertTrue(runner().run("task"))
+        assertEquals(1, commits)
+    }
+
+    @Test fun `network failure of superseded response does not back off successor`() = runTest {
+        enqueue(); val old = response
+        response = { addEvidence(); error("old request disconnected") }
+        assertTrue(runner().run("task"))
+        assertSuccessorPreserved()
+        response = old
+        assertTrue(runner().run("task"))
+        assertEquals(1, commits)
+    }
+
+    @Test fun `commit exception after evidence update preserves immediately runnable successor`() = runTest {
+        enqueue()
+        val guarded = RecognitionTaskRunner(store, client, { allowed },
+            { _, _, _, _ -> addEvidence(); error("stale writer interrupted") }, reports::add,
+            onState = { _, state -> states += state })
+        assertTrue(guarded.run("task"))
+        assertSuccessorPreserved()
+        assertTrue(runner().run("task"))
+        assertEquals(1, commits)
+    }
+
+    @Test fun `timeout of current evidence still retries and is bounded`() = runTest {
+        enqueue()
+        response = { delay(60_001); error("timeout must cancel request") }
+        repeat(3) {
+            assertFalse(runner().run("task"))
+            assertEquals(it + 1, store.get("task")!!.attempts)
+            assertTrue(reports.last().contains("超时"))
+            assertEquals("model_failed", states.last())
+        }
+        assertTrue(runner().run("task"))
+        assertNull(store.get("task"))
+        assertEquals(3, calls)
+        assertEquals("model_exhausted", states.last())
     }
 
 }

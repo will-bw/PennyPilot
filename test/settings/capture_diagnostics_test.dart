@@ -30,6 +30,7 @@ Future<TestLedgerRepository> showCapture(
   Size size = const Size(390, 844),
   double textScale = 1,
   Brightness brightness = Brightness.light,
+  bool headsUp = false,
 }) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
@@ -45,6 +46,8 @@ Future<TestLedgerRepository> showCapture(
     'accessibilityGranted': granted,
     'accessibilityServiceConnected': connected,
     'screenCaptureStatus': status,
+    'remindersEnabled': true,
+    'captureHeadsUpEnabled': headsUp,
     'lastScreenEventTime': DateTime(2026, 10, 24, 10).millisecondsSinceEpoch,
     'lastScreenReadTime': DateTime(2026, 10, 24, 10).millisecondsSinceEpoch,
     'lastScreenPackage': 'com.tencent.mm',
@@ -68,6 +71,35 @@ Future<TestLedgerRepository> showCapture(
 }
 
 void main() {
+  testWidgets('silent reminders explain the gap and open the capture channel', (
+    tester,
+  ) async {
+    final repository = await showCapture(tester);
+    final button = find.text('设置支付提醒');
+    await tester.scrollUntilVisible(button, 400);
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('当前允许通知，但提醒优先级较低'), findsOneWidget);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(repository.calls.last.arguments, {'target': 'captureNotifications'});
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('high priority reminders describe quiet background updates', (
+    tester,
+  ) async {
+    await showCapture(
+      tester,
+      headsUp: true,
+      size: const Size(320, 780),
+      textScale: 1.6,
+    );
+    await tester.scrollUntilVisible(find.text('设置支付提醒'), 400);
+    expect(find.textContaining('已允许即时提醒。分类和详情在后台补充'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'system authorization alone does not claim screen capture ready',
     (tester) async {
@@ -300,10 +332,7 @@ void main() {
     );
   });
 
-  for (final outcome in [
-    ('saved', '已保存识别结果'),
-    ('not_receipt', '未识别到完整支付凭证'),
-  ]) {
+  for (final outcome in [('saved', '已保存识别结果'), ('not_receipt', '未识别到完整支付凭证')]) {
     testWidgets('history retains ${outcome.$1} after returning to chat', (
       tester,
     ) async {

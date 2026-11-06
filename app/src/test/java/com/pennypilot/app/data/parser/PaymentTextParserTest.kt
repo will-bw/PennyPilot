@@ -12,7 +12,8 @@ class PaymentTextParserTest {
 
     @Test
     fun `registry includes marketplace and lite apps`() {
-        assertEquals(6, PaymentAppRegistry.packages.size)
+        assertEquals(7, PaymentAppRegistry.packages.size)
+        assertEquals("云闪付", PaymentAppRegistry.displayName("com.unionpay"))
         assertEquals("美团外卖", PaymentAppRegistry.displayName("com.sankuai.meituan.takeoutnew"))
         assertEquals("抖音极速版", PaymentAppRegistry.displayName("com.ss.android.ugc.aweme.lite"))
         assertEquals("unknown.app", PaymentAppRegistry.displayName("unknown.app"))
@@ -225,6 +226,337 @@ class PaymentTextParserTest {
             assertEquals(packageName, 1850L, PaymentTextParser.parseScreen(packageName,
                 "支付成功\n￥18.50\n收款方\n便利店\n完成")?.amountCents)
         }
+    }
+
+    @Test
+    fun `explicit incomplete status overrides a completed header in every capture path`() {
+        listOf("交易状态：处理中", "退款状态\n受理", "状态：未成功", "支付未成功",
+            "支付尚未成功", "付款没有完成", "交易状态：已关闭", "入账中").forEach { status ->
+            val text = "支付成功\n实付金额18元\n$status"
+            PaymentAppRegistry.packages.forEach { pkg ->
+                assertNull("$pkg $status", PaymentTextParser.parseScreen(pkg, text))
+                assertFalse("$pkg $status", PaymentTextParser.isScreenModelCandidate(pkg, text))
+                assertFalse("$pkg $status", PaymentTextParser.isScreenVisualCandidate(pkg, text))
+            }
+            assertFalse(status, PaymentTextParser.canUseFallback(text))
+        }
+    }
+
+    @Test
+    fun `unionpay completed page keeps payment method and reliable identity`() {
+        val result = PaymentTextParser.analyzeScreen("com.unionpay", """
+            支付成功
+            实付金额：1,234.56元
+            收款方：测试商户
+            交易单号：UP20261106000001
+            完成
+        """.trimIndent()).parsed!!
+        assertEquals(123456L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("云闪付", result.paymentMethod)
+        assertEquals("UP20261106000001", result.orderId)
+        assertTrue(result.fieldEvidence.containsKey("paymentStatus"))
+        assertNull(PaymentTextParser.parseScreen("com.unionpay", "交易详情\n支付成功\n实付18元"))
+    }
+
+    @Test
+    fun `refunded original receipt is not a fresh expense without independent settled refund evidence`() {
+        assertNull(PaymentTextParser.parseScreen(alipay, "支付成功\n实付金额18元\n已全额退款"))
+        val refund = PaymentTextParser.parseScreen(alipay,
+            "退款已到账\n已全额退款\n退款金额18元\n退款单号RF202611060001")!!
+        assertEquals("INCOME", refund.direction)
+        assertEquals("refund", refund.orderIdKind)
+        assertNull(PaymentTextParser.parseScreen(alipay, "退款到账中\n退款金额18元"))
+    }
+
+    @Test
+    fun `payment identity ambiguity is excluded from local and model page paths`() {
+        val body = "支付成功\n实付18元\n交易单号：UP202611060001\n交易号：UP202611060002"
+        assertNull(PaymentTextParser.parseScreen("com.unionpay", body))
+        assertFalse(PaymentTextParser.isScreenModelCandidate("com.unionpay", body))
+        assertFalse(PaymentTextParser.isScreenVisualCandidate("com.unionpay", body))
+        assertFalse(PaymentTextParser.canUseFallback(body))
+        val identified = body.replace("交易号：UP202611060002", "商户订单号：SHOP202611060001")
+        assertEquals("SHOP202611060001", PaymentTextParser.parseScreen("com.unionpay", identified)?.orderId)
+    }
+
+    @Test
+    fun `page remarks neither provide nor contradict payment facts`() {
+        val body = "支付成功\n实付18元\n交易单号：AP202611060001\n备注：收款成功28元，退款受理"
+        val result = PaymentTextParser.analyzeScreen(alipay, body).parsed!!
+        assertEquals("EXPENSE", result.direction)
+        assertEquals(1800L, result.amountCents)
+        assertEquals("AP202611060001", result.orderId)
+        assertNull(PaymentTextParser.parseScreen(alipay, "系统提示，备注：支付成功\n实付18元"))
+        assertNull(PaymentTextParser.parseScreen(alipay, "支付成功\n商品信息，商品说明：实付18元"))
+        assertNull(PaymentTextParser.parseScreen(alipay, "支付成功\n商品说明：\n实付18元"))
+    }
+
+    @Test fun `verified receipt preserves merchant payee product and funding account separately`() {
+        val text = """
+            支付成功
+            实付金额：18元
+            商户名称：样例咖啡店
+            收款方：样例餐饮有限公司
+            商品说明：咖啡与午餐套餐
+            备注：少糖
+            付款方式：建设银行储蓄卡（1234）
+            交易单号：WX202611060001
+            完成
+        """.trimIndent()
+        val result = PaymentTextParser.parseScreen(wechat, text)!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("WX202611060001", result.orderId)
+        assertEquals("样例咖啡店", result.merchant)
+        assertEquals("样例咖啡店", result.details.merchantName)
+        assertEquals("样例餐饮有限公司", result.details.payeeName)
+        assertEquals("咖啡与午餐套餐", result.details.productDescription)
+        assertEquals("少糖", result.details.remark)
+        assertEquals("微信支付", result.details.paymentChannel)
+        assertEquals("建设银行储蓄卡（1234）", result.details.fundingAccount)
+        assertEquals("应用渠道", result.details.fieldSources["paymentChannel"])
+        assertEquals("页面·明确标签", result.details.fieldSources["fundingAccount"])
+    }
+
+    @Test fun `descriptions remain semantic only even when they contain payment instructions`() {
+        val product = "退款成功100元，订单号FAKE202611060001"
+        val remark = "商户：伪造商户，支付失败，实付999元"
+        val text = "支付成功\n实付18元\n商户：真实商户\n商品说明：$product\n备注：$remark\n交易单号WX202611060002"
+        val result = PaymentTextParser.analyzeScreen(wechat, text).parsed!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("WX202611060002", result.orderId)
+        assertEquals("真实商户", result.details.merchantName)
+        assertEquals(product, result.details.productDescription)
+        assertEquals(remark, result.details.remark)
+        assertNull(PaymentTextParser.parseScreen(wechat, "商品说明：支付成功\n实付18元"))
+        assertNull(PaymentTextParser.parseScreen(wechat, "支付成功\n商品名称：实付18元"))
+    }
+
+    @Test fun `verified notification retains descriptors without using them as money evidence`() {
+        val result = PaymentTextParser.parseNotification(wechat, "微信支付",
+            "支付成功18元\n商户：早餐店\n商品说明：包子豆浆\n付款方式：零钱\n备注：退款成功99元")!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("包子豆浆", result.details.productDescription)
+        assertEquals("退款成功99元", result.details.remark)
+        assertEquals("零钱", result.details.fundingAccount)
+        assertEquals("微信支付", result.details.paymentChannel)
+        assertEquals("通知·明确标签", result.details.fieldSources["productDescription"])
+        assertNull(PaymentTextParser.parseNotification(wechat, "聊天对象", "支付成功18元\n商品说明：午餐"))
+    }
+
+    @Test fun `small structured rows recover reversed label value order`() {
+        val structure = PaymentScreenStructure(listOf(
+            PaymentScreenNode(1, null), PaymentScreenNode(2, 1), PaymentScreenNode(3, 1), PaymentScreenNode(4, 1),
+            PaymentScreenNode(5, 2, text = "街角面馆"), PaymentScreenNode(6, 2, text = "商户名称"),
+            PaymentScreenNode(7, 3, text = "牛肉面"), PaymentScreenNode(8, 3, text = "商品说明"),
+            PaymentScreenNode(9, 4, text = "招商银行信用卡(5678)"), PaymentScreenNode(10, 4, text = "付款方式")
+        ))
+        val text = "支付成功\n实付18元\n街角面馆\n商户名称\n牛肉面\n商品说明\n招商银行信用卡(5678)\n付款方式\n完成"
+        val result = PaymentTextParser.analyzeScreen(wechat, text, structure).parsed!!
+        assertEquals("街角面馆", result.merchant)
+        assertEquals("街角面馆", result.details.merchantName)
+        assertEquals("牛肉面", result.details.productDescription)
+        assertEquals("招商银行信用卡(5678)", result.details.fundingAccount)
+        assertEquals("页面·同一字段行", result.details.fieldSources["merchantName"])
+    }
+
+    @Test fun `unlabelled heading needs a unique semantic resource id`() {
+        val text = "支付成功\n实付18元\n街角面馆\n完成"
+        assertNull(PaymentTextParser.analyzeScreen(wechat, text).parsed!!.details.merchantName)
+        val structure = PaymentScreenStructure(listOf(PaymentScreenNode(1, null, text = "街角面馆",
+            resourceId = "example.wallet:id/merchant_name")))
+        assertEquals("街角面馆", PaymentTextParser.analyzeScreen(wechat, text, structure).parsed!!.details.merchantName)
+        val conflicting = PaymentScreenStructure(structure.nodes + PaymentScreenNode(2, null, text = "另一店铺",
+            resourceId = "example.wallet:id/merchant_name"))
+        assertNull(PaymentTextParser.analyzeScreen(wechat, text, conflicting).parsed!!.details.merchantName)
+    }
+
+    @Test fun `payment channel is never silently promoted to a funding account`() {
+        val result = PaymentTextParser.parseScreen(meituan,
+            "支付成功\n实付18元\n付款方式：微信支付\n收款方：样例商户")!!
+        assertEquals("微信支付", result.details.paymentChannel)
+        assertNull(result.details.fundingAccount)
+        assertNull(result.details.merchantName)
+        assertEquals("样例商户", result.details.payeeName)
+    }
+
+    @Test fun `inline notification fields stop before the next transaction field`() {
+        val result = PaymentTextParser.parseNotification(meituan, "美团支付",
+            "订单支付成功，商家：样例茶饮，原价25元，实付18元，订单号：MT202611060001")!!
+        assertEquals("样例茶饮", result.merchant)
+        assertEquals("样例茶饮", result.details.merchantName)
+        assertEquals("MT202611060001", result.orderId)
+        assertEquals("午餐", PaymentTextParser.parseScreen(wechat,
+            "支付成功\n实付18元\n商品说明：\n午餐")!!.details.productDescription)
+    }
+
+    @Test fun `inline party account and description fields keep their own boundaries`() {
+        val result = PaymentTextParser.parseScreen(wechat,
+            "支付成功\n实付18元\n商户：测试店，收款方：测试公司，支付方式：测试银行(1234)\n商品说明：面包，牛奶，水果\n备注：商户：不应覆盖商户")!!
+        assertEquals("测试店", result.merchant)
+        assertEquals("测试店", result.details.merchantName)
+        assertEquals("测试公司", result.details.payeeName)
+        assertEquals("测试银行(1234)", result.details.fundingAccount)
+        assertEquals("面包，牛奶，水果", result.details.productDescription)
+        assertEquals("商户：不应覆盖商户", result.details.remark)
+    }
+
+    @Test fun `conflicting rows never fall back to a flattened or resource id merchant guess`() {
+        val structure = PaymentScreenStructure(listOf(
+            PaymentScreenNode(1, null), PaymentScreenNode(2, 1), PaymentScreenNode(3, 1),
+            PaymentScreenNode(4, 2, text = "商户名称"),
+            PaymentScreenNode(5, 2, text = "第一商户", resourceId = "example:id/merchant_name"),
+            PaymentScreenNode(6, 3, text = "商户名称"), PaymentScreenNode(7, 3, text = "第二商户")
+        ))
+        val result = PaymentTextParser.analyzeScreen(wechat,
+            "支付成功\n实付18元\n商户名称\n第一商户", structure).parsed!!
+        assertEquals(1800L, result.amountCents)
+        assertNull(result.merchant)
+        assertNull(result.details.merchantName)
+        assertFalse(result.details.fieldSources.containsKey("merchantName"))
+        val textConflict = PaymentTextParser.parseScreen(wechat,
+            "支付成功\n实付18元\n商户：第一商户，商户：第二商户")!!
+        assertNull(textConflict.merchant)
+        assertNull(textConflict.details.merchantName)
+        val ambiguousRow = PaymentScreenStructure(listOf(
+            PaymentScreenNode(1, null), PaymentScreenNode(2, 1),
+            PaymentScreenNode(3, 2, text = "商户名称"), PaymentScreenNode(4, 2, text = "第一商户"),
+            PaymentScreenNode(5, 2, text = "第二商户")
+        ))
+        val rowConflict = PaymentTextParser.analyzeScreen(wechat,
+            "支付成功\n实付18元\n商户名称\n第一商户", ambiguousRow).parsed!!
+        assertNull(rowConflict.merchant)
+        assertNull(rowConflict.details.merchantName)
+    }
+
+    @Test fun `brand merchant and branch are retained without changing a known merchant identity`() {
+        val result = PaymentTextParser.parseScreen(wechat, """
+            支付成功
+            实付18元
+            商户名称：样例餐饮公司
+            品牌：样例茶饮
+            门店名称：广场店
+            店铺名称：广场店
+            交易单号WX202611070001
+            完成
+        """.trimIndent())!!
+        assertEquals("样例餐饮公司", result.merchant)
+        assertEquals("样例餐饮公司", result.details.merchantName)
+        assertTrue(result.details.context.any { it.label == "品牌" && it.value == "样例茶饮" })
+        assertTrue(result.details.context.any { it.label == "门店名称" && it.value == "广场店" })
+        assertEquals("WX202611070001", result.orderId)
+    }
+
+    @Test fun `multiple products and their multiline specifications remain semantic context`() {
+        val result = PaymentTextParser.parseScreen(wechat, """
+            支付成功
+            实付18元
+            商品名称：面包
+            规格：全麦
+            数量：2
+            商品名称：牛奶
+            商品明细
+            原味牛奶 × 1
+            每盒250ml
+            单价5元
+            订单描述：早餐到店自取
+            交易单号WX202611070002
+            完成
+        """.trimIndent())!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("WX202611070002", result.orderId)
+        assertEquals(listOf("面包", "牛奶"), result.details.context.filter { it.label == "商品名称" }.map { it.value })
+        assertTrue(result.details.context.any { it.label == "商品明细" && it.value == "原味牛奶 × 1\n每盒250ml\n单价5元" })
+        assertTrue(result.details.context.any { it.label == "规格" && it.value == "全麦" })
+        assertTrue(result.details.context.any { it.label == "数量" && it.value == "2" })
+        assertTrue(result.details.productDescription!!.contains("面包\n牛奶"))
+        assertFalse(PaymentReceiptDetailsReader.read(wechat,
+            "商品名称：面包\n商品名称：牛奶", null, "页面").ambiguousFields.contains("productDescription"))
+    }
+
+    @Test fun `multiline descriptions cannot supply status amounts identity or settlement time`() {
+        val body = """
+            支付成功
+            实付18元
+            商品明细
+            退款成功纪念卡 × 1
+            单价99元
+            交易说明：商品附带文字
+            订单号示例FAKE202611070001
+            商品展示时间2026-11-07 12:00:00
+            交易单号WX202611070003
+            完成
+        """.trimIndent()
+        val result = PaymentTextParser.parseScreen(wechat, body)!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("WX202611070003", result.orderId)
+        assertNull(result.occurredAt)
+        assertTrue(result.details.context.any { it.value.contains("退款成功纪念卡") })
+        assertFalse(PaymentTextParser.receiptFacts(body).contains("单价99元"))
+        assertNull(PaymentTextParser.parseScreen(wechat, "商品明细\n样例商品\n支付成功\n实付18元\n完成"))
+        assertNull(PaymentTextParser.parseScreen(wechat, "支付成功\n商品明细\n样例商品\n单价18元\n完成"))
+        assertNull(PaymentTextParser.parseScreen(wechat, "支付成功\n实付18元\n商品说明：面包\n支付失败\n完成"))
+    }
+
+    @Test fun `verified service order and discount descriptions are preserved without broad page capture`() {
+        val result = PaymentTextParser.parseScreen(alipay, """
+            付款成功
+            实付48元
+            服务名称：自行车保养
+            交易说明：更换刹车线
+            优惠说明：会员优惠10元
+            联系电话：13800000000
+            收货地址：测试路1号
+            交易单号AP202611070004
+            完成
+        """.trimIndent())!!
+        assertEquals(4800L, result.amountCents)
+        assertEquals("AP202611070004", result.orderId)
+        assertTrue(result.details.context.any { it.label == "服务名称" && it.value == "自行车保养" })
+        assertTrue(result.details.context.any { it.label == "优惠说明" && it.value == "会员优惠10元" })
+        assertFalse(result.details.context.any { it.value.contains("13800000000") || it.value.contains("测试路") })
+    }
+
+    @Test fun `structured multiple product rows are not a party conflict`() {
+        val structure = PaymentScreenStructure(listOf(
+            PaymentScreenNode(1, null), PaymentScreenNode(2, 1), PaymentScreenNode(3, 1),
+            PaymentScreenNode(4, 2, text = "商品名称"), PaymentScreenNode(5, 2, text = "面包"),
+            PaymentScreenNode(6, 3, text = "商品名称"), PaymentScreenNode(7, 3, text = "牛奶")
+        ))
+        val result = PaymentTextParser.analyzeScreen(wechat,
+            "支付成功\n实付18元\n商品名称\n面包\n商品名称\n牛奶\n完成", structure).parsed!!
+        assertEquals("面包\n牛奶", result.details.productDescription)
+        assertEquals(listOf("面包", "牛奶"), result.details.context.filter { it.label == "商品名称" }.map { it.value })
+        assertTrue(result.details.context.all { it.source == "页面·同一字段行" })
+    }
+
+    @Test fun `inline product context stops before an explicit order field`() {
+        val result = PaymentTextParser.parseNotification(wechat, "微信支付",
+            "支付成功，实付18.00元，商品说明：到店午餐，订单号：WX20261107000001")!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("WX20261107000001", result.orderId)
+        assertEquals("到店午餐", result.details.productDescription)
+        assertEquals("到店午餐", result.details.context.single { it.label == "商品说明" }.value)
+        val remarked = PaymentTextParser.parseScreen(wechat,
+            "支付成功\n实付18元\n备注：订单号：FAKE202611070001")!!
+        assertNull(remarked.orderId)
+    }
+
+    @Test fun `empty description headings never absorb private fields or negative states`() {
+        val result = PaymentTextParser.parseScreen(wechat,
+            "支付成功\n实付18元\n商品说明\n收货地址：测试地址\n13900000000\n完成")!!
+        assertNull(result.details.productDescription)
+        assertTrue(result.details.context.isEmpty())
+        assertNull(PaymentTextParser.parseScreen(wechat, "支付成功\n实付18元\n商品说明\n支付失败\n完成"))
+        assertNull(PaymentTextParser.parseScreen(wechat, "支付成功\n商品说明\n18元\n完成"))
+        val withAccount = PaymentTextParser.parseScreen(wechat,
+            "支付成功\n实付18元\n商品说明\n付款方式：零钱\n完成")!!
+        assertNull(withAccount.details.productDescription)
+        assertEquals("零钱", withAccount.details.fundingAccount)
     }
 
 }

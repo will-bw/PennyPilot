@@ -352,6 +352,8 @@ class _EntryScreenState extends State<EntryScreen> {
               const SizedBox(height: 20),
               DropdownButtonFormField<String>(
                 key: ValueKey('business-kind-$businessKind'),
+                isExpanded: true,
+                itemHeight: null,
                 initialValue: businessKind,
                 decoration: const InputDecoration(labelText: '账务用途'),
                 items:
@@ -634,54 +636,154 @@ class _StoredEvidence extends StatelessWidget {
         .where((question) => question.trim().isNotEmpty);
     final paymentStatus =
         metadata['paymentStatus'] ?? metadata['payment_status'];
+    final details = metadata['receiptDetails'] is Map
+        ? stringMap(metadata['receiptDetails'])
+        : <String, dynamic>{};
+    const detailLabels = {
+      'merchantName': '商户名称',
+      'payeeName': '收款对象',
+      'productDescription': '商品或服务',
+      'remark': '付款备注',
+      'paymentChannel': '支付渠道',
+      'fundingAccount': '扣款账户',
+    };
+    final detailRows = [
+      for (final entry in detailLabels.entries)
+        if (details[entry.key] is String &&
+            (details[entry.key] as String).trim().isNotEmpty)
+          (label: entry.value, value: (details[entry.key] as String).trim()),
+      ..._contextRows(metadata['receiptContext'], details),
+    ];
+    final receiptDetails = detailRows.isEmpty
+        ? const SizedBox.shrink()
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle('支付详情'),
+              for (final entry in detailRows)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.label,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      SelectableText(entry.value),
+                    ],
+                  ),
+                ),
+            ],
+          );
     if (facts.isEmpty &&
         questions.isEmpty &&
         (paymentStatus == null || paymentStatus.toString().trim().isEmpty)) {
-      return const SizedBox.shrink();
+      return receiptDetails;
     }
-    return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
-      title: const Text('识别依据与待核对信息'),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(transaction.businessLabel),
-          subtitle: Text(
-            '${transaction.source.label} · ${paymentStatus ?? '请核对凭证'}',
-          ),
+        receiptDetails,
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('识别依据与待核对信息'),
+          children: [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(transaction.businessLabel),
+              subtitle: Text(
+                '${transaction.source.label} · ${paymentStatus ?? '请核对凭证'}',
+              ),
+            ),
+            for (final question in questions)
+              ListTile(contentPadding: EdgeInsets.zero, title: Text(question)),
+            for (final fact in facts.entries)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(
+                  const {
+                        'amount': '金额',
+                        'type': '资金方向',
+                        'direction': '资金方向',
+                        'paymentStatus': '支付状态',
+                        'occurredAt': '交易时间',
+                        'transferTime': '转账时间',
+                        'merchant': '交易对方',
+                        'refundId': '退款单号',
+                        'orderId': '交易单号',
+                        'originalOrderId': '原支付单号',
+                      }[fact.key] ??
+                      fact.key,
+                ),
+                subtitle: Text(
+                  fact.value is Map
+                      ? '${fact.value['quote'] ?? fact.value['value'] ?? '未提供原文'}'
+                      : fact.value.toString(),
+                ),
+              ),
+            if (facts.isEmpty)
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text('该条记录没有逐字段原文，请对照支付凭证核对。'),
+              ),
+          ],
         ),
-        for (final question in questions)
-          ListTile(contentPadding: EdgeInsets.zero, title: Text(question)),
-        for (final fact in facts.entries)
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              const {
-                    'amount': '金额',
-                    'type': '资金方向',
-                    'direction': '资金方向',
-                    'paymentStatus': '支付状态',
-                    'occurredAt': '交易时间',
-                    'transferTime': '转账时间',
-                    'merchant': '交易对方',
-                    'refundId': '退款单号',
-                    'orderId': '交易单号',
-                    'originalOrderId': '原支付单号',
-                  }[fact.key] ??
-                  fact.key,
-            ),
-            subtitle: Text(
-              fact.value is Map
-                  ? '${fact.value['quote'] ?? fact.value['value'] ?? '未提供原文'}'
-                  : fact.value.toString(),
-            ),
-          ),
-        if (facts.isEmpty)
-          const ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text('该条记录没有逐字段原文，请对照支付凭证核对。'),
-          ),
       ],
     );
+  }
+
+  static List<({String label, String value})> _contextRows(
+    Object? raw,
+    Map<String, dynamic> details,
+  ) {
+    if (raw is! List) return [];
+    final rows = <({String label, String value})>[];
+    final seen = <(String, String)>{};
+    String normalized(String value) =>
+        value.trim().replaceAll(RegExp(r'\s+'), ' ');
+    for (final item in raw.take(16)) {
+      if (item is! Map ||
+          item['label'] is! String ||
+          item['value'] is! String) {
+        continue;
+      }
+      final label = (item['label'] as String).trim();
+      final value = (item['value'] as String).trim();
+      if (label.isEmpty || value.isEmpty) continue;
+      final field = switch (label) {
+        '商户名称' ||
+        '商户全称' ||
+        '收款商户' ||
+        '商家名称' ||
+        '店铺名称' ||
+        '商户' ||
+        '商家' ||
+        '店铺' ||
+        '门店' => 'merchantName',
+        '收款对象' || '收款方' || '收款人' || '收款人名称' || '付款对象' || '付款给' => 'payeeName',
+        '商品或服务' || '商品说明' || '商品名称' || '商品信息' || '交易商品' => 'productDescription',
+        '付款备注' ||
+        '备注' ||
+        '转账备注' ||
+        '付款说明' ||
+        '收款说明' ||
+        '留言' ||
+        '红包祝福语' => 'remark',
+        '支付渠道' || '付款渠道' => 'paymentChannel',
+        '扣款账户' || '付款账户' || '支付账户' || '付款银行卡' || '扣款银行卡' => 'fundingAccount',
+        _ => null,
+      };
+      final known = details[field];
+      // A brand, purpose or product variant is a separate fact even when its text
+      // matches another role. Only hide a repeated value for the same receipt field.
+      if (known is String && normalized(known) == normalized(value)) continue;
+      if (!seen.add((normalized(label), normalized(value)))) continue;
+      rows.add((label: label, value: value));
+    }
+    return rows;
   }
 }

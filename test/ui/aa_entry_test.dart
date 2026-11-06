@@ -115,6 +115,184 @@ String _inputText(WidgetTester tester, Finder field) => tester
 void main() {
   setUpAll(app_test.loadScreenshotFonts);
 
+  for (final compact in [false, true]) {
+    testWidgets(
+      'captured payment details remain readable and survive editing $compact',
+      (tester) async {
+        final repository = TestLedgerRepository();
+        final details = {
+          'merchantName': '测试门店（中心广场店）',
+          'payeeName': '测试餐饮管理有限公司',
+          'productDescription': '双人午餐套餐：主食两份、饮品两杯\n少冰，不加糖',
+          'remark': '',
+          'paymentChannel': '微信支付',
+          'fundingAccount': '测试银行储蓄卡（1234）',
+        };
+        final transaction = _storedSplit(
+          repository,
+        ).copyWith(metadataJson: jsonEncode({'receiptDetails': details}));
+        final controller = await _openEntry(
+          tester,
+          repository,
+          transaction: transaction,
+          size: compact ? const Size(320, 700) : const Size(390, 844),
+          textScale: compact ? 1.6 : 1,
+          brightness: compact ? Brightness.dark : Brightness.light,
+        );
+        await tester.drag(find.byType(ListView), const Offset(0, -2200));
+        await tester.pumpAndSettle();
+        expect(find.text('支付详情'), findsOneWidget);
+        expect(find.text('收款对象'), findsOneWidget);
+        expect(find.text(details['productDescription']!), findsOneWidget);
+        expect(find.text('付款备注'), findsNothing);
+        expect(find.text('识别依据与待核对信息'), findsNothing);
+        expect(tester.takeException(), isNull);
+        await app_test.saveScreenshot(
+          tester,
+          compact ? 'receipt-details-compact-dark' : 'receipt-details-light',
+        );
+        await _save(tester, editing: true);
+        expect(
+          controller.transactions.single.recognitionMetadata['receiptDetails'],
+          details,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'payment context keeps distinct roles and products and survives editing $compact',
+      (tester) async {
+        final repository = TestLedgerRepository();
+        final details = {
+          'merchantName': '青禾茶饮（虚构品牌）',
+          'payeeName': '青禾餐饮有限公司（虚构）',
+          'productDescription': '热茶一杯\n奶茶两杯',
+        };
+        final longSpecification = List.filled(
+          12,
+          '虚构套餐规格：大杯、少冰、无糖；茶饮和配料分别包装。',
+        ).join('\n');
+        final receiptContext = [
+          {
+            'label': '商家名称',
+            'value': details['merchantName'],
+            'source': '页面·商户节点',
+          },
+          {'label': '商品信息', 'value': '热茶一杯  \n奶茶两杯', 'source': '页面·商品说明'},
+          {
+            'label': '品牌',
+            'value': details['merchantName'],
+            'source': '页面·品牌名称',
+          },
+          {
+            'label': '品牌',
+            'value': details['merchantName'],
+            'source': '本地OCR·品牌名称',
+          },
+          {'label': '门店', 'value': '青禾茶饮（虚构东街店）', 'source': '页面·门店名称'},
+          {'label': '商品', 'value': '虚构红茶 × 1', 'source': '页面·商品行'},
+          {'label': '商品', 'value': '虚构奶茶 × 2', 'source': '页面·商品行'},
+          {'label': '规格', 'value': longSpecification, 'source': '页面·规格行'},
+          {'label': '用途', 'value': '虚构样例：团队午餐饮品', 'source': '页面·用途'},
+        ];
+        final metadata = {
+          'receiptDetails': details,
+          'receiptContext': receiptContext,
+          'captureVersion': 'synthetic-context-test',
+        };
+        final transaction = _storedSplit(
+          repository,
+        ).copyWith(metadataJson: jsonEncode(metadata));
+        final controller = await _openEntry(
+          tester,
+          repository,
+          transaction: transaction,
+          size: compact ? const Size(320, 700) : const Size(390, 844),
+          textScale: compact ? 1.6 : 1,
+          brightness: compact ? Brightness.dark : Brightness.light,
+        );
+        await tester.scrollUntilVisible(
+          app_test.field('备注'),
+          400,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.enterText(app_test.field('备注'), '已核对虚构样例');
+        await tester.scrollUntilVisible(
+          find.text('品牌'),
+          400,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('支付详情'), findsOneWidget);
+        expect(find.text('商家名称'), findsNothing);
+        expect(find.text('商品信息'), findsNothing);
+        expect(find.text('品牌'), findsOneWidget);
+        expect(find.text(details['merchantName']!), findsNWidgets(2));
+        expect(find.text('青禾茶饮（虚构东街店）'), findsOneWidget);
+        expect(find.text('商品'), findsNWidgets(2));
+        expect(find.text('虚构红茶 × 1'), findsOneWidget);
+        expect(find.text('虚构奶茶 × 2'), findsOneWidget);
+        expect(
+          tester
+              .widgetList<SelectableText>(find.byType(SelectableText))
+              .map((widget) => widget.data),
+          contains(longSpecification),
+        );
+        expect(tester.takeException(), isNull);
+        await app_test.saveScreenshot(
+          tester,
+          compact ? 'receipt-context-compact-dark' : 'receipt-context-light',
+        );
+        await tester.ensureVisible(find.text('虚构样例：团队午餐饮品'));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await _save(tester, editing: true);
+        expect(controller.transactions.single.note, '已核对虚构样例');
+        expect(controller.transactions.single.recognitionMetadata, metadata);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'payment context can stand alone and skips malformed display rows',
+    (tester) async {
+      final repository = TestLedgerRepository();
+      final receiptContext = [
+        {'label': '门店', 'value': '虚构山茶店', 'source': '页面·明确标签'},
+        {'label': '规格', 'value': '大杯\n少冰', 'source': '本地OCR·明确标签'},
+        {'label': '', 'value': '不应显示', 'source': '页面'},
+        {'label': '无效字段', 'value': 123, 'source': '页面'},
+        '无效记录',
+      ];
+      final transaction = _storedSplit(
+        repository,
+      ).copyWith(metadataJson: jsonEncode({'receiptContext': receiptContext}));
+      final controller = await _openEntry(
+        tester,
+        repository,
+        transaction: transaction,
+        size: const Size(320, 700),
+        textScale: 1.6,
+      );
+      await tester.drag(find.byType(ListView), const Offset(0, -2200));
+      await tester.pumpAndSettle();
+      expect(find.text('支付详情'), findsOneWidget);
+      expect(find.text('虚构山茶店'), findsOneWidget);
+      expect(find.text('大杯\n少冰'), findsOneWidget);
+      expect(find.text('不应显示'), findsNothing);
+      expect(find.text('无效字段'), findsNothing);
+      expect(find.text('无效记录'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await _save(tester, editing: true);
+      expect(
+        controller.transactions.single.recognitionMetadata['receiptContext'],
+        receiptContext,
+      );
+    },
+  );
+
   testWidgets('AA saves only the personal expense and retains the payment', (
     tester,
   ) async {

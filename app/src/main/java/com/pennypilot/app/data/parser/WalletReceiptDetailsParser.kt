@@ -8,7 +8,7 @@ import java.time.format.ResolverStyle
 
 /** Recent, identified wallet receipts only. The generic history-page exclusion stays in place. */
 object WalletReceiptDetailsParser {
-    private val packages = setOf("com.tencent.mm", "com.eg.android.AlipayGphone")
+    private val packages = setOf("com.tencent.mm", "com.eg.android.AlipayGphone", "com.unionpay")
     private val titles = setOf("账单详情", "交易详情", "退款详情", "收款详情")
     private val completedRefund = Regex("退款(?:已)?(?:成功|到账|完成)|退还成功|红包已退还")
     private val date = "[0-9]{4}[-/年][0-9]{1,2}[-/月][0-9]{1,2}日?\\s+[0-9]{1,2}:[0-9]{2}:[0-9]{2}"
@@ -21,13 +21,13 @@ object WalletReceiptDetailsParser {
     fun parse(packageName: String, text: String, now: Long,
         structure: PaymentScreenStructure? = null, zone: ZoneId = ZoneId.systemDefault()): NotificationParseResult? {
         if (packageName !in packages || text.length !in 1..12_000) return null
-        val lines = text.lines().map(String::trim).filter(String::isNotEmpty)
+        val facts = PaymentTextParser.receiptFacts(text)
+        val lines = facts.lines().map(String::trim).filter(String::isNotEmpty)
         val titleIndex = lines.take(4).indexOfFirst { it in titles }
         if (titleIndex < 0 || lines.count { it in titles } != 1) return null
-        val refund = completedRefund.containsMatchIn(text)
+        val refund = completedRefund.containsMatchIn(facts)
         val labels = if (refund) "退款到账时间|退款成功时间|退款完成时间|到账时间" else
             "交易时间|支付时间|付款时间|收款时间|到账时间|完成时间"
-        val facts = PaymentTextParser.receiptFacts(text)
         val times = Regex("(?:^|\\n)($labels)\\s*[:：]?\\s*($date)(?=\\s|$)").findAll(facts).toList()
         val values = times.map { it.groupValues[2] }.distinct()
         if (values.size != 1) return null
@@ -60,7 +60,10 @@ object WalletReceiptDetailsParser {
         val parsed = recognition.parsed ?: return null
         if (parsed.orderId == null || refund && parsed.orderIdKind == null) return null
         if (explicitDirection != null && (explicitDirection == "收入") != (parsed.direction == "INCOME")) return null
-        return parsed.copy(occurredAt = occurredAt, ruleVersion = "wallet-receipt-details-2026-10-24.1",
+        // Financial parsing intentionally excludes free-form descriptions. Restore only their
+        // descriptive fields after the receipt's time, amount and identity have been validated.
+        return PaymentTextParser.withReceiptDetails(packageName, text, parsed, structure)
+            .copy(occurredAt = occurredAt, ruleVersion = "wallet-receipt-details-2026-11-06.1",
             fieldEvidence = parsed.fieldEvidence + buildMap {
                 put("occurredAt", "页面·${times.first().groupValues[1]}：$rawTime")
                 originalMoney?.let { put("amount", "页面·带方向的凭证金额：$it") }

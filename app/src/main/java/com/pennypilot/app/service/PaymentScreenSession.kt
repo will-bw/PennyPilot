@@ -60,7 +60,11 @@ class PaymentScreenSession {
         entry.receipt = parsed.copy(orderId = parsed.orderId ?: known?.orderId,
             orderIdKind = parsed.orderIdKind ?: known?.orderIdKind,
             merchant = parsed.merchant?.takeIf(String::isNotBlank) ?: known?.merchant,
-            paymentMethod = parsed.paymentMethod ?: known?.paymentMethod)
+            paymentMethod = parsed.paymentMethod?.takeIf(String::isNotBlank) ?: known?.paymentMethod,
+            occurredAt = parsed.occurredAt ?: known?.occurredAt,
+            details = known?.details?.mergeMissing(parsed.details) ?: parsed.details,
+            // A partially rendered receipt must not erase facts already read in this session.
+            fieldEvidence = known?.fieldEvidence.orEmpty() + parsed.fieldEvidence.filterValues(String::isNotBlank))
         return entry.key?.takeIf { entry.receipt != entry.handledReceipt }
     }
 

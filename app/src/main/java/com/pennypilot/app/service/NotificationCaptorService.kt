@@ -17,6 +17,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.FileDescriptor
+import java.io.PrintWriter
 
 @EntryPoint
 @InstallIn(SingletonComponent::class)
@@ -28,7 +33,7 @@ interface CaptorServiceEntryPoint {
 
 class NotificationCaptorService : NotificationListenerService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private data class Work(val notification: CapturedNotification, val revision: Long, val generation: Long, val key: String)
+    private data class Work(val notification: CapturedNotification, val revision: Long, val generation: Long, val key: String, val receivedAt: Long)
     private val queue = Channel<Work>(64)
     private val queuedEvents = mutableSetOf<String>()
     @Volatile private var captureEnabled = true
@@ -49,6 +54,10 @@ class NotificationCaptorService : NotificationListenerService() {
             for (work in queue) {
                 try {
                     if (captureEnabled && captureGeneration == work.generation) {
+                        CaptureLatencyTrace.record(this@NotificationCaptorService, work.key, CaptureLatencyTrace.Source.NOTIFICATION,
+                            CaptureLatencyTrace.Stage.SOURCE_POSTED, work.notification.postedAt)
+                        CaptureLatencyTrace.record(this@NotificationCaptorService, work.key, CaptureLatencyTrace.Source.NOTIFICATION,
+                            CaptureLatencyTrace.Stage.RECEIVED, work.receivedAt)
                         entryPoint.captureProcessor().processNotification(work.notification, work.revision) {
                             captureEnabled && captureGeneration == work.generation
                         }
@@ -67,6 +76,8 @@ class NotificationCaptorService : NotificationListenerService() {
         super.onListenerConnected()
         entryPoint.monitor().onServiceConnected()
         scope.launch {
+            CaptureLatencyTrace.record(this@NotificationCaptorService, "notification-listener", CaptureLatencyTrace.Source.SERVICE, CaptureLatencyTrace.Stage.CONNECTED)
+            com.pennypilot.app.data.recognition.RecognitionWorker.recover(this@NotificationCaptorService)
             try { entryPoint.captureProcessor().refreshTodayCount() }
             catch (e: CancellationException) { throw e }
             catch (_: Exception) { entryPoint.monitor().onError("捕获统计暂时不可用，请稍后重试") }
@@ -87,7 +98,7 @@ class NotificationCaptorService : NotificationListenerService() {
         val key = CaptureEventIdentity.key(input.packageName, input.notificationKey, input.postedAt,
             "${input.title}\n${input.content}")
         if (!synchronized(queuedEvents) { queuedEvents.add(key) }) return
-        if (!queue.trySend(Work(input, LedgerRevision.current, captureGeneration, key)).isSuccess) {
+        if (!queue.trySend(Work(input, LedgerRevision.current, captureGeneration, key, System.currentTimeMillis())).isSuccess) {
             synchronized(queuedEvents) { queuedEvents.remove(key) }
             entryPoint.monitor().onError("通知过于密集，部分通知未处理；请核对最近交易")
         }
@@ -96,6 +107,9 @@ class NotificationCaptorService : NotificationListenerService() {
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         entryPoint.monitor().onServiceDisconnected()
+        scope.launch {
+            CaptureLatencyTrace.record(this@NotificationCaptorService, "notification-listener", CaptureLatencyTrace.Source.SERVICE, CaptureLatencyTrace.Stage.DISCONNECTED)
+        }
         runCatching { requestRebind(ComponentName(this, NotificationCaptorService::class.java)) }
             .onFailure { entryPoint.monitor().onError("通知连接已断开，请在设置中重新连接") }
     }
@@ -105,5 +119,23 @@ class NotificationCaptorService : NotificationListenerService() {
         scope.cancel()
         entryPoint.monitor().onServiceDisconnected()
         super.onDestroy()
+    }
+
+    /** Technical state only; never expose original notifications or ledger content. */
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>?) {
+        writer.println("notificationListenerConnected=${entryPoint.monitor().health.value.isBound}")
+        writer.println("captureRemindersEnabled=${NotificationHelper.captureNotificationsEnabled(this)}")
+        writer.println("captureHeadsUpEnabled=${NotificationHelper.captureHeadsUpEnabled(this)}")
+        runBlocking {
+            withTimeoutOrNull(1_000) {
+                val prefs = entryPoint.appPreferences()
+                writer.println("notificationCaptureEnabled=${prefs.notificationCaptureEnabled.first()}")
+                writer.println("notificationCloudParsingEnabled=${prefs.notificationCloudParsingEnabled.first()}")
+                writer.println("screenCaptureEnabled=${prefs.screenCaptureEnabled.first()}")
+                writer.println("screenCloudParsingEnabled=${prefs.screenCloudParsingEnabled.first()}")
+                writer.println("screenVisualCaptureEnabled=${prefs.screenVisualCaptureEnabled.first()}")
+            }
+        }
+        CaptureLatencyTrace.dumpTo(this, writer)
     }
 }

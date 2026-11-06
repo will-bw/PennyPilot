@@ -9,6 +9,8 @@ import android.content.pm.ServiceInfo
 import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
 import androidx.test.core.app.ApplicationProvider
+import com.pennypilot.app.R
+import com.pennypilot.app.data.parser.PaymentAppRegistry
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -43,6 +45,17 @@ class PaymentAccessibilityPermissionTest {
         // 读取状态不能改写系统授权或宣称服务已经恢复。
         assertEquals(saved, Settings.Secure.getString(context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES))
+    }
+
+    @Test fun systemEventPackagesMatchTheParserAllowlist() {
+        context.resources.getXml(R.xml.payment_accessibility_service).use { xml ->
+            while (xml.eventType != org.xmlpull.v1.XmlPullParser.START_TAG &&
+                xml.eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) xml.next()
+            assertEquals("accessibility-service", xml.name)
+            val packages = xml.getAttributeValue("http://schemas.android.com/apk/res/android", "packageNames")
+                .split(',').toSet()
+            assertEquals(PaymentAppRegistry.packages, packages)
+        }
     }
 
     @Test fun acceptsShortComponentAmongOtherServices() {

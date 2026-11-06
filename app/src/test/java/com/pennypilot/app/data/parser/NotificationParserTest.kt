@@ -152,4 +152,172 @@ class NotificationParserTest {
         assertNull(NotificationParser.parse("com.tencent.mm", "微信支付", "付款18.00元\n交易对象：自定义小店",
             listOf(inconsistent), false) { null }?.merchant)
     }
+
+    @Test
+    fun `alipay transaction statement supplies direction without inventing a success title`() = runTest {
+        val pkg = "com.eg.android.AlipayGphone"
+        listOf("支出" to "EXPENSE", "收入" to "INCOME").forEach { (action, direction) ->
+            val body = "你有一笔1,234.56元的$action。\n交易单号：AP202611060001"
+            val result = NotificationParser.parse(pkg, "交易提醒", body, emptyList(), true) {
+                fail("完整动账语句应本机解析"); null
+            }!!
+            assertEquals(123456L, result.amountCents)
+            assertEquals(direction, result.direction)
+            assertEquals("AP202611060001", result.orderId)
+            assertTrue(result.fieldEvidence["direction"]!!.contains("你有一笔1,234.56元的$action"))
+            assertTrue(result.fieldEvidence["paymentStatus"]!!.contains("交易动账语句"))
+        }
+    }
+
+    @Test
+    fun `transaction statement expansion rejects quoted hypothetical conflicting and malformed evidence`() = runTest {
+        val pkg = "com.eg.android.AlipayGphone"
+        val rules = listOf(ParseRuleEntity(appPackage = pkg, regexAmount = """(\d+)"""))
+        listOf("如果你有一笔18元的支出", "明天你有一笔18元的支出", "备注：你有一笔18元的支出",
+            "你有一笔1,80.00元的支出", "你有一笔-18元的支出", "你有一笔0元的支出",
+            "你有一笔18元的支出\n另收28元", "你有一笔18元的支出\n收款成功18元",
+            "你有一笔18元的收入\n付款金额18元", "你有一笔18元的支出\n交易状态：处理中",
+            "你有一笔18元的支出\n你有一笔28元的支出", "支出金额18元").forEach { body ->
+            assertNull(body, NotificationParser.parse(pkg, "交易提醒", body, rules, true) {
+                fail("不完整或矛盾语句不得交给云端"); null
+            })
+        }
+        assertNull(NotificationParser.parse(pkg, "好友消息", "你有一笔18元的支出", rules, true) {
+            fail("仍需可信标题"); null
+        })
+        assertNull(NotificationParser.parse("com.tencent.mm", "交易提醒", "你有一笔18元的支出", emptyList(), true) {
+            fail("不能扩大为聊天消息识别"); null
+        })
+    }
+
+    @Test
+    fun `wallet reminder titles require settled evidence and keep separate refund IDs`() = runTest {
+        for (pkg in listOf("com.eg.android.AlipayGphone", "com.unionpay")) {
+            val payment = NotificationParser.parse(pkg, "交易提醒",
+                "消费成功，消费金额1,234.56元，商家：测试商户，交易单号：PAY202611060001", emptyList(), false) { null }!!
+            assertEquals(123456L, payment.amountCents)
+            assertEquals("EXPENSE", payment.direction)
+            val refund = NotificationParser.parse(pkg, "退款提醒",
+                "退款已到账，退款金额5元，原支付金额30元，交易单号：PAY202611060001，退款单号：RF202611060001",
+                emptyList(), false) { null }!!
+            assertEquals(500L, refund.amountCents)
+            assertEquals("INCOME", refund.direction)
+            assertEquals("refund", refund.businessKind)
+            assertEquals("RF202611060001", refund.orderId)
+            assertEquals("refund", refund.orderIdKind)
+            assertTrue(refund.fieldEvidence.containsKey("originalOrderId"))
+            listOf("退款受理，退款金额5元", "退款提醒，退款金额5元", "退款到账中，退款金额5元",
+                "支付成功，支付金额18元，交易状态：处理中", "支付成功，实付18元，支付未成功",
+                "支付成功,实付18元,交易状态:处理中", "支付成功;实付18元;付款状态:未成功",
+                "退款成功，退款金额5元，退款状态：受理").forEach { body ->
+                assertNull(body, NotificationParser.parse(pkg, "退款提醒", body, emptyList(), true) {
+                    fail("未完成状态不得交给云端"); null
+                })
+            }
+        }
+    }
+
+    @Test
+    fun `successful alipay collection and unionpay receipt notifications remain local`() = runTest {
+        val income = NotificationParser.parse("com.eg.android.AlipayGphone", "成功收款",
+            "你已成功收款28.50元", emptyList(), true) { fail("应本机识别"); null }!!
+        assertEquals(2850L, income.amountCents)
+        assertEquals("INCOME", income.direction)
+        val paid = NotificationParser.parse("com.unionpay", "云闪付", "支付成功，实付18元",
+            emptyList(), false) { null }!!
+        assertEquals("云闪付", paid.paymentMethod)
+        assertEquals("EXPENSE", paid.direction)
+        listOf("消费18元", "交易金额18元", "订单金额18元", "退款金额5元", "支付成功后可领18元").forEach { body ->
+            assertNull(body, NotificationParser.parse("com.unionpay", "云闪付", body, emptyList(), true) {
+                fail("新增应用不放宽完成门槛"); null
+            })
+        }
+    }
+
+    @Test
+    fun `transaction statement cannot hide another same amount transaction or a denied outcome`() = runTest {
+        val pkg = "com.eg.android.AlipayGphone"
+        val rules = listOf(ParseRuleEntity(appPackage = pkg, regexAmount = """(\d+)"""))
+        listOf("支付宝", "支付宝通知", "交易提醒").forEach { title ->
+            listOf(
+                "你有一笔18元的收入，另有一笔18元的支出",
+                "你有一笔18元的支出，另有一笔18元的支出",
+                "你有一笔18元的支出\n另有一笔18元的支出",
+                "你有一笔18元的支出\n你有一笔18元的支出",
+                "你有一笔18元的支出，尚未成功",
+                "你有一笔18元的支出，实际未扣款",
+                "你有一笔18元的支出\n尚未成功",
+                "你有一笔18元的支出\n实际未扣款",
+                "你有一笔18元的支出\n收款方：未扣款",
+                "你有一笔18元的支出\n收款方：另有一笔18元的支出",
+                "你有一笔18元的支出，付款18元",
+                "你有一笔18元的支出\n支付成功18元"
+            ).forEach { body ->
+                assertNull("$title $body", NotificationParser.parse(pkg, title, body, rules, true) {
+                    fail("不完整动账模板不得回退自定义或云端规则"); null
+                })
+                assertFalse(NotificationParser.isCloudCandidate(pkg, title, body))
+            }
+        }
+    }
+
+    @Test
+    fun `single transaction statement permits identified supplemental fields and disregards remarks`() = runTest {
+        val body = """
+            你有一笔1,234.56元的支出。
+            收款方
+            测试商户
+            付款方式：银行卡
+            商户订单号：SHOP202611060001
+            交易单号：WALLET202611060001
+            备注：未扣款只是测试用语
+        """.trimIndent()
+        val result = NotificationParser.parse("com.eg.android.AlipayGphone", "支付宝", body, emptyList(), false) { null }!!
+        assertEquals(123456L, result.amountCents)
+        assertEquals("测试商户", result.merchant)
+        assertEquals("银行卡", result.paymentMethod)
+        assertEquals("SHOP202611060001", result.orderId)
+        val income = NotificationParser.parse("com.eg.android.AlipayGphone", "支付宝", body.replace("支出。", "收入。"),
+            emptyList(), false) { null }!!
+        assertEquals("INCOME", income.direction)
+    }
+
+    @Test
+    fun `same amount multiple payment identities cannot collapse into one notification`() = runTest {
+        val pkg = "com.unionpay"
+        val rules = listOf(ParseRuleEntity(appPackage = pkg, regexAmount = """(\d+)"""))
+        listOf(
+            "支付成功，实付18元，交易单号：UP202611060001\n支付成功，实付18元，交易单号：UP202611060002",
+            "支付成功，实付18元，商户订单号：SHOP202611060001\n商家订单号：SHOP202611060002"
+        ).forEach { body ->
+            assertNull(body, NotificationParser.parse(pkg, "云闪付", body, rules, true) {
+                fail("多个同类身份不得猜选一笔"); null
+            })
+            assertFalse(NotificationParser.isCloudCandidate(pkg, "云闪付", body))
+        }
+        val identified = "支付成功，实付18元，商户订单号：SHOP202611060001，交易单号：UP202611060001，交易号：UP202611060001"
+        assertEquals("SHOP202611060001", NotificationParser.parse(pkg, "云闪付", identified, emptyList(), false) { null }?.orderId)
+    }
+
+    @Test
+    fun `inline free text cannot create transaction evidence or override completed facts`() = runTest {
+        val pkg = "com.eg.android.AlipayGphone"
+        listOf("备注", "商品说明", "留言", "付款说明").forEach { label ->
+            assertNull(NotificationParser.parse(pkg, "支付宝", "系统提示，$label：支付成功18元", emptyList(), true) {
+                fail("行内自由文字不能证明交易"); null
+            })
+            assertNull(NotificationParser.parse(pkg, "支付宝", "支付失败，支付金额18元，$label：支付成功", emptyList(), true) {
+                fail("备注不能覆盖失败状态"); null
+            })
+            val body = "支付成功，实付18元，$label：退款受理，收款成功28元，交易单号：FAKE202611060001"
+            val result = NotificationParser.parse(pkg, "支付宝", body, emptyList(), false) { null }!!
+            assertEquals(1800L, result.amountCents)
+            assertEquals("EXPENSE", result.direction)
+            assertNull(result.orderId)
+            assertFalse(result.fieldEvidence.containsKey("orderId"))
+        }
+        assertNull(NotificationParser.parse(pkg, "支付宝", "备注：\n支付成功18元", emptyList(), true) {
+            fail("空冒号标签的下一行仍是备注值"); null
+        })
+    }
 }

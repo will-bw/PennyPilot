@@ -5,8 +5,14 @@ import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
+import com.pennypilot.app.data.recognition.CaptureSemanticResolver
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.encodeToString
 
 data class CaptureEvidence(
     val packageName: String,
@@ -86,14 +92,15 @@ object CapturePersistence {
                     orderId = previous.orderId ?: incoming.orderId,
                     orderDomain = if (previous.orderId == null && incoming.orderId != null) incoming.orderDomain else previous.orderDomain,
                     merchantFingerprint = previous.merchantFingerprint ?: incoming.merchantFingerprint,
-                    metadataJson = mergeMetadata(previous.metadataJson, incoming.metadataJson)
+                    metadataJson = mergeMetadata(previous.metadataJson, incoming.metadataJson,
+                        replaceTransactionTime = isReceiptTimeUpgrade(metadata(previous.metadataJson), metadata(incoming.metadataJson)))
                 ))
                 val existing = dao.getById(previous.transactionId)
-                if (existing != null && existing.editVersion == 0L && existing.status != TxStatus.IGNORED && existing.duplicateOf == null) {
+                if (existing != null && canEnrich(existing)) {
                     val enriched = enrichTransaction(existing, transaction, enrichSemantics)
                     if (enriched != existing) {
                         dao.update(enriched)
-                        if (enrichSemantics && semanticFieldsChanged(existing, enriched))
+                        if (visibleFieldsChanged(existing, enriched))
                             return@withTransaction CaptureResult.Enriched(existing.id)
                     }
                 }
@@ -128,15 +135,13 @@ object CapturePersistence {
             dao.insertCaptureEvidence(incoming.copy(
                 transactionId = duplicate.transactionId, firstObservedAt = duplicate.firstObservedAt
             ))
-            if (enrichSemantics) {
-                val existing = dao.getById(duplicate.transactionId)
-                if (existing != null && existing.editVersion == 0L && existing.status != TxStatus.IGNORED && existing.duplicateOf == null) {
-                    val enriched = enrichTransaction(existing, transaction, true)
-                    if (enriched != existing) {
-                        dao.update(enriched)
-                        if (semanticFieldsChanged(existing, enriched))
-                            return@withTransaction CaptureResult.Enriched(existing.id)
-                    }
+            val existing = dao.getById(duplicate.transactionId)
+            if (existing != null && canEnrich(existing)) {
+                val enriched = enrichTransaction(existing, transaction, enrichSemantics)
+                if (enriched != existing) {
+                    dao.update(enriched)
+                    if (visibleFieldsChanged(existing, enriched))
+                        return@withTransaction CaptureResult.Enriched(existing.id)
                 }
             }
             return@withTransaction CaptureResult.Duplicate(duplicate.transactionId)
@@ -172,37 +177,122 @@ object CapturePersistence {
         CaptureResult.Inserted(id, duplicateOf)
     }
 
+    private fun canEnrich(transaction: TransactionEntity): Boolean =
+        transaction.source in setOf(TxSource.NOTIFICATION, TxSource.ACCESSIBILITY) &&
+            transaction.editVersion == 0L && transaction.status != TxStatus.IGNORED && transaction.duplicateOf == null
+
     private fun enrichTransaction(existing: TransactionEntity, incoming: TransactionEntity,
         enrichSemantics: Boolean): TransactionEntity {
-        fun modelApplied(raw: String?): Boolean = raw?.let {
-            runCatching { (kotlinx.serialization.json.Json.parseToJsonElement(it) as kotlinx.serialization.json.JsonObject)["semanticModelApplied"] == kotlinx.serialization.json.JsonPrimitive(true) }.getOrDefault(false)
-        } ?: false
+        val oldMetadata = metadata(existing.metadataJson)
+        val newMetadata = metadata(incoming.metadataJson)
         // Replayed local callbacks can add facts, but must not replace a completed
         // model classification with their original generic fallback category.
-        val replaceSemantics = enrichSemantics && (!modelApplied(existing.metadataJson) || modelApplied(incoming.metadataJson))
+        val incomingModel = newMetadata?.get("semanticModelApplied") == JsonPrimitive(true)
+        val modelHasCurrentContext = oldMetadata?.get("semanticEvidenceFingerprint") == null ||
+            newMetadata?.get("semanticEvidenceFingerprint") != null
+        val replaceSemantics = enrichSemantics && (oldMetadata?.get("semanticModelApplied") != JsonPrimitive(true) ||
+            incomingModel && modelHasCurrentContext)
+        // 只升级明确标记为采集时间的回退值；旧记录缺少来源时，不靠时间相等猜测。
+        val replaceTransactionTime = isReceiptTimeUpgrade(oldMetadata, newMetadata)
+        fun String?.nonBlank(): String? = this?.takeIf { it.isNotBlank() }
+        fun fillMissing(previous: String?, fresh: String?): String? = previous.nonBlank() ?: fresh.nonBlank() ?: previous
+        val oldDetails = oldMetadata?.get("receiptDetails") as? JsonObject
+        val newDetails = newMetadata?.get("receiptDetails") as? JsonObject
+        val details = mergeReceiptDetails(oldDetails, newDetails)
+        val oldFundingAccount = detailValue(oldDetails, "fundingAccount")
+        val freshFundingAccount = detailValue(newDetails, "fundingAccount")
+        val account = when {
+            oldFundingAccount != null -> fillMissing(existing.accountTag, oldFundingAccount)
+            freshFundingAccount != null && (existing.accountTag.isNullOrBlank() ||
+                existing.accountTag in setOf("微信", "微信支付", "支付宝", "支付宝支付", "云闪付", "银联云闪付")) -> freshFundingAccount
+            replaceSemantics && incomingModel -> incoming.accountTag.nonBlank() ?: existing.accountTag
+            else -> fillMissing(existing.accountTag, incoming.accountTag)
+        }
+        val oldReceiptNote = CaptureSemanticResolver.receiptNote(detailValue(oldDetails, "productDescription"), detailValue(oldDetails, "remark"))
+        val receiptNote = CaptureSemanticResolver.receiptNote(detailValue(details, "productDescription"), detailValue(details, "remark"))
+        val note = when {
+            replaceSemantics && incomingModel -> incoming.note.nonBlank() ?: existing.note
+            oldMetadata?.get("semanticModelApplied") == JsonPrimitive(true) -> fillMissing(existing.note, receiptNote ?: incoming.note)
+            existing.note.isNullOrBlank() || existing.note == oldReceiptNote || existing.note == "用途暂按资金转移记录" ->
+                receiptNote ?: incoming.note.nonBlank() ?: existing.note
+            else -> existing.note
+        }
         return existing.copy(
-            merchant = existing.merchant ?: incoming.merchant,
-            accountTag = if (replaceSemantics) incoming.accountTag ?: existing.accountTag else existing.accountTag ?: incoming.accountTag,
+            merchant = fillMissing(existing.merchant, incoming.merchant),
+            accountTag = account,
             categoryId = if (replaceSemantics) incoming.categoryId else existing.categoryId,
-            note = if (replaceSemantics) incoming.note ?: existing.note else existing.note,
-            metadataJson = mergeMetadata(existing.metadataJson, incoming.metadataJson, replaceSemantics),
+            note = note,
+            occurredAt = if (replaceTransactionTime) incoming.occurredAt else existing.occurredAt,
+            metadataJson = mergeMetadata(existing.metadataJson, incoming.metadataJson, replaceSemantics, replaceTransactionTime),
             businessKind = if (replaceSemantics || existing.businessKind == "unknown") incoming.businessKind else existing.businessKind,
             status = if (replaceSemantics && incoming.status == TxStatus.CONFIRMED) TxStatus.CONFIRMED else existing.status
         )
     }
 
-    private fun semanticFieldsChanged(previous: TransactionEntity, incoming: TransactionEntity): Boolean =
+    private fun visibleFieldsChanged(previous: TransactionEntity, incoming: TransactionEntity): Boolean =
         previous.categoryId != incoming.categoryId || previous.businessKind != incoming.businessKind ||
-            previous.accountTag != incoming.accountTag || previous.note != incoming.note || previous.status != incoming.status
+            previous.accountTag != incoming.accountTag || previous.note != incoming.note || previous.status != incoming.status ||
+            previous.merchant != incoming.merchant || previous.occurredAt != incoming.occurredAt
 
-    private fun mergeMetadata(previous: String?, incoming: String?, preferIncoming: Boolean = false): String? {
+    private fun metadata(raw: String?): JsonObject? = raw?.let {
+        runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull()
+    }
+
+    private fun isReceiptTimeUpgrade(previous: JsonObject?, incoming: JsonObject?): Boolean =
+        previous?.get("transactionTimeSource") == JsonPrimitive("observed") &&
+            incoming?.get("transactionTimeSource") == JsonPrimitive("receipt")
+
+    private fun mergeMetadata(previous: String?, incoming: String?, preferIncoming: Boolean = false,
+        replaceTransactionTime: Boolean = false): String? {
         if (incoming == null) return previous
-        if (previous == null) return incoming
         return runCatching {
-            val old = kotlinx.serialization.json.Json.parseToJsonElement(previous) as kotlinx.serialization.json.JsonObject
-            val fresh = kotlinx.serialization.json.Json.parseToJsonElement(incoming) as kotlinx.serialization.json.JsonObject
-            kotlinx.serialization.json.JsonObject(if (preferIncoming) old + fresh else fresh + old).toString()
+            val old = previous?.let { Json.parseToJsonElement(it) as JsonObject } ?: JsonObject(emptyMap())
+            val fresh = Json.parseToJsonElement(incoming) as JsonObject
+            val merged = (if (preferIncoming) old + fresh else fresh + old).toMutableMap()
+            val timeKeys = setOf("transactionTimeSource", "timePrecision", "observedAt", "receiptOccurredAt")
+            timeKeys.forEach { key ->
+                val value = if (replaceTransactionTime) fresh[key] else old[key]
+                if (value == null) merged.remove(key) else merged[key] = value
+            }
+            val oldFields = (old["fieldEvidence"] as? JsonObject).orEmpty().filterValues {
+                it != JsonNull && (it !is JsonPrimitive || !it.isString || it.content.isNotBlank())
+            }
+            val freshFields = (fresh["fieldEvidence"] as? JsonObject).orEmpty().filterValues {
+                it != JsonNull && (it !is JsonPrimitive || !it.isString || it.content.isNotBlank())
+            }
+            if (old.containsKey("fieldEvidence") || fresh.containsKey("fieldEvidence")) {
+                val fields = (freshFields + oldFields).toMutableMap()
+                val timeEvidence = if (replaceTransactionTime) freshFields["occurredAt"] else oldFields["occurredAt"]
+                if (timeEvidence == null) fields.remove("occurredAt") else fields["occurredAt"] = timeEvidence
+                merged["fieldEvidence"] = JsonObject(fields)
+            }
+            if (old.containsKey("receiptDetails") || fresh.containsKey("receiptDetails")) {
+                merged["receiptDetails"] = mergeReceiptDetails(old["receiptDetails"] as? JsonObject,
+                    fresh["receiptDetails"] as? JsonObject)
+            }
+            if (old.containsKey("receiptContext") || fresh.containsKey("receiptContext")) {
+                val context = CaptureReceiptContext.mergeContext(CaptureReceiptContext.readContext(old) + CaptureReceiptContext.readContext(fresh))
+                merged["receiptContext"] = Json.parseToJsonElement(Json.encodeToString(context))
+            }
+            JsonObject(merged).toString()
         }.getOrDefault(previous)
+    }
+
+    private fun detailValue(details: JsonObject?, field: String): String? =
+        (details?.get(field) as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf(String::isNotBlank)
+
+    private fun mergeReceiptDetails(previous: JsonObject?, incoming: JsonObject?): JsonObject {
+        val fields = listOf("merchantName", "payeeName", "productDescription", "remark", "paymentChannel", "fundingAccount")
+        val values = linkedMapOf<String, JsonPrimitive>()
+        val sources = linkedMapOf<String, JsonPrimitive>()
+        fields.forEach { field ->
+            val old = detailValue(previous, field)
+            val value = old ?: detailValue(incoming, field) ?: return@forEach
+            values[field] = JsonPrimitive(value)
+            val source = (if (old != null) previous else incoming)?.get("fieldSources") as? JsonObject
+            detailValue(source, field)?.let { sources[field] = JsonPrimitive(it) }
+        }
+        return JsonObject(values + ("fieldSources" to JsonObject(sources)))
     }
 
     internal fun isNotificationUpdate(previous: CaptureEvidenceEntity, incoming: CaptureEvidenceEntity): Boolean =
