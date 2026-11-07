@@ -16,11 +16,15 @@ class AgentActivity extends StatelessWidget {
     required this.controller,
     required this.parts,
     this.active = false,
+    this.status = 'complete',
+    this.onDetailsExpanded,
   });
 
   final LedgerController controller;
   final List<Map<String, dynamic>> parts;
   final bool active;
+  final String status;
+  final VoidCallback? onDetailsExpanded;
 
   @override
   Widget build(BuildContext context) {
@@ -37,111 +41,8 @@ class AgentActivity extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (reasoning.isNotEmpty)
-          AssistantReasoning(parts: reasoning, active: active),
-        if (active &&
-            controller.isAsking &&
-            !reasoning.any((part) => part['status'] == 'streaming'))
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Semantics(
-              liveRegion: true,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox.square(
-                    dimension: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: colors.primary,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      controller.agentProgress['text'] as String? ??
-                          '正在理解你的问题…',
-                      style: TextStyle(color: colors.onSurfaceVariant),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        if (plan.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final item in plan)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(
-                          switch (item['status']) {
-                            'completed' => Icons.check_circle_outline,
-                            'in_progress' => Icons.play_circle_outline,
-                            _ => Icons.radio_button_unchecked,
-                          },
-                          size: 18,
-                          color: colors.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(child: Text(item['title'] as String)),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        if (tools.isNotEmpty)
-          ExpansionTile(
-            tilePadding: EdgeInsets.zero,
-            childrenPadding: const EdgeInsets.only(bottom: 12),
-            title: Text(
-              '执行记录 · ${tools.length} 次工具调用',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            children: [
-              for (final tool in tools)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(
-                    switch (tool['status']) {
-                      'completed' || 'applied' => Icons.check_circle_outline,
-                      'running' || 'in_progress' => Icons.pending_outlined,
-                      'cancelled' || 'stopped' => Icons.stop_circle_outlined,
-                      _ => Icons.error_outline,
-                    },
-                    size: 20,
-                    color: tool['status'] == 'error'
-                        ? colors.error
-                        : colors.onSurfaceVariant,
-                  ),
-                  title: Text(
-                    LedgerAgentRuntime.toolLabel(
-                      tool['tool'] as String? ?? '',
-                    ).replaceFirst('正在', ''),
-                  ),
-                  subtitle: Text(
-                    [
-                      if (tool['step'] != null) '第 ${tool['step']} 步',
-                      if (tool['evidenceId'] != null)
-                        '依据 ${tool['evidenceId']}',
-                      if (tool['status'] == 'error') '执行失败',
-                      if (tool['status'] == 'cancelled' ||
-                          tool['status'] == 'stopped')
-                        '已停止',
-                    ].join(' · '),
-                  ),
-                  trailing: const Icon(Icons.chevron_right, size: 20),
-                  onTap: () => showAgentEvidence(context, controller, tool),
-                ),
-            ],
-          ),
+        if (active || reasoning.isNotEmpty || tools.isNotEmpty)
+          _process(context, reasoning: reasoning, tools: tools, plan: plan),
         for (final action in actions)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
@@ -183,6 +84,177 @@ class AgentActivity extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+
+  Widget _process(
+    BuildContext context, {
+    required List<Map<String, dynamic>> reasoning,
+    required List<Map<String, dynamic>> tools,
+    required List<dynamic> plan,
+  }) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final (outcome, outcomeIcon) = switch (status) {
+      'cancelled' => ('已停止', Icons.stop_circle_outlined),
+      'interrupted' => ('已中断', Icons.pause_circle_outline),
+      'failed' || 'error' => ('执行未完成', Icons.error_outline),
+      _ when reasoning.any((part) => part['status'] == 'cancelled') => (
+        '已停止',
+        Icons.stop_circle_outlined,
+      ),
+      _ => (null, Icons.check_circle_outline),
+    };
+    final duration = active ? null : assistantReasoningDuration(reasoning);
+    final label = active
+        ? _liveLabel(reasoning)
+        : outcome ??
+              [
+                if (reasoning.isNotEmpty)
+                  if (duration == null)
+                    '思考过程'
+                  else
+                    '${tools.isEmpty ? '已思考' : '思考'} $duration',
+                if (tools.isNotEmpty)
+                  '${tools.length} 次${reasoning.isEmpty ? '工具' : ''}调用',
+              ].join(' · ');
+    final title = Semantics(
+      liveRegion: active,
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.bodyMedium?.copyWith(
+          color: colors.onSurfaceVariant,
+        ),
+      ),
+    );
+    final leading = SizedBox.square(
+      dimension: 18,
+      child: active && !reduceMotion
+          ? Padding(
+              padding: const EdgeInsets.all(2),
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: colors.primary,
+              ),
+            )
+          : Icon(
+              active ? Icons.pending_outlined : outcomeIcon,
+              size: 18,
+              color: colors.onSurfaceVariant,
+            ),
+    );
+    final details = <Widget>[
+      if (reasoning.isNotEmpty)
+        AssistantReasoning(parts: reasoning, active: active),
+      if (plan.isNotEmpty) ...[
+        const SizedBox(height: 8),
+        Text('执行计划', style: theme.textTheme.labelMedium),
+        for (final item in plan)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  switch (item['status']) {
+                    'completed' => Icons.check_circle_outline,
+                    'in_progress' => Icons.play_circle_outline,
+                    _ => Icons.radio_button_unchecked,
+                  },
+                  size: 18,
+                  color: colors.onSurfaceVariant,
+                ),
+                const SizedBox(width: 8),
+                Expanded(child: Text(item['title'] as String)),
+              ],
+            ),
+          ),
+      ],
+      if (tools.isNotEmpty) ...[
+        if (reasoning.isNotEmpty || plan.isNotEmpty) const SizedBox(height: 8),
+        Text('执行记录', style: theme.textTheme.labelMedium),
+        for (final tool in tools) _toolRow(context, tool),
+      ],
+    ];
+    return ListTileTheme.merge(
+      minLeadingWidth: 18,
+      horizontalTitleGap: 8,
+      child: details.isEmpty
+          ? ListTile(
+              contentPadding: EdgeInsets.zero,
+              minTileHeight: 48,
+              leading: leading,
+              title: title,
+            )
+          : ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              minTileHeight: 48,
+              leading: leading,
+              title: title,
+              shape: const Border(),
+              collapsedShape: const Border(),
+              expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+              childrenPadding: const EdgeInsets.only(bottom: 12),
+              expansionAnimationStyle: reduceMotion
+                  ? AnimationStyle.noAnimation
+                  : const AnimationStyle(
+                      duration: Duration(milliseconds: 180),
+                      curve: Curves.easeOutCubic,
+                    ),
+              onExpansionChanged: (expanded) {
+                if (expanded) onDetailsExpanded?.call();
+              },
+              children: details,
+            ),
+    );
+  }
+
+  String _liveLabel(List<Map<String, dynamic>> reasoning) {
+    final progress = controller.agentProgress;
+    return switch (progress['phase']) {
+      'tool' => LedgerAgentRuntime.toolLabel(progress['tool'] as String? ?? ''),
+      'tool_result' => '正在整理执行结果…',
+      'text_delta' => '正在回复…',
+      'text_reset' => '正在核对账本依据…',
+      'text_complete' => '正在整理回复…',
+      _ when reasoning.any((part) => part['status'] == 'streaming') => '正在思考…',
+      'model' || 'text_start' => progress['text'] as String? ?? '正在理解你的问题…',
+      _ => '正在理解你的问题…',
+    };
+  }
+
+  Widget _toolRow(BuildContext context, Map<String, dynamic> tool) {
+    final colors = Theme.of(context).colorScheme;
+    final status = tool['status'];
+    final description = [
+      if (tool['step'] != null) '第 ${tool['step']} 步',
+      if (tool['evidenceId'] != null) '依据 ${tool['evidenceId']}',
+      if (status == 'error') '执行失败',
+      if (status == 'cancelled' || status == 'stopped') '已停止',
+    ].join(' · ');
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        switch (status) {
+          'completed' || 'applied' => Icons.check_circle_outline,
+          'running' || 'in_progress' => Icons.pending_outlined,
+          'cancelled' || 'stopped' => Icons.stop_circle_outlined,
+          _ => Icons.error_outline,
+        },
+        size: 18,
+        color: status == 'error' ? colors.error : colors.onSurfaceVariant,
+      ),
+      title: Text(
+        LedgerAgentRuntime.toolLabel(
+          tool['tool'] as String? ?? '',
+        ).replaceFirst('正在', ''),
+      ),
+      subtitle: description.isEmpty ? null : Text(description),
+      trailing: const Icon(Icons.chevron_right, size: 20),
+      onTap: () => showAgentEvidence(context, controller, tool),
     );
   }
 }

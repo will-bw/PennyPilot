@@ -129,8 +129,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     hadRecognition = c.canSupplementRecognition;
     if (followingLatest) {
       _scheduleScroll();
-    } else if (c.isAsking && !showLatest && mounted) {
-      setState(() => showLatest = true);
     }
   }
 
@@ -458,7 +456,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     children: [
       NotificationListener<ScrollMetricsNotification>(
         onNotification: (notification) {
-          if (notification.depth == 0 && followingLatest) _scheduleScroll();
+          if (notification.depth != 0) return false;
+          if (followingLatest) {
+            _scheduleScroll();
+          } else {
+            final hasContentBelow = notification.metrics.extentAfter > 1;
+            if (showLatest != hasContentBelow) {
+              setState(() => showLatest = hasContentBelow);
+            }
+          }
           return false;
         },
         child: NotificationListener<ScrollNotification>(
@@ -501,7 +507,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ),
         ),
       ),
-      if (c.messages.isNotEmpty && (showLatest || !followingLatest))
+      if (c.messages.isNotEmpty && showLatest)
         Positioned(
           bottom: 12,
           right: 16,
@@ -565,7 +571,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget _message(LedgerController c, ChatMessage message, int index) {
     final colors = Theme.of(context).colorScheme;
     final user = message.role == 'user';
-    final active = !user && index == c.messages.length - 1 && c.isAsking;
+    final active = message.isStreaming && c.isAsking;
     return Padding(
       key: ValueKey('message-${message.id}-$index'),
       padding: const EdgeInsets.only(bottom: 24),
@@ -589,7 +595,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               child: _AttachmentPreview(attachment: part),
             ),
           if (!user)
-            AgentActivity(controller: c, parts: message.parts, active: active),
+            AgentActivity(
+              controller: c,
+              parts: message.parts,
+              active: active,
+              status: message.status,
+              onDetailsExpanded: () {
+                // Keep the opened details in view as the conversation grows.
+                followingLatest = false;
+              },
+            ),
           if (message.isError)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
