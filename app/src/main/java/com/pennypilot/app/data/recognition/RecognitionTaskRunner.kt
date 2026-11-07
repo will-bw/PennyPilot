@@ -15,7 +15,8 @@ class RecognitionTaskRunner(
     private val commit: suspend (RecognitionTask, PaymentProposal, NotificationParseResult, () -> Boolean) -> Boolean,
     private val report: (String) -> Unit,
     private val onState: (RecognitionTask, String) -> Unit = { _, _ -> },
-    private val semanticContext: suspend (RecognitionTask) -> CaptureSemanticContext = { CaptureSemanticContext() }
+    private val semanticContext: suspend (RecognitionTask) -> CaptureSemanticContext = { CaptureSemanticContext() },
+    private val verifiedPayment: suspend (RecognitionTask) -> NotificationParseResult? = { null }
 ) {
     /** Superseded work finishes successfully so an appended successor can run without backoff. */
     suspend fun run(id: String): Boolean {
@@ -38,17 +39,25 @@ class RecognitionTaskRunner(
                 store.remove(id, task.evidenceVersion); report("识别权限、账本或 AI 配置已改变，旧任务已停止"); return true
             }
             val semantics = semanticContext(task).bounded()
+            val verified = if (task.semanticFingerprint != null || task.receiptImageMode != null) verifiedPayment(task) else null
             val operation = client.forRole(role)
             // Pin the original endpoint/account before the final pre-send authorization check.
             val allowedBeforeSend = current()
             if (superseded(task)) return true
-            if (!allowedBeforeSend) {
+            val requiresSavedReceipt = task.semanticFingerprint != null || task.receiptImageMode == ReceiptImageMode.VERIFIED_RECEIPT
+            if (!allowedBeforeSend || requiresSavedReceipt && verified == null) {
                 onState(task, "model_discarded")
                 store.remove(id, task.evidenceVersion); report("AI 配置已改变，旧任务已停止"); return true
             }
             onState(task, "model_processing")
             val (proposal, parsed) = withTimeout(60_000) {
-                PaymentRecognitionEngine(operation).propose(task.packageName, task.text, task.images, task.structure, semantics)
+                val engine = PaymentRecognitionEngine(operation)
+                when {
+                    task.receiptImageMode != null ->
+                        engine.readReceiptImage(task.packageName, task.images.single(), task.observedAt, verified, semantics)
+                    verified == null -> engine.propose(task.packageName, task.text, task.images, task.structure, semantics)
+                    else -> engine.classifyVerified(verified, task.images, semantics) to verified
+                }
             }
             val allowedAfterResponse = current()
             if (superseded(task)) return true

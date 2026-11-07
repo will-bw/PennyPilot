@@ -24,7 +24,7 @@ internal object CaptureReceiptContext {
             PaymentReceiptContext(label, value, string(item, "source").orEmpty())
         }.let(PaymentReceiptDetails::normalizeContext)
 
-    fun fromEvidence(evidence: List<CaptureEvidenceEntity>): CaptureSemanticReceipt {
+    fun fromEvidence(evidence: List<CaptureEvidenceEntity>, includeLocalCheckout: Boolean = true): CaptureSemanticReceipt {
         val details = linkedMapOf<String, String>()
         val context = mutableListOf<PaymentReceiptContext>()
         var occurredAt: String? = null
@@ -33,7 +33,7 @@ internal object CaptureReceiptContext {
             val metadata = row.metadataJson?.let { Json.parseToJsonElement(it) as? JsonObject } ?: return@forEach
             val receiptDetails = metadata["receiptDetails"] as? JsonObject
             detailFields.forEach { field -> string(receiptDetails, field)?.let { details.putIfAbsent(field, it) } }
-            context += readContext(metadata)
+            context += readContext(metadata).filter { includeLocalCheckout || it.source != CheckoutContext.LOCAL_SOURCE }
             occurredAt = occurredAt ?: string(metadata, "receiptOccurredAt")
             scene = scene ?: string(metadata, "scene")
         }

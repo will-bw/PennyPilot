@@ -153,6 +153,7 @@ class LedgerController extends ChangeNotifier {
   Map<String, dynamic>? _assistantAttachment;
   Map<String, dynamic>? get assistantAttachment => _assistantAttachment;
   String? _recognitionRunId;
+  bool _localReceiptRun = false;
   String _recognitionText = '';
   Map<String, dynamic>? _recognitionImage;
   List<Map<String, dynamic>> _recognitionAttachments = [];
@@ -164,6 +165,7 @@ class LedgerController extends ChangeNotifier {
                 t.recognitionMetadata['requestSessionId'] == _recognitionRunId,
           ) ||
           recognitionQuestions.isNotEmpty);
+  bool get canSupplementRecognition => pendingRecognition && !_localReceiptRun;
   String? _retryQuestion;
   String? get retryQuestion => _retryQuestion;
   String _speechText = '';
@@ -469,6 +471,7 @@ class LedgerController extends ChangeNotifier {
     _assistantDraft = '';
     _assistantAttachment = null;
     _recognitionRunId = null;
+    _localReceiptRun = false;
     _recognitionText = '';
     _recognitionImage = null;
     _recognitionAttachments = [];
@@ -805,12 +808,19 @@ class LedgerController extends ChangeNotifier {
     }
   }
 
+  void _requireReceiptDate(LedgerTransaction transaction) {
+    if (transaction.recognitionMetadata['receiptDateUnconfirmed'] == true) {
+      throw const LedgerException('请先打开本地凭证草稿，选择实际交易日期。');
+    }
+  }
+
   Future<int> saveTransaction(
     LedgerTransaction transaction, {
     int? expectedRevision,
     bool confirmPending = false,
   }) async {
     _validateTransaction(transaction);
+    _requireReceiptDate(transaction);
     final previous = transactions
         .where((item) => item.id == transaction.id)
         .firstOrNull;
@@ -1050,6 +1060,78 @@ class LedgerController extends ChangeNotifier {
     _notify();
   }
 
+  Future<void> addLocalReceiptDraft(
+    Map<String, dynamic> receipt, {
+    int? expectedRevision,
+  }) async {
+    _requireLoaded();
+    if (isBusy) throw const LedgerException('请等待当前操作完成。');
+    await _operation('localReceiptDraft', () async {
+      if (expectedRevision != null && expectedRevision != revision) {
+        throw const LedgerException('账本已恢复，请重新选择截图。', code: 'STALE_LEDGER');
+      }
+      final generation = _generation;
+      await loadAgentState();
+      _requireCurrent(generation);
+      if (_error != null) throw LedgerException(_error!);
+      if (pendingRecognition && !_localReceiptRun) {
+        throw const LedgerException('请先处理当前待核对账单，再打开新的本地凭证。');
+      }
+      final type = TxType.fromWire(receipt['type']);
+      final available = categoriesFor(type);
+      if (available.isEmpty) throw const LedgerException('请先设置可用的收支分类。');
+      final category = available.firstWhere(
+        (item) => item.name == '其他' || item.name == '其他收入',
+        orElse: () => available.first,
+      );
+      final occurredAt = receipt['occurredAt'] as int?;
+      final metadata = stringMap(receipt['metadata']);
+      final operationId = metadata['operationId'];
+      if (operationId is! String || operationId.isEmpty) {
+        throw const LedgerException('无法确认凭证身份，请重新选择截图。');
+      }
+      if ([
+        ..._drafts,
+        ...transactions,
+      ].any((item) => item.recognitionMetadata['operationId'] == operationId)) {
+        throw const LedgerException('这张图片已经生成草稿或保存到账本。');
+      }
+      final runId = pendingRecognition && _localReceiptRun
+          ? _recognitionRunId!
+          : agentId();
+      final today = _clock();
+      final draft = LedgerTransaction(
+        amountFen: integer(receipt['amount'], '金额'),
+        type: type,
+        categoryId: category.id,
+        occurredAt: occurredAt == null
+            ? DateTime(today.year, today.month, today.day)
+            : DateTime.fromMillisecondsSinceEpoch(occurredAt),
+        merchant: receipt['merchant'] as String?,
+        note: receipt['note'] as String?,
+        accountTag: receipt['accountTag'] as String?,
+        businessKind: receipt['businessKind'] as String?,
+        source: TxSource.aiImage,
+        status: TxStatus.pending,
+        metadataJson: jsonEncode({
+          ...metadata,
+          'requestSessionId': runId,
+          'timePrecision': occurredAt == null ? 'date' : 'exact',
+          if (occurredAt == null) 'receiptDateUnconfirmed': true,
+        }),
+      );
+      _validateTransaction(draft);
+      _recognitionRunId = runId;
+      _localReceiptRun = true;
+      _recognitionText = '';
+      _recognitionImage = null;
+      _recognitionAttachments = [];
+      _drafts = [..._drafts, draft];
+      recognitionNotice = '已在本机读取凭证，核对后保存。';
+      await _persistAssistantRecognition();
+    });
+  }
+
   void updateDraft(int index, LedgerTransaction value) {
     if (busyFor('saveTransactions')) return;
     _validateTransaction(value);
@@ -1135,6 +1217,7 @@ class LedgerController extends ChangeNotifier {
     if (isParsing) throw const LedgerException('请等待解析完成后再保存。');
     for (final transaction in saving) {
       _validateTransaction(transaction);
+      _requireReceiptDate(transaction);
       if (transaction.effectiveKind == 'unknown' &&
           transaction.source != TxSource.billImport) {
         throw const LedgerException('请先打开待分类草稿，选择账务用途后再保存。');
@@ -1347,11 +1430,14 @@ class LedgerController extends ChangeNotifier {
         .toList();
     if (restored.isEmpty && questions.isEmpty) return;
     _recognitionRunId = saved['runId'] as String;
+    _localReceiptRun = saved['localOnly'] == true;
     _recognitionText = saved['text'] as String? ?? '';
-    _recognitionAttachments = (saved['attachments'] as List? ?? [])
-        .whereType<Map>()
-        .map(stringMap)
-        .toList();
+    _recognitionAttachments = _localReceiptRun
+        ? []
+        : (saved['attachments'] as List? ?? [])
+              .whereType<Map>()
+              .map(stringMap)
+              .toList();
     _drafts = [
       ..._drafts.where(
         (t) => t.recognitionMetadata['requestSessionId'] == null,
@@ -1463,6 +1549,12 @@ class LedgerController extends ChangeNotifier {
     String source = 'AI_TEXT',
   }) async {
     final image = attachment ?? _assistantAttachment;
+    if (isSupplement && _localReceiptRun) {
+      throw const LedgerException('本地凭证请在待核对草稿中修改。');
+    }
+    if (image != null && settings['cloudImageParsingEnabled'] != true) {
+      throw const LedgerException('请先开启云端图片识别，或选择本地核对凭证。');
+    }
     if (_assistantDraft.trim() == text.trim()) setAssistantDraft('');
     if (identical(image, _assistantAttachment)) _assistantAttachment = null;
     if (image == null && !(isSupplement && pendingRecognition)) {
@@ -1477,6 +1569,7 @@ class LedgerController extends ChangeNotifier {
           throw const LedgerException('请先处理这次待核对账单，再识别新的凭证。');
         }
         _recognitionRunId = agentId();
+        _localReceiptRun = false;
         _recognitionText = text.trim();
         _recognitionAttachments = [];
         _recognitionImage = null;
@@ -1550,8 +1643,14 @@ class LedgerController extends ChangeNotifier {
     final args = {
       'revision': revision,
       'runId': runId,
-      'question': _recognitionText.isEmpty ? '识别这张凭证中的收支' : _recognitionText,
-      'source': _recognitionAttachments.isEmpty ? 'AI_TEXT' : 'AI_IMAGE',
+      'question': _localReceiptRun
+          ? '在本机核对截图凭证'
+          : _recognitionText.isEmpty
+          ? '识别这张凭证中的收支'
+          : _recognitionText,
+      'source': _localReceiptRun || _recognitionAttachments.isNotEmpty
+          ? 'AI_IMAGE'
+          : 'AI_TEXT',
       'answer': answer,
       'status': pending ? 'awaiting_input' : 'completed',
       if (_recognitionAttachments.isNotEmpty)
@@ -1561,9 +1660,17 @@ class LedgerController extends ChangeNotifier {
         {
           'type': 'recognition_state',
           'runId': runId,
+          if (_localReceiptRun) 'localOnly': true,
           'text': _recognitionText,
           'attachments': _recognitionAttachments,
-          'drafts': ownedDrafts.map((t) => t.toMap()).toList(),
+          'drafts': ownedDrafts
+              .map(
+                (t) => {
+                  ...t.toMap(),
+                  if (_localReceiptRun) 'status': t.status.wireValue,
+                },
+              )
+              .toList(),
           'questions': List<String>.of(recognitionQuestions),
           'undoneOperations': _undoneRecognitionOperations.toList(),
         },
@@ -1636,6 +1743,7 @@ class LedgerController extends ChangeNotifier {
         method == 'agentSelectSession' ||
         method == 'agentDeleteSession') {
       _recognitionRunId = null;
+      _localReceiptRun = false;
       _recognitionText = '';
       _recognitionImage = null;
       _recognitionAttachments = [];
@@ -1707,6 +1815,7 @@ class LedgerController extends ChangeNotifier {
     _requireCurrent(generation);
     if (!pendingRecognition) {
       _recognitionRunId = null;
+      _localReceiptRun = false;
       _recognitionText = '';
       _recognitionImage = null;
       _recognitionAttachments = [];

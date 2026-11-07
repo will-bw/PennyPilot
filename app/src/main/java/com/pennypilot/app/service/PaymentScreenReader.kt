@@ -11,6 +11,7 @@ object PaymentScreenReader {
     private const val MAX_READABLE_NODES = 1_000
     private const val MAX_DEPTH = 60
     private const val MAX_CHARS = 12_000
+    private const val MAX_OPAQUE_TREE_NODES = 8
 
     data class Snapshot(
         val text: String?,
@@ -18,7 +19,14 @@ object PaymentScreenReader {
         val status: String,
         val diagnostics: Map<String, Int>,
         val structure: PaymentScreenStructure? = null
-    )
+    ) {
+        /** A small, fully traversed tree can be opaque even when its wrapper nodes are visible. */
+        internal val isBoundedOpaqueTree: Boolean
+            get() = status == "empty_page" && text == null && !hasInput &&
+                diagnostics["visitedNodes"]?.let { it in 1..MAX_OPAQUE_TREE_NODES } == true &&
+                listOf("textNodes", "hiddenTextNodes", "editableNodes", "passwordNodes", "hiddenInputNodes", "missingChildren",
+                    "foreignNodes", "unknownOwnerNodes").all { diagnostics[it] == 0 }
+    }
 
     fun read(root: AccessibilityNodeInfo, packageName: String): String? = inspect(root, packageName).text
 
@@ -27,11 +35,14 @@ object PaymentScreenReader {
         var visited = 0
         var readable = 0
         var textNodes = 0
+        var hiddenTextNodes = 0
         var editableNodes = 0
         var passwordNodes = 0
+        var hiddenInputNodes = 0
         var missingChildren = 0
         var hiddenNodes = 0
         var foreignNodes = 0
+        var unknownOwnerNodes = 0
         var length = 0
         var refusalStatus: String? = null
         val lines = mutableListOf<String>()
@@ -48,11 +59,20 @@ object PaymentScreenReader {
                 foreignNodes++
                 return
             }
+            if (owner == null) unknownOwnerNodes++
             val nodeId = visited
-            if (!node.isVisibleToUser) {
+            val editable = node.isEditable
+            val inputClass = node.className?.toString() == "android.widget.EditText"
+            val visible = node.isVisibleToUser
+            if (!visible) {
                 hiddenNodes++
                 // 隐藏的输入/密码子树整体跳过，不能从其子节点泄漏内容。
-                if (node.isPassword || node.isEditable) return
+                if (node.isPassword || editable || inputClass) {
+                    hiddenInputNodes++
+                    return
+                }
+                // A hidden label is not a receipt field and does not belong to an opaque tree.
+                if (!node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) hiddenTextNodes++
                 // 普通隐藏容器仍可能包含可见结果页，继续有界遍历其后代。
             } else {
                 if (++readable > MAX_READABLE_NODES) {
@@ -60,9 +80,9 @@ object PaymentScreenReader {
                     return
                 }
                 if (node.isPassword) passwordNodes++
-                if (node.isEditable) editableNodes++
+                if (editable || inputClass) editableNodes++
                 // 同包可见输入框即使为空或未聚焦也整页拒绝，防止把聊天伪凭证入账。
-                if (node.isPassword || node.isEditable) return
+                if (node.isPassword || editable || inputClass) return
                 // 部分支付页把状态放 text、金额放 contentDescription；两者都需要读取。
                 val nodeTexts = listOfNotNull(node.text?.toString(), node.contentDescription?.toString())
                     .map(String::trim).filter(String::isNotEmpty).distinct()
@@ -80,12 +100,12 @@ object PaymentScreenReader {
             // Preserve hierarchy even for hidden containers; their own text is never retained.
             val bounds = Rect().also(node::getBoundsInScreen)
             facts.add(PaymentScreenNode(nodeId, parentId,
-                text = node.text?.toString()?.trim()?.takeIf { node.isVisibleToUser && it.isNotEmpty() },
-                description = node.contentDescription?.toString()?.trim()?.takeIf { node.isVisibleToUser && it.isNotEmpty() },
+                text = if (visible) node.text?.toString()?.trim()?.takeIf(String::isNotEmpty) else null,
+                description = if (visible) node.contentDescription?.toString()?.trim()?.takeIf(String::isNotEmpty) else null,
                 className = node.className?.toString()?.take(200),
                 resourceId = node.viewIdResourceName?.take(200),
                 bounds = listOf(bounds.left, bounds.top, bounds.right, bounds.bottom),
-                visible = node.isVisibleToUser))
+                visible = visible))
             for (i in 0 until node.childCount) {
                 // 无障碍树切换时可能瞬时返回 null；只重取一次，仍缺失则拒绝整页。
                 val child = node.getChild(i) ?: node.getChild(i)
@@ -116,11 +136,14 @@ object PaymentScreenReader {
             diagnostics = mapOf(
                 "visitedNodes" to visited,
                 "textNodes" to textNodes,
+                "hiddenTextNodes" to hiddenTextNodes,
                 "editableNodes" to editableNodes,
                 "passwordNodes" to passwordNodes,
+                "hiddenInputNodes" to hiddenInputNodes,
                 "missingChildren" to missingChildren,
                 "hiddenNodes" to hiddenNodes,
-                "foreignNodes" to foreignNodes
+                "foreignNodes" to foreignNodes,
+                "unknownOwnerNodes" to unknownOwnerNodes
             ),
             // Refused pages must expose neither partial text nor partial structured facts.
             structure = if (status == "ready") PaymentScreenStructure(facts) else null

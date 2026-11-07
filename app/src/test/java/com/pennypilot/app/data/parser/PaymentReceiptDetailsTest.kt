@@ -70,4 +70,32 @@ class PaymentReceiptDetailsTest {
         assertTrue(conflict.ambiguousParty)
         assertNull(conflict.details.merchantName)
     }
+
+    @Test fun `receipt rows bind wrapped values and labels ending in a colon`() {
+        val structure = PaymentScreenStructure(listOf(
+            PaymentScreenNode(1, null), PaymentScreenNode(2, 1), PaymentScreenNode(3, 1),
+            PaymentScreenNode(4, 2), PaymentScreenNode(5, 2, description = "商户名称："),
+            PaymentScreenNode(6, 4, text = "示例餐厅"),
+            PaymentScreenNode(7, 3, text = "午餐套餐"), PaymentScreenNode(8, 3),
+            PaymentScreenNode(9, 8, description = "商品说明:")
+        ))
+        val result = PaymentReceiptDetailsReader.read("com.tencent.mm", "示例餐厅\n商户名称：\n午餐套餐\n商品说明:",
+            structure, "页面").details
+        assertEquals("示例餐厅", result.merchantName)
+        assertEquals("午餐套餐", result.productDescription)
+        assertEquals("页面·同一字段行", result.fieldSources["merchantName"])
+        assertEquals("页面·同一字段行", result.fieldSources["productDescription"])
+    }
+
+    @Test fun `a row with two different field roles does not assign its value to both`() {
+        val structure = PaymentScreenStructure(listOf(
+            PaymentScreenNode(1, null), PaymentScreenNode(2, 1),
+            PaymentScreenNode(3, 2, text = "收款方："), PaymentScreenNode(4, 2, text = "示例商户"),
+            PaymentScreenNode(5, 2, text = "商品说明：")
+        ))
+        val result = PaymentReceiptDetailsReader.read("com.tencent.mm", "收款方：\n示例商户\n商品说明：", structure, "页面")
+        assertTrue(result.ambiguousParty)
+        assertNull(result.details.payeeName)
+        assertNull(result.details.productDescription)
+    }
 }

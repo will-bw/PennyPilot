@@ -27,8 +27,8 @@ String screenCaptureStatusLabel(String? status) => switch (status) {
   'model_rejected' => '模型未获得完整交易依据',
   'model_failed' => '模型暂时不可用，等待重试',
   'visual_unavailable' => '当前页面无法截图识别',
-  'visual_read' => '正在本地识别支付截图',
-  'visual_required' => '此页面需要本地截图补充',
+  'visual_read' => '正在本机核验支付截图',
+  'visual_required' => '此页面需要截图识别',
   'visual_not_receipt' => '截图未取得完整交易依据',
   'visual_requires_flow' => '尚未取得本次红包完成凭证',
   'visual_waiting' => '等待支付画面稳定后重读',
@@ -59,11 +59,11 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'model_rejected' => '没有取得可核对的金额、方向和成功状态，未自动入账。可分享截图或导入账单补录。',
   'model_failed' => '请检查 AI 服务配置与网络，待处理任务会按策略重试。',
   'visual_unavailable' => '截图能力未启用、页面受保护或截图失败，可通过主动图片记账或账单导入补录。',
-  'visual_required' => '微信仅提供了空节点。请在“识别与录入”中开启“本地支付截图补充”，再打开这张成功页；图片只在本机处理。',
+  'visual_required' => '微信未提供可读取的文字。可以在“识别与自动录入”开启云端支付截图识别或本地支付截图补充，再打开这张成功页。',
   'visual_not_receipt' => '当前场景缺少明确完成状态、本人资金方向或有效金额，未生成账目。可查看对应支付结果、主动补录或导入账单。',
   'visual_requires_flow' =>
     '仅打开没有交易时间的红包详情不能证明刚发生收发。发红包需核验付款完成，领红包需观察到打开红包并已存入零钱；较早的红包可通过账单导入补录。',
-  'visual_read' => '仅在本机读取当前微信窗口，校验成功状态、金额和结果页布局；图片不会上传。',
+  'visual_read' => '正在核验当前微信窗口的完成状态、金额和布局。开启云端支付截图识别后，符合条件的凭证截图会交给所选图片模型。',
   'visual_waiting' => '为避免连续截图，当前正在等待下一次有界读取；已保存的账目可在待确认列表核对。',
   'saved' => '请回到流水核对；即使关闭记账提醒，也可在待确认列表中查看。',
   'duplicate' => '同一页面不会反复生成账单，请查看已有待确认记录。',
@@ -83,6 +83,8 @@ String? screenReadDiagnosticsSummary(Object? diagnostics) {
   final details = <String>[
     if (visited != null) '检查 $visited 个节点',
     if (text != null) '可读文字 $text 处',
+    if (count('visualScreenshotErrorCode') == 6) '系统保护此窗口，无法截图',
+    if (count('visualOcrTimeout') == 1) '本次截图识别超时',
   ];
   for (final field in [
     ('editableNodes', '输入框', '处'),
@@ -239,7 +241,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
           widget.controller.capabilities['accessibilityGranted'] != true) {
         await widget.controller.openSystemSettings('accessibility');
       }
-    }, value ? '支付页面读取已开启，请核对系统授权' : '支付页面读取已暂停');
+    }, value ? '页面采集开关已开启，请查看授权与连接状态' : '支付页面读取已暂停');
   }
 
   Future<void> _setCloud(bool value) async {
@@ -351,6 +353,8 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
           capabilities['notificationServiceConnected'] == true;
       final accessibilityConnected =
           capabilities['accessibilityServiceConnected'] == true;
+      final accessibilityDisconnected =
+          screen && accessibilityGranted && !accessibilityConnected;
       final screenReadSummary = screenReadDiagnosticsSummary(
         capabilities['screenReadDiagnostics'],
       );
@@ -394,7 +398,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                         : !accessibilityGranted
                         ? '应用内已开启，请在系统中允许 PennyPilot 无障碍服务。'
                         : !accessibilityConnected
-                        ? '系统授权仍保留。清理后台后可能尚未恢复，点此刷新；持续未连接时检查自启动与后台限制。'
+                        ? '系统授权仍保留。点此刷新连接状态；持续未连接时可重新启用无障碍服务。'
                         : '完成支付后，在结果页稍作停留，再回到流水查看待确认账单。',
                     icon:
                         screen && accessibilityGranted && accessibilityConnected
@@ -414,7 +418,19 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                         ? () => _run(widget.controller.refresh)
                         : null,
                   ),
-                  if (screen && !accessibilityConnected)
+                  if (accessibilityDisconnected) ...[
+                    SettingsRow(
+                      title: '重新启用无障碍服务',
+                      subtitle: '打开系统无障碍设置，关闭再开启 PennyPilot 的服务。',
+                      icon: Icons.accessibility_new,
+                      onTap: _busy
+                          ? null
+                          : () => _run(
+                              () => widget.controller.openSystemSettings(
+                                'accessibility',
+                              ),
+                            ),
+                    ),
                     SettingsRow(
                       title: '检查自启动与后台限制',
                       subtitle: '允许自启动、放开省电限制，并锁定后台任务。详细方法见下方“提醒与后台”。',
@@ -425,6 +441,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                               () => widget.controller.openSystemSettings('app'),
                             ),
                     ),
+                  ],
                   const SettingsNotice(
                     '仅识别可读取的支付结果，不会点击或执行转账。聊天中的转账卡片、历史账单和未完成付款不会自动入账；无法读取的页面请手动或语音补记。',
                   ),
@@ -450,7 +467,7 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                             () => widget.controller.updateSettings({
                               'notificationCaptureEnabled': value,
                             }),
-                            value ? '通知读取已开启' : '通知读取已暂停',
+                            value ? '通知采集开关已开启，请查看授权与连接状态' : '通知读取已暂停',
                           ),
                   ),
                   _permission(
@@ -525,6 +542,8 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
               SettingsSection(
                 title: '提醒与后台',
                 children: [
+                  if (capabilities['backgroundRestricted'] == true)
+                    const SettingsNotice(captureBackgroundRestriction),
                   _permission(
                     title: '支付提醒',
                     granted: reminders,

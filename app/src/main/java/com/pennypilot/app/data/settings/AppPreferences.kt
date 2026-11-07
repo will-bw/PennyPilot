@@ -13,6 +13,8 @@ import javax.inject.Singleton
 
 private val Context.dataStore by preferencesDataStore(name = "pennypilot_prefs")
 
+internal data class NotificationCapturePolicy(val enabled: Boolean, val recoverAfter: Long)
+
 /**
  * 轻量偏好存储（设计文档 §3.8）：
  * - last_backup_at：最近备份时间，设置页显示"X月X日"
@@ -29,14 +31,18 @@ class AppPreferences @Inject constructor(
     private val notificationPermissionRequestedKey = booleanPreferencesKey("notification_permission_requested")
     private val onboardingDoneKey = booleanPreferencesKey("onboarding_done")
     private val notificationCaptureKey = booleanPreferencesKey("notification_capture_enabled")
+    private val notificationRecoveryAfterKey = longPreferencesKey("notification_capture_recover_after")
     private val screenCaptureKey = booleanPreferencesKey("screen_capture_enabled")
 
     private val screenCloudParsingKey = booleanPreferencesKey("screen_cloud_parsing_enabled")
     private val captureAutoRecordKey = booleanPreferencesKey("capture_auto_record_enabled")
     private val activeInputAutoSaveKey = booleanPreferencesKey("active_input_auto_save_enabled")
     private val screenVisualCaptureKey = booleanPreferencesKey("screen_visual_capture_enabled")
+    private val screenCloudVisionKey = booleanPreferencesKey("screen_cloud_vision_enabled")
     val screenVisualCaptureEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenVisualCaptureKey] ?: false }
     suspend fun setScreenVisualCaptureEnabled(enabled: Boolean) { context.dataStore.edit { it[screenVisualCaptureKey] = enabled } }
+    val screenCloudVisionEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenCloudVisionKey] ?: false }
+    suspend fun setScreenCloudVisionEnabled(enabled: Boolean) { context.dataStore.edit { it[screenCloudVisionKey] = enabled } }
     private val cloudImageParsingKey = booleanPreferencesKey("cloud_image_parsing_enabled")
     val screenCloudParsingEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenCloudParsingKey] ?: false }
     val captureAutoRecordEnabled: Flow<Boolean> = context.dataStore.data.map { it[captureAutoRecordKey] ?: true }
@@ -47,14 +53,23 @@ class AppPreferences @Inject constructor(
     suspend fun setActiveInputAutoSaveEnabled(enabled: Boolean) { context.dataStore.edit { it[activeInputAutoSaveKey] = enabled } }
     suspend fun setCloudImageParsingEnabled(enabled: Boolean) { context.dataStore.edit { it[cloudImageParsingKey] = enabled } }
 
-    val notificationCaptureEnabled: Flow<Boolean> = context.dataStore.data
-        .map { it[notificationCaptureKey] ?: true }
+    internal val notificationCapturePolicy: Flow<NotificationCapturePolicy> = context.dataStore.data.map {
+        NotificationCapturePolicy(it[notificationCaptureKey] ?: true, it[notificationRecoveryAfterKey] ?: 0L)
+    }
+    val notificationCaptureEnabled: Flow<Boolean> = notificationCapturePolicy.map { it.enabled }
     // 页面读取需单独同意；系统授权本身不能替代应用内开关。
     val screenCaptureEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[screenCaptureKey] ?: false }
 
     suspend fun setNotificationCaptureEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[notificationCaptureKey] = enabled }
+        context.dataStore.edit {
+            // Reconnect must not backfill notifications from before consent was restored,
+            // even if the service was not running when the setting changed.
+            if (enabled && it[notificationCaptureKey] == false) {
+                it[notificationRecoveryAfterKey] = System.currentTimeMillis()
+            }
+            it[notificationCaptureKey] = enabled
+        }
     }
 
     suspend fun setScreenCaptureEnabled(enabled: Boolean) {

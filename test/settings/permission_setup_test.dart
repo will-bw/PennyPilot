@@ -202,6 +202,8 @@ void main() {
       expect(find.text('已授权 · 采集已暂停'), findsOneWidget);
       await _tap(tester, '重新连接通知服务');
       expect(repository.calls.single.method, 'rebindNotificationService');
+      expect(find.textContaining('已请求重新连接'), findsOneWidget);
+      expect(find.text('已授权 · 服务未连接'), findsOneWidget);
       await _tap(tester, '开启页面采集');
       await _tap(tester, '同意并开启');
       expect(repository.calls.last.method, 'updateSettings');
@@ -210,6 +212,21 @@ void main() {
         repository.calls.where((call) => call.method == 'openSystemSettings'),
         isEmpty,
       );
+    },
+  );
+
+  testWidgets(
+    'system background restriction takes precedence over battery exemption',
+    (tester) async {
+      final repository = _Repository()
+        ..capabilities({'batteryExempt': true, 'backgroundRestricted': true});
+      final controller = await _controller(repository);
+      await _show(tester, controller);
+      await _reveal(tester, find.text('后台运行受限'));
+      expect(find.text('后台运行受限'), findsOneWidget);
+      expect(find.text('电池优化已豁免'), findsNothing);
+      await _tap(tester, '查看自启动与后台设置');
+      expect(repository.calls.single.arguments, {'target': 'app'});
     },
   );
 
@@ -361,12 +378,12 @@ void main() {
         size: scenario.size,
         scale: scenario.scale,
         brightness: scenario.brightness,
-          firstRun: true,
+        firstRun: true,
       );
-        expect(find.text('按需要开启，记账更省心'), findsOneWidget);
+      expect(find.text('按需要开启，记账更省心'), findsOneWidget);
       await _reveal(tester, find.text('允许使用麦克风'));
       expect(find.text('允许使用麦克风').hitTestable(), findsOneWidget);
-        expect(find.text('开始记账').hitTestable(), findsOneWidget);
+      expect(find.text('开始记账').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   }

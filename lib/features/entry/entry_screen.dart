@@ -35,6 +35,10 @@ class _EntryScreenState extends State<EntryScreen> {
   late String businessKind = widget.transaction?.effectiveKind ?? 'expense';
   bool splitEnabled = false;
   bool saving = false;
+  bool receiptDateSelected = false;
+
+  bool get needsReceiptDate =>
+      widget.transaction?.recognitionMetadata['receiptDateUnconfirmed'] == true;
 
   bool get canSplit => type == TxType.expense && businessKind == 'expense';
 
@@ -76,6 +80,12 @@ class _EntryScreenState extends State<EntryScreen> {
 
   Future<void> save() async {
     if (!form.currentState!.validate()) return;
+    if (needsReceiptDate && !receiptDateSelected) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先选择这张凭证的实际交易日期。')));
+      return;
+    }
     final currentSplit = split;
     if (splitEnabled && canSplit && currentSplit == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -91,6 +101,7 @@ class _EntryScreenState extends State<EntryScreen> {
     }
     final metadata = {...?widget.transaction?.recognitionMetadata}
       ..remove('aaSplit');
+    if (needsReceiptDate) metadata['receiptDateUnconfirmed'] = false;
     if (currentSplit != null) metadata['aaSplit'] = currentSplit.toMap();
     final tx = LedgerTransaction(
       id: widget.transaction?.id ?? 0,
@@ -360,7 +371,7 @@ class _EntryScreenState extends State<EntryScreen> {
                     const {
                           'expense': '消费支出',
                           'income': '收入',
-                          'transfer': '本人账户转移',
+                          'transfer': '资金转移',
                           'receivable': '借出／垫付（应收）',
                           'payable': '借入／偿还（应付）',
                           'refund': '退款',
@@ -379,7 +390,7 @@ class _EntryScreenState extends State<EntryScreen> {
                                 widget.transaction?.source !=
                                     TxSource.billImport) &&
                         value == 'unknown'
-                    ? '请先选择这笔转账的用途，再确认入账'
+                    ? '请先选择这笔交易的用途，再确认入账'
                     : null,
                 onChanged: saving
                     ? null
@@ -459,9 +470,11 @@ class _EntryScreenState extends State<EntryScreen> {
                     ),
                     ListTile(
                       contentPadding: const EdgeInsets.symmetric(vertical: 4),
-                      title: const Text('交易时间'),
+                      title: Text(needsReceiptDate ? '交易日期' : '交易时间'),
                       subtitle: Text(
-                        '${occurredAt.year}年${dateLabel(occurredAt)} ${timeLabel(occurredAt)}',
+                        needsReceiptDate && !receiptDateSelected
+                            ? '凭证未显示日期，点击选择实际交易日期'
+                            : '${occurredAt.year}年${dateLabel(occurredAt)}${needsReceiptDate ? '' : ' ${timeLabel(occurredAt)}'}',
                       ),
                       trailing: Icon(
                         Icons.calendar_today_outlined,
@@ -478,6 +491,13 @@ class _EntryScreenState extends State<EntryScreen> {
                                 lastDate: DateTime(2100),
                               );
                               if (date == null || !mounted) return;
+                              if (needsReceiptDate) {
+                                setState(() {
+                                  occurredAt = date;
+                                  receiptDateSelected = true;
+                                });
+                                return;
+                              }
                               final time = await showTimePicker(
                                 context: context,
                                 initialTime: TimeOfDay.fromDateTime(occurredAt),

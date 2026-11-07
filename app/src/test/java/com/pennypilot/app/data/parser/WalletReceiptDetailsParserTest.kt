@@ -62,6 +62,18 @@ class WalletReceiptDetailsParserTest {
         assertNull(parse(income.replace("交易单号20261024000012345678", "")))
     }
 
+    @Test fun `user selected older receipt retains verified date without assuming a wallet`() {
+        val later = now + 2 * 60 * 60_000L
+        assertNull(parse(income, at = later))
+        val selected = WalletReceiptDetailsParser.parseSelectedReceipt(income, later, zone)!!
+        assertEquals(1800L, selected.amountCents)
+        assertEquals(now - 90_000, selected.occurredAt)
+        assertNull(selected.details.paymentChannel)
+        assertTrue(selected.fieldEvidence.getValue("occurredAt").startsWith("本地OCR"))
+        assertNull(WalletReceiptDetailsParser.parseSelectedReceipt(income + "\n交易失败", later, zone))
+        assertNull(WalletReceiptDetailsParser.parseSelectedReceipt(income, now - 120_000L, zone))
+    }
+
     @Test fun `timestamps and IDs never override chat input failure or another history list`() {
         for (extra in listOf("聊天记录", "订单列表", "支付失败", "收款失败", "退款申请中", "验证码", "收款金额28元"))
             assertNull(extra, parse(income + "\n" + extra))
@@ -110,5 +122,59 @@ class WalletReceiptDetailsParserTest {
         assertEquals("招商银行储蓄卡(1234)", result.details.fundingAccount)
         assertEquals("支付宝", result.details.paymentChannel)
         assertNull(parse(text.replace("交易成功", "支付失败")))
+    }
+
+    @Test fun `wallet detail recognizes labelled completion and signed amount without dropping conflicting facts`() {
+        val receipt = income.replace("交易成功", "交易状态：成功").replace("+18.00", "交易金额：+18.00")
+        val parsed = parse(receipt)!!
+        assertEquals(1800L, parsed.amountCents)
+        assertEquals("INCOME", parsed.direction)
+        assertEquals("20261024000012345678", parsed.orderId)
+        assertTrue(parsed.fieldEvidence.getValue("paymentStatus").endsWith("交易状态：成功"))
+        assertTrue(parsed.fieldEvidence.getValue("amount").endsWith("交易金额：+18.00"))
+        assertNull(PaymentTextParser.parseScreen("com.eg.android.AlipayGphone", receipt))
+        for (badStatus in listOf("未完成", "已关闭", "待支付", "退款受理")) {
+            assertNull(badStatus, parse(receipt.replace("交易状态：成功", "交易状态：$badStatus")))
+            assertNull(badStatus, parse(receipt + "\n交易状态：$badStatus"))
+        }
+        assertNull(parse(receipt.replace("交易金额：+18.00", "交易金额：-18.00")))
+        assertNull(parse(receipt + "\n付款金额：18.00元"))
+        assertNull(parse(receipt + "\n交易金额：28.00元"))
+        assertNull(parse(receipt + "\n交易单号：20261024000012345679"))
+    }
+
+    @Test fun `recent wallet detail uses same-row value before label for time direction status and order`() {
+        val structureFields = listOf("成功" to "交易状态", "-18.00" to "交易金额", "支出" to "资金方向",
+            "2026-10-24\n16:58:30" to "交易时间", "20261024000012345678" to "交易单号")
+        val nodes = listOf(PaymentScreenNode(1, null), PaymentScreenNode(2, 1, text = "账单详情")) +
+            structureFields.flatMapIndexed { index, (value, label) ->
+                val id = 3 + index * 3
+                listOf(PaymentScreenNode(id, 1), PaymentScreenNode(id + 1, id, text = value),
+                    PaymentScreenNode(id + 2, id, text = label))
+            }
+        val structure = PaymentScreenStructure(nodes)
+        val receipt = nodes.mapNotNull(PaymentScreenNode::text).joinToString("\n")
+        assertNull(parse(receipt))
+        val parsed = WalletReceiptDetailsParser.parse("com.eg.android.AlipayGphone", receipt, now, structure, zone)!!
+        assertEquals("EXPENSE", parsed.direction)
+        assertEquals(1800L, parsed.amountCents)
+        assertEquals("20261024000012345678", parsed.orderId)
+        assertEquals(now - 90_000L, parsed.occurredAt)
+        for (extra in listOf("资金方向：收入", "交易时间：2026-10-24 16:59:00", "交易状态：待支付", "账单列表")) {
+            assertNull(extra, WalletReceiptDetailsParser.parse("com.eg.android.AlipayGphone", "$receipt\n$extra", now, structure, zone))
+        }
+        assertNull(WalletReceiptDetailsParser.parse("com.eg.android.AlipayGphone", receipt, now + 31 * 60_000, structure, zone))
+    }
+
+    @Test fun `refund detail only uses completed refund status time and actual refund amount`() {
+        val receipt = "退款详情\n退款状态：成功\n退款金额：5.00元\n原支付金额：30.00元" +
+            "\n退款到账时间：2026-10-24 16:58:30\n退款单号：RF202610240123"
+        val parsed = parse(receipt)!!
+        assertEquals("refund", parsed.businessKind)
+        assertEquals(500L, parsed.amountCents)
+        assertEquals("refund", parsed.orderIdKind)
+        assertNull(parse(receipt.replace("退款状态：成功", "退款状态：已受理")))
+        assertNull(parse(receipt.replace("退款到账时间", "交易时间")))
+        assertNull(parse(receipt.replace("退款金额：5.00元", "付款金额：30.00元")))
     }
 }

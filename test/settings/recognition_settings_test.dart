@@ -43,11 +43,11 @@ void main() {
       );
       await tester.tap(find.text('保存并确认'));
       await tester.pumpAndSettle();
-      expect(find.text('请先选择这笔转账的用途，再确认入账'), findsOneWidget);
+      expect(find.text('请先选择这笔交易的用途，再确认入账'), findsOneWidget);
       expect(repo.calls.where((c) => c.method == 'saveTransaction'), isEmpty);
       await tester.tap(find.byKey(const ValueKey('business-kind-unknown')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('本人账户转移').last);
+      await tester.tap(find.text('资金转移').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('保存并确认'));
       await tester.pumpAndSettle();
@@ -169,6 +169,7 @@ void main() {
         MaterialApp(home: RecognitionSettingsScreen(controller: controller)),
       );
       await tester.pumpAndSettle();
+      expect(find.text('云端支付截图识别'), findsNothing);
       await tester.tap(find.widgetWithText(SwitchListTile, '云端图片识别'));
       await tester.pumpAndSettle();
       expect(
@@ -179,6 +180,62 @@ void main() {
         {'cloudImageParsingEnabled': true},
       );
       expect(controller.settings['activeInputAutoSaveEnabled'], isNot(true));
+      await tester.pumpWidget(const SizedBox());
+      controller.dispose();
+    },
+  );
+  testWidgets(
+    'automatic screenshot upload requires a new consent even when manual image upload is enabled',
+    (tester) async {
+      final repo = TestLedgerRepository();
+      repo.data['settings'] = {
+        ...repo.data['settings'] as Map<String, dynamic>,
+        'screenVisualCaptureEnabled': true,
+        'cloudImageParsingEnabled': true,
+        'recognitionVisionProvider': 'qwen',
+      };
+      (repo.data['capabilities']
+              as Map<String, dynamic>)['screenCloudVisionSupported'] =
+          true;
+      final controller = LedgerController(repository: repo);
+      await controller.init();
+      await tester.pumpWidget(
+        MaterialApp(home: RecognitionSettingsScreen(controller: controller)),
+      );
+      await tester.pumpAndSettle();
+
+      final automaticVision = find.widgetWithText(SwitchListTile, '云端支付截图识别');
+      expect(tester.widget<SwitchListTile>(automaticVision).value, false);
+      await tester.tap(automaticVision);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('收付款人姓名、商户、金额和订单号'), findsOneWidget);
+      expect(find.textContaining('你配置的图片模型服务'), findsOneWidget);
+      expect(find.textContaining('当前所选服务是 通义千问 / 百炼'), findsOneWidget);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(
+        repo.calls.where((call) => call.method == 'updateSettings'),
+        isEmpty,
+      );
+
+      await tester.tap(automaticVision);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('同意并开启'));
+      await tester.pumpAndSettle();
+      expect(
+        repo.calls
+            .singleWhere((call) => call.method == 'updateSettings')
+            .arguments,
+        {'screenCloudVisionEnabled': true},
+      );
+      expect(tester.widget<SwitchListTile>(automaticVision).value, true);
+
+      await tester.tap(automaticVision);
+      await tester.pumpAndSettle();
+      expect(tester.widget<SwitchListTile>(automaticVision).value, false);
+      expect(controller.settings['cloudImageParsingEnabled'], true);
+      expect(controller.settings['screenVisualCaptureEnabled'], true);
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       controller.dispose();
     },

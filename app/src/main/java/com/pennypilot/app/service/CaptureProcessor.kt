@@ -1,8 +1,10 @@
 package com.pennypilot.app.service
 
 import android.content.Context
+import android.os.SystemClock
 import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.LedgerRevision
+import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.ModelRole
@@ -10,6 +12,7 @@ import com.pennypilot.app.data.recognition.*
 import com.pennypilot.app.data.parser.CategoryInferrer
 import com.pennypilot.app.data.parser.NotificationParseResult
 import com.pennypilot.app.data.parser.NotificationParser
+import com.pennypilot.app.data.parser.PaymentAppRegistry
 import com.pennypilot.app.data.parser.PaymentReceiptContext
 import com.pennypilot.app.data.parser.PaymentReceiptDetails
 import com.pennypilot.app.data.settings.AppPreferences
@@ -31,6 +34,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.encodeToString
 import org.json.JSONArray
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -53,6 +57,7 @@ class CaptureProcessor internal constructor(
 
     private val countMutex = Mutex()
     private val recognitionCommitMutex = Mutex()
+    internal val checkoutContext = CheckoutContext()
     private val taskStore by lazy { recognitionStore ?: RecognitionTaskStore(context) }
     private val recognitionEngine by lazy { PaymentRecognitionEngine(llmClient) }
 
@@ -61,21 +66,29 @@ class CaptureProcessor internal constructor(
         monitor.setTodayCount(database.transactionDao().countCapturedSince(start))
     }
 
-    suspend fun processNotification(input: CapturedNotification, revision: Long, isCurrent: () -> Boolean = { true }) {
+    internal suspend fun processNotification(input: CapturedNotification, revision: Long,
+        liveArrival: CheckoutContext.LiveNotification? = null, isCurrent: () -> Boolean = { true }) {
         if (!isCurrent() || revision != LedgerRevision.current || !preferences.notificationCaptureEnabled.first()) return
         val eventKey = CaptureEventIdentity.key(input.packageName, input.notificationKey, input.postedAt,
             "${input.title}\n${input.content}")
         val rules = database.parseRuleDao().getRulesForPackage(input.packageName)
         val parsed = NotificationParser.parse(input.packageName, input.title, input.content, rules,
-            false) { null }
+            cloudParsingEnabled = false, observedAt = input.postedAt) { null }
         if (!isCurrent() || revision != LedgerRevision.current || !preferences.notificationCaptureEnabled.first()) return
         val text = "${input.title}\n${input.content}".trim()
         if (parsed != null) {
             val saved = recognitionCommitMutex.withLock {
-                save(parsed, input.packageName, text, input.postedAt,
+                val supplemental = if (liveArrival != null && preferences.screenCaptureEnabled.first())
+                    checkoutContext.enrichNotification(input, parsed, liveArrival, revision, SystemClock.elapsedRealtime()) else null
+                suspend fun record(receipt: NotificationParseResult, current: () -> Boolean = isCurrent,
+                    allowed: suspend () -> Boolean = { true }) = save(receipt, input.packageName, text, input.postedAt,
                     TxSource.NOTIFICATION, eventKey, input.updateIdentity, revision, verifiedRule = true,
-                    businessKind = parsed.businessKind,
-                    metadata = captureMetadata(parsed, "notification"), isCurrent = isCurrent)
+                    businessKind = receipt.businessKind, metadata = captureMetadata(receipt, "notification"),
+                    isCurrent = current, isAllowed = allowed)
+                if (supplemental == null) record(parsed) else {
+                    val current = { isCurrent() && checkoutContext.remainsAuthorized(supplemental.authorization) }
+                    record(supplemental.receipt, current) { current() && preferences.screenCaptureEnabled.first() } || record(parsed)
+                }
             }
             if (saved && preferences.notificationCloudParsingEnabled.first() && isCurrent()) {
                 enqueueRecognition(input.packageName, receiptText(parsed), eventKey, input.postedAt, revision,
@@ -95,28 +108,37 @@ class CaptureProcessor internal constructor(
         revision: Long, structure: String? = null, images: List<String> = emptyList()
     ): Boolean {
         if (revision != LedgerRevision.current || !preferences.screenCaptureEnabled.first() ||
-            (!preferences.screenCloudParsingEnabled.first() && images.isEmpty())) return false
-        if (images.isNotEmpty() && !preferences.cloudImageParsingEnabled.first()) return false
+            !preferences.screenCloudParsingEnabled.first() || images.isNotEmpty()) return false
         trace(eventKey, TxSource.ACCESSIBILITY, CaptureLatencyTrace.Stage.RECEIVED, observedAt)
         // Only the read-only receipt tree from the capture adapter is accepted, never input/password nodes.
         return enqueueRecognition(packageName, text, eventKey, observedAt, revision, TxSource.ACCESSIBILITY, null, images,
             structure.takeIf { (it?.length ?: 0) <= 32_768 && preferences.screenCloudParsingEnabled.first() })
     }
 
+    /** Called only with an image from the current, independently qualified receipt window. */
+    suspend fun processReceiptImage(packageName: String, image: String, eventKey: String,
+        observedAt: Long, revision: Long, allowImageOnly: Boolean = false): Boolean {
+        if (revision != LedgerRevision.current || packageName !in PaymentAppRegistry.packages ||
+            !preferences.screenCaptureEnabled.first() || !preferences.screenCloudVisionEnabled.first()) return false
+        val mode = if (allowImageOnly) ReceiptImageMode.IMAGE_ONLY else ReceiptImageMode.VERIFIED_RECEIPT
+        return enqueueRecognition(packageName, "支付凭证图片", eventKey, observedAt, revision, TxSource.ACCESSIBILITY,
+            null, images = listOf(image), receiptImageMode = mode)
+    }
+
     private suspend fun enqueueRecognition(packageName: String, text: String, eventKey: String,
         observedAt: Long, revision: Long, source: TxSource, notificationKey: String?, images: List<String> = emptyList(), structure: String? = null,
-        enrichExisting: Boolean = false): Boolean {
-        if (!PaymentProposalValidator.isSafeCandidate(packageName, text)) return false
+        enrichExisting: Boolean = false, receiptImageMode: ReceiptImageMode? = null): Boolean {
+        if (receiptImageMode == null && !enrichExisting && !PaymentProposalValidator.isSafeCandidate(packageName, text)) return false
         return try {
             lateinit var task: RecognitionTask
             val enqueued = recognitionCommitMutex.withLock {
-                val snapshot = semanticSnapshot(eventKey)
+                val snapshot = if (receiptImageMode == null) semanticSnapshot(eventKey) else null
                 if (enrichExisting && snapshot == null) return false
                 if (snapshot?.alreadyApplied == true) return true
                 task = RecognitionTask(RecognitionTaskStore.id(eventKey), eventKey, packageName, text,
                     observedAt, revision, llmClient.operationIdentity(if (images.isEmpty()) ModelRole.TEXT else ModelRole.VISION),
                     source.name, notificationKey, images = images, structure = structure,
-                    receipt = snapshot?.receipt, semanticFingerprint = snapshot?.fingerprint)
+                    receipt = snapshot?.receipt, semanticFingerprint = snapshot?.fingerprint, receiptImageMode = receiptImageMode)
                 if (!taskAllowed(task)) return false
                 taskStore.enqueue(task).also { result ->
                     if (result != RecognitionTaskStore.EnqueueResult.FULL) {
@@ -152,11 +174,22 @@ class CaptureProcessor internal constructor(
     }
 
     private suspend fun taskAllowed(task: RecognitionTask): Boolean {
-        if (task.ledgerRevision != LedgerRevision.current ||
+        if (task.ledgerRevision != LedgerRevision.current) return false
+        if (task.receiptImageMode != null) {
+            if (task.source != TxSource.ACCESSIBILITY.name || task.images.size != 1 ||
+                !preferences.screenCaptureEnabled.first() || !preferences.screenCloudVisionEnabled.first()) return false
+            val dao = database.transactionDao()
+            if (dao.tombstone(task.eventKey) != null) return false
+            val evidence = dao.captureEvidenceByKey(task.eventKey)
+            if (evidence == null) return task.receiptImageMode == ReceiptImageMode.IMAGE_ONLY
+            val metadata = evidence.metadataJson?.let { Json.parseToJsonElement(it) as? JsonObject }
+            return metadata?.get("receiptVisionApplied") != JsonPrimitive(true) && verifiedPayment(task) != null
+        }
+        // Old images were captured for a different grant and must never use the new opt-in.
+        if (task.images.isNotEmpty() ||
             task.structure != null && !preferences.screenCloudParsingEnabled.first()) return false
         val allowed = if (task.source == TxSource.ACCESSIBILITY.name)
-            preferences.screenCaptureEnabled.first() && (if (task.images.isEmpty()) preferences.screenCloudParsingEnabled.first()
-                else preferences.cloudImageParsingEnabled.first() && preferences.screenVisualCaptureEnabled.first())
+            preferences.screenCaptureEnabled.first() && preferences.screenCloudParsingEnabled.first()
         else preferences.notificationCaptureEnabled.first() && preferences.notificationCloudParsingEnabled.first()
         if (!allowed) return false
         if (task.semanticFingerprint == null) return true
@@ -186,7 +219,9 @@ class CaptureProcessor internal constructor(
                 else -> status
             }, task.packageName)
         },
+        verifiedPayment = ::verifiedPayment,
         semanticContext = { task ->
+            if (task.receiptImageMode != null) return@RecognitionTaskRunner captureSemanticContext(null, null)
             val existing = database.transactionDao().captureEvidenceByKey(task.eventKey)
                 ?.let { database.transactionDao().getById(it.transactionId) }
             val merchant = task.receipt?.details?.get("merchantName") ?: task.receipt?.details?.get("payeeName")
@@ -195,20 +230,65 @@ class CaptureProcessor internal constructor(
         }
     ).run(id)
 
+    private suspend fun verifiedPayment(task: RecognitionTask): NotificationParseResult? {
+        val dao = database.transactionDao()
+        val evidence = dao.captureEvidenceByKey(task.eventKey) ?: return null
+        if (evidence.packageName != task.packageName || evidence.source.name != task.source) return null
+        val row = dao.getById(evidence.transactionId) ?: return null
+        if (row.editVersion != 0L || row.status == TxStatus.IGNORED || row.duplicateOf != null ||
+            row.amount != evidence.amount || row.type != evidence.type) return null
+        val amount = if (evidence.type == TxType.EXPENSE) evidence.amount else -evidence.amount
+        if (!MoneyUtil.isValidAmountCents(amount)) return null
+        val metadata = evidence.metadataJson?.let { Json.parseToJsonElement(it) as? JsonObject }
+        if (CaptureReceiptContext.string(metadata, "paymentStatus") != "COMPLETED") return null
+        val receipt = CaptureReceiptContext.fromEvidence(listOf(evidence))
+        val fields = receipt.details
+        fun strings(obj: JsonObject?): Map<String, String> = obj.orEmpty().mapNotNull { (key, value) ->
+            (value as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { key to it }
+        }.toMap()
+        val fieldSources = (metadata?.get("receiptDetails") as? JsonObject)?.get("fieldSources") as? JsonObject
+        val time = receipt.occurredAt?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+            ?.takeIf { it in 1..task.observedAt }
+        return NotificationParseResult(amount, row.merchant, evidence.type.name,
+            orderId = evidence.orderId,
+            paymentMethod = fields["fundingAccount"] ?: fields["paymentChannel"],
+            businessKind = row.businessKind,
+            scene = receipt.scene,
+            ruleVersion = CaptureReceiptContext.string(metadata, "ruleVersion"),
+            fieldEvidence = strings(metadata?.get("fieldEvidence") as? JsonObject),
+            occurredAt = time,
+            orderIdKind = CaptureReceiptContext.string(metadata, "transactionIdentityKind"),
+            details = PaymentReceiptDetails(fields["merchantName"], fields["payeeName"], fields["productDescription"],
+                fields["remark"], fields["paymentChannel"], fields["fundingAccount"],
+                fieldSources = strings(fieldSources), context = receipt.context))
+    }
+
     internal suspend fun completeRecognition(task: RecognitionTask, proposal: PaymentProposal,
         parsed: NotificationParseResult, isCurrent: () -> Boolean): Boolean = recognitionCommitMutex.withLock {
-        if (!isCurrent() || !taskAllowed(task)) false else
-            save(parsed, task.packageName, task.text, task.observedAt,
+        if (!isCurrent() || !taskAllowed(task)) return@withLock false
+        val imageTask = task.receiptImageMode != null
+        // A local receipt can arrive while the image request is in flight. It controls
+        // financial facts at commit, even when the task started without a local receipt.
+        val existing = if (imageTask) verifiedPayment(task) else null
+        if (existing != null && (existing.amountCents != parsed.amountCents || existing.direction != parsed.direction ||
+                existing.orderId != null && parsed.orderId != null && existing.orderIdKind == parsed.orderIdKind &&
+                existing.orderId != parsed.orderId)) return@withLock true
+        val payment = if (existing == null) parsed else existing.copy(merchant = existing.merchant ?: parsed.merchant,
+            details = existing.details.mergeMissing(parsed.details))
+        save(payment, task.packageName, if (imageTask) receiptText(payment) else task.text, task.observedAt,
                 TxSource.valueOf(task.source), task.eventKey, task.notificationKey, task.ledgerRevision,
                 metadata = buildJsonObject {
-                    (Json.parseToJsonElement(recognitionEngine.metadata(proposal.copy(merchant = parsed.merchant,
-                        merchantEvidence = proposal.merchantEvidence.takeIf { parsed.merchant != null }))) as JsonObject)
+                    (Json.parseToJsonElement(recognitionEngine.metadata(proposal.copy(merchant = payment.merchant,
+                        merchantEvidence = proposal.merchantEvidence.takeIf { payment.merchant == proposal.merchant }))) as JsonObject)
                         .forEach { (key, value) -> put(key, value) }
-                    task.semanticFingerprint?.let { put("semanticEvidenceFingerprint", it) }
+                    if (imageTask) put("receiptVisionApplied", true)
                 }.toString(),
-                businessKind = proposal.businessKind, proposal = proposal, semanticReceipt = task.receipt,
+                businessKind = if (task.semanticFingerprint == null) proposal.businessKind else payment.businessKind,
+                proposal = proposal, semanticReceipt = task.receipt,
+                semanticFingerprint = task.semanticFingerprint,
                 sourceMetadata = if (task.semanticFingerprint == null) null else
                     database.transactionDao().captureEvidenceByKey(task.eventKey)?.metadataJson,
+                forceReview = imageTask && existing == null,
                 isCurrent = isCurrent,
                 isAllowed = {
                     taskAllowed(task) && task.configurationId == llmClient.operationIdentity(
@@ -249,7 +329,8 @@ class CaptureProcessor internal constructor(
         parsed: NotificationParseResult,
         eventKey: String,
         observedAt: Long,
-        revision: Long
+        revision: Long,
+        queueSemanticModel: Boolean = true
     ): Boolean {
         if (revision != LedgerRevision.current || !preferences.screenCaptureEnabled.first()) return false
         // 只保留已提取的交易证据；整页文本、非交易节点不会被写入账本或发送到 AI。
@@ -259,7 +340,7 @@ class CaptureProcessor internal constructor(
                 eventKey, null, revision, verifiedRule = true, businessKind = parsed.businessKind,
                 metadata = captureMetadata(parsed, "page"))
         }
-        if (saved && preferences.screenCloudParsingEnabled.first())
+        if (saved && queueSemanticModel && preferences.screenCloudParsingEnabled.first())
             enqueueRecognition(packageName, receipt, eventKey, observedAt, revision, TxSource.ACCESSIBILITY, null, enrichExisting = true)
         return saved
     }
@@ -276,19 +357,30 @@ class CaptureProcessor internal constructor(
         val evidence = database.transactionDao().evidenceForTransaction(row.id).filter {
             it.source == TxSource.NOTIFICATION && notificationAllowed || it.source == TxSource.ACCESSIBILITY && pageAllowed
         }
-        val receipt = CaptureSemanticContext(receipt = CaptureReceiptContext.fromEvidence(evidence)).bounded().receipt!!
+        val receipt = CaptureSemanticContext(receipt = CaptureReceiptContext.fromEvidence(evidence, includeLocalCheckout = false))
+            .bounded().receipt!!
         val sources = evidence.map { it.source.name }.distinct().sorted().joinToString(",")
         val fingerprint = CaptureEventIdentity.fingerprint("$sources\n${Json.encodeToString(receipt)}")
         val metadata = row.metadataJson?.let { Json.parseToJsonElement(it) as? JsonObject }
-        return SemanticSnapshot(receipt, fingerprint,
-            CaptureReceiptContext.string(metadata, "semanticEvidenceFingerprint") == fingerprint)
+        val attempted = CaptureReceiptContext.string(metadata, "semanticAttemptedFingerprint") == fingerprint
+        // Older versions marked any model response complete, even one that left a fallback category.
+        val legacySpecific = !attempted &&
+            CaptureReceiptContext.string(metadata, "semanticEvidenceFingerprint") == fingerprint &&
+            database.categoryDao().getById(row.categoryId)?.let {
+                it.enabled && !CaptureSemanticResolver.isFallbackCategory(it.name)
+            } == true
+        return SemanticSnapshot(receipt, fingerprint, attempted || legacySpecific)
     }
 
     private suspend fun captureSemanticContext(merchant: String?, direction: String?, excludedId: Long? = null): CaptureSemanticContext {
         val type = when (direction) { "EXPENSE" -> TxType.EXPENSE; "INCOME" -> TxType.INCOME; else -> null }
         val categories = database.categoryDao().observeAll().first().filter { it.enabled && (type == null || it.type == type) }
+        val fallbackIds = categories.filter { CaptureSemanticResolver.isFallbackCategory(it.name) }.map { it.id }.toSet()
         val history = if (merchant.isNullOrBlank() || type == null) emptyList() else
-            database.transactionDao().relatedCaptureHistory(merchant, type).filter { it.id != excludedId }.map { row ->
+            database.transactionDao().relatedCaptureHistory(merchant, type).filter { row ->
+                row.id != excludedId && !(row.categoryId in fallbackIds && row.editVersion == 0L &&
+                    row.source in setOf(TxSource.NOTIFICATION, TxSource.ACCESSIBILITY))
+            }.map { row ->
                 CaptureSemanticHistory(merchant, row.type.name, row.businessKind, row.categoryId, row.accountTag, row.note)
             }
         val rawPreferences = context.getSharedPreferences("pennypilot_flutter", Context.MODE_PRIVATE)
@@ -358,7 +450,9 @@ class CaptureProcessor internal constructor(
         businessKind: String = "unknown",
         proposal: PaymentProposal? = null,
         semanticReceipt: CaptureSemanticReceipt? = null,
+        semanticFingerprint: String? = null,
         sourceMetadata: String? = null,
+        forceReview: Boolean = false,
         isCurrent: () -> Boolean = { true },
         isAllowed: suspend () -> Boolean = { true }
     ): Boolean {
@@ -367,9 +461,10 @@ class CaptureProcessor internal constructor(
         val type = if (parsed.direction == "INCOME") TxType.INCOME else TxType.EXPENSE
         val amount = if (type == TxType.EXPENSE) parsed.amountCents else -parsed.amountCents
         val categories = database.categoryDao().observeAll().first()
+        val dao = database.transactionDao()
+        val existingId = dao.captureEvidenceByKey(eventKey)?.transactionId ?: dao.getByCaptureEvent(eventKey)?.id
         val semantics = CaptureSemanticResolver.resolve(parsed.copy(businessKind = businessKind), packageName,
-            text, captureSemanticContext(parsed.merchant, parsed.direction,
-                database.transactionDao().getByCaptureEvent(eventKey)?.id).copy(receipt = semanticReceipt), proposal)
+            text, captureSemanticContext(parsed.merchant, parsed.direction, existingId).copy(receipt = semanticReceipt), proposal)
         val kind = semantics.businessKind
         val category = categories.firstOrNull { it.id == semantics.categoryId && it.enabled && it.type == type }
             ?: CategoryInferrer.infer("${parsed.merchant.orEmpty()} $text", categories, type)
@@ -394,13 +489,20 @@ class CaptureProcessor internal constructor(
             put("observedAt", occurredAt)
             put("semanticBusinessKind", kind)
             put("semanticCategoryId", category.id)
+            put("semanticCategoryFallback", semantics.categoryIsFallback)
+            semanticFingerprint?.let {
+                put("semanticAttemptedFingerprint", it)
+                if (proposal?.categoryId == category.id && !CaptureSemanticResolver.isFallbackCategory(category.name))
+                    put("semanticEvidenceFingerprint", it)
+            }
             if (proposal != null) put("semanticModelApplied", true)
             put("assumptions", JsonArray(semantics.assumptions.map(::JsonPrimitive)))
         }.toString()
         val tx = TransactionEntity(amount = amount, type = type, categoryId = category.id,
             merchant = parsed.merchant, accountTag = semantics.accountTag ?: parsed.paymentMethod,
             note = semantics.note, occurredAt = parsed.occurredAt ?: occurredAt,
-            source = source, status = if ((verifiedRule || proposal != null) && semantics.autoEligible && kind != "unknown" && preferences.captureAutoRecordEnabled.first()) TxStatus.CONFIRMED else TxStatus.PENDING,
+            source = source, status = if (!forceReview && (verifiedRule || proposal != null) && semantics.autoEligible &&
+                kind != "unknown" && preferences.captureAutoRecordEnabled.first()) TxStatus.CONFIRMED else TxStatus.PENDING,
             rawPayload = text, captureEventKey = eventKey, businessKind = kind, metadataJson = enrichedMetadata)
         if (!isCurrent() || !isAllowed()) return false
         val result = CapturePersistence.capture(database, revision, tx,
@@ -438,7 +540,7 @@ class CaptureProcessor internal constructor(
         if (source == TxSource.ACCESSIBILITY) monitor.onScreenStatus("saved", packageName)
         if (LedgerRevision.current != revision) return false
         try {
-            postSavedNotification(transactionId, eventKey, source, type, category.name, result is CaptureResult.Enriched, revision)
+            postSavedNotification(transactionId, eventKey, source, type, category, result is CaptureResult.Enriched, revision)
         } finally {
             // Counting is secondary: an immediate alert must not wait for a ledger summary query.
             try { refreshTodayCount() }
@@ -449,13 +551,15 @@ class CaptureProcessor internal constructor(
     }
 
     private suspend fun postSavedNotification(transactionId: Long, eventKey: String, source: TxSource,
-        type: TxType, categoryName: String, updateOnly: Boolean, revision: Long) {
+        type: TxType, category: CategoryEntity, updateOnly: Boolean, revision: Long) {
         if (!NotificationHelper.captureNotificationsEnabled(context)) {
             trace(eventKey, source, CaptureLatencyTrace.Stage.NOTIFICATION_BLOCKED)
             NotificationHelper.cancelRecognitionPending(context, eventKey)
             return
         }
         val stored = database.transactionDao().getById(transactionId) ?: return
+        val categoryName = if (stored.categoryId == category.id) category.name
+            else database.categoryDao().getById(stored.categoryId)?.name.orEmpty()
         val title = "${stored.merchant ?: "交易"} ${MoneyUtil.formatForDisplay(stored.amount, type == TxType.EXPENSE)}"
         val content = if (stored.duplicateOf != null) "疑似重复 · 请先在流水中核对"
             else if (stored.businessKind == "unknown") "资金变动已记录 · 请打开应用核对用途与分类"

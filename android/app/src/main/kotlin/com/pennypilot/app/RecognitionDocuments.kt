@@ -7,11 +7,16 @@ import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
+import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentTextParser
+import com.pennypilot.app.data.parser.WalletReceiptDetailsParser
 import com.pennypilot.app.service.PaymentImageReader
+import com.pennypilot.app.service.WechatOpaqueTransferReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.security.MessageDigest
 
 /** SAF/share inputs are read once, bounded and never retained outside app memory. */
 object RecognitionDocuments {
@@ -24,7 +29,7 @@ object RecognitionDocuments {
         return bytes
     }
 
-    suspend fun image(context: Context, uri: Uri): Map<String, Any?> = withContext(Dispatchers.IO) {
+    suspend fun image(context: Context, uri: Uri, allowCloud: Boolean): Map<String, Any?> = withContext(Dispatchers.IO) {
         val bytes = bytes(context, uri, 12 * 1024 * 1024)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -50,15 +55,56 @@ object RecognitionDocuments {
         }
         val bitmap = if (matrix.isIdentity) decoded else android.graphics.Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
         try {
-            val ocr = try { PaymentImageReader.ocrBitmap(bitmap) }
+            if (allowCloud) return@withContext mapOf(
+                "base64" to Base64.encodeToString(PaymentImageReader.jpegBytes(bitmap), Base64.NO_WRAP),
+                "mimeType" to "image/jpeg",
+            )
+            val lines = try { PaymentImageReader.ocrLines(bitmap) }
                 catch (e: kotlinx.coroutines.CancellationException) { throw e }
-                catch (_: Exception) { "" }
-            mapOf("base64" to Base64.encodeToString(PaymentImageReader.jpegBytes(bitmap), Base64.NO_WRAP),
-                "mimeType" to "image/jpeg", "ocrText" to ocr)
+                catch (_: Exception) { emptyList() }
+            val ocr = lines.joinToString("\n") { it.text }
+            val fingerprint = MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            val receipt = receiptPreview(ocr, fingerprint, System.currentTimeMillis()) {
+                WechatOpaqueTransferReader.parse(lines, bitmap.width, bitmap.height)?.let {
+                    // The layout can prove the receipt roles. An imported image does not prove its app.
+                    it.copy(details = it.details.copy(paymentChannel = null,
+                        fieldSources = it.details.fieldSources - "paymentChannel"))
+                }
+            }
+            buildMap {
+                put("localReceipt", receipt)
+                if (receipt == null) put("localReceiptError", if (ocr.isBlank())
+                    "没读出清晰的凭证文字。请选一张清晰的支付结果图，或手动补记。"
+                else "没找到一笔有明确完成状态和金额的交易。请选择单笔支付结果或交易详情，也可以导入账单。")
+            }
         } finally {
             if (bitmap !== decoded) bitmap.recycle()
             decoded.recycle()
         }
+    }
+
+    private fun receiptPreview(text: String, fingerprint: String, observedAt: Long,
+        readOpaqueTransfer: () -> NotificationParseResult?): Map<String, Any?>? {
+        if (text.length !in 1..12_000) return null
+        val parsed = WalletReceiptDetailsParser.parseSelectedReceipt(text, observedAt)
+            ?: PaymentTextParser.analyzeSelectedReceipt(text) ?: readOpaqueTransfer() ?: return null
+        val refund = parsed.scene in setOf("refund_received", "red_packet_returned")
+        val time = parsed.occurredAt ?: WalletReceiptDetailsParser.completedTime(PaymentTextParser.receiptFacts(text),
+            refund, observedAt, allowHistorical = true)?.occurredAt
+        val details = parsed.details
+        return mapOf("amount" to parsed.amountCents, "type" to parsed.direction, "occurredAt" to time,
+            "merchant" to parsed.merchant, "accountTag" to details.fundingAccount, "businessKind" to parsed.businessKind,
+            "note" to listOfNotNull(details.productDescription, details.remark).distinct().joinToString("\n"),
+            "metadata" to mapOf(
+                "operationId" to "local-receipt:$fingerprint", "receiptInput" to "local_image",
+                "scene" to parsed.scene, "orderIdKind" to parsed.orderIdKind,
+                "receiptDetails" to (mapOf("merchantName" to details.merchantName, "payeeName" to details.payeeName,
+                    "productDescription" to details.productDescription, "remark" to details.remark,
+                    "paymentChannel" to details.paymentChannel, "fundingAccount" to details.fundingAccount)
+                    .filterValues { it != null } + ("fieldSources" to details.fieldSources)),
+                "receiptContext" to details.context.map { mapOf("label" to it.label, "value" to it.value, "source" to it.source) },
+                "fieldEvidence" to parsed.fieldEvidence))
     }
 
     suspend fun bill(context: Context, uri: Uri): Map<String, Any?> = withContext(Dispatchers.IO) {

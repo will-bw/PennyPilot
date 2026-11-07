@@ -15,10 +15,7 @@ internal object WechatRedPacketReader {
 
     fun accepts(packageName: String, className: String?, snapshot: PaymentScreenReader.Snapshot): Boolean =
         packageName == WechatOpaqueTransferReader.PACKAGE && className == DETAIL_ACTIVITY &&
-            snapshot.status == "empty_page" && !snapshot.hasInput &&
-            snapshot.diagnostics["visitedNodes"] == 1 && snapshot.diagnostics["hiddenNodes"] == 1 &&
-            snapshot.diagnostics["textNodes"] == 0 &&
-            listOf("editableNodes", "passwordNodes", "missingChildren", "foreignNodes").all { snapshot.diagnostics[it] == 0 }
+            snapshot.isBoundedOpaqueTree
 
     private fun content(lines: List<PaymentImageReader.OcrLine>, width: Int, height: Int): List<Pair<String, Rect>>? {
         if (width <= 0 || height <= width || lines.size !in 3..40) return null

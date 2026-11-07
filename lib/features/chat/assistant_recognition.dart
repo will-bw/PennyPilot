@@ -5,6 +5,35 @@ import '../../core/models.dart';
 import '../../ui/common.dart';
 import '../entry/entry_screen.dart';
 
+Future<void> stageRecognitionImage(
+  LedgerController controller,
+  Map<String, dynamic> image,
+) async {
+  if (controller.settings['cloudImageParsingEnabled'] == true) {
+    final bytes = image['base64'] ?? image['imageBase64'];
+    if (bytes is! String || bytes.isEmpty) {
+      throw const LedgerException('无法准备这张图片，请重新选择凭证。');
+    }
+    controller.setAssistantAttachment({
+      'imageBase64': bytes,
+      'mimeType': image['mimeType'],
+      'name': image['name'] ?? '记账图片',
+    });
+    return;
+  }
+  final receipt = image['localReceipt'];
+  if (receipt is Map) {
+    await controller.addLocalReceiptDraft(
+      stringMap(receipt),
+      expectedRevision: controller.revision,
+    );
+    return;
+  }
+  throw LedgerException(
+    image['localReceiptError'] as String? ?? '请选一张清晰的支付凭证，或打开图片识别设置。',
+  );
+}
+
 class AssistantRecognition extends StatefulWidget {
   const AssistantRecognition({super.key, required this.controller});
   final LedgerController controller;
@@ -134,7 +163,10 @@ class _AssistantRecognitionState extends State<AssistantRecognition> {
                                 '${c.categoryById(tx.categoryId)?.name ?? '待分类'} · ${tx.businessLabel}',
                               ),
                               Text(
-                                '${tx.occurredAt.year}年${dateLabel(tx.occurredAt)}${const {'exact', 'approximate'}.contains(tx.recognitionMetadata['timePrecision']) ? ' ${timeLabel(tx.occurredAt)}' : ''}${tx.recognitionMetadata['timePrecision'] == 'approximate' ? '左右' : ''}',
+                                tx.recognitionMetadata['receiptDateUnconfirmed'] ==
+                                        true
+                                    ? '交易日期待选'
+                                    : '${tx.occurredAt.year}年${dateLabel(tx.occurredAt)}${const {'exact', 'approximate'}.contains(tx.recognitionMetadata['timePrecision']) ? ' ${timeLabel(tx.occurredAt)}' : ''}${tx.recognitionMetadata['timePrecision'] == 'approximate' ? '左右' : ''}',
                               ),
                               if (tx.note?.isNotEmpty == true) Text(tx.note!),
                               const SizedBox(height: 4),

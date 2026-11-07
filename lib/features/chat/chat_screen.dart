@@ -67,7 +67,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     ]);
     updates.addListener(_controllerChanged);
     sessionId = widget.controller.agentSession['id'] as String?;
-    hadRecognition = widget.controller.pendingRecognition;
+    hadRecognition = widget.controller.canSupplementRecognition;
   }
 
   @override
@@ -123,8 +123,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         });
       }
     }
-    if (!hadRecognition && c.pendingRecognition) continueRecognition = true;
-    hadRecognition = c.pendingRecognition;
+    if (!hadRecognition && c.canSupplementRecognition) {
+      continueRecognition = true;
+    }
+    hadRecognition = c.canSupplementRecognition;
     if (followingLatest) {
       _scheduleScroll();
     } else if (c.isAsking && !showLatest && mounted) {
@@ -202,7 +204,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final attachment = c.assistantAttachment;
     if ((text.isEmpty && attachment == null) || c.isBusy) return;
     final supplement =
-        c.pendingRecognition && continueRecognition && attachment == null;
+        c.canSupplementRecognition && continueRecognition && attachment == null;
     final source = dictated ? 'AI_VOICE' : 'AI_TEXT';
     if (attachment != null || supplement) {
       outgoingRecognitionText = text;
@@ -238,7 +240,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _image() async {
     final c = widget.controller;
-    if (c.settings['cloudImageParsingEnabled'] != true) {
+    if (c.settings['cloudImageParsingEnabled'] != true &&
+        c.capabilities['localReceiptImageSupported'] != true) {
       await Navigator.push(
         context,
         MaterialPageRoute<void>(
@@ -248,14 +251,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     await runUi(context, () async {
-      final raw = await c.command('pickRecognitionImage', refreshAfter: false);
+      final raw = await c.command(
+        'pickRecognitionImage',
+        ledger: true,
+        refreshAfter: false,
+      );
       if (raw == null || !mounted) return;
-      final data = stringMap(raw);
-      c.setAssistantAttachment({
-        'imageBase64': data['base64'] ?? data['imageBase64'],
-        'mimeType': data['mimeType'],
-        'name': data['name'] ?? '记账图片',
-      });
+      await stageRecognitionImage(c, stringMap(raw));
+      if (!mounted) return;
       setState(() => continueRecognition = false);
       focus.unfocus();
     });
@@ -853,7 +856,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget _composer(LedgerController c, {required int maxLines}) {
     final colors = Theme.of(context).colorScheme;
     final supplement =
-        c.pendingRecognition &&
+        c.canSupplementRecognition &&
         continueRecognition &&
         c.assistantAttachment == null;
     final recording = c.isRecording || c.isTranscribing;
@@ -866,7 +869,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (c.pendingRecognition && c.assistantAttachment == null)
+            if (c.canSupplementRecognition && c.assistantAttachment == null)
               Row(
                 children: [
                   Expanded(

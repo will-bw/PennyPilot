@@ -4,6 +4,7 @@ import 'core/ledger_controller.dart';
 import 'features/ledger/ledger_screen.dart';
 import 'features/reports/reports_screen.dart';
 import 'features/chat/chat_screen.dart';
+import 'features/chat/assistant_recognition.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/settings/capture_settings_screen.dart';
 import 'features/settings/permission_setup_screen.dart';
@@ -122,7 +123,10 @@ class _AppHomeState extends State<_AppHome> {
   Widget build(BuildContext context) {
     final c = widget.controller;
     final launch = c.launchTarget;
-    if (launch != null && c.settings['onboardingDone'] != false) {
+    if (launch != null &&
+        c.snapshot != null &&
+        !c.isLoading &&
+        c.settings['onboardingDone'] != false) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         c.consumeLaunch();
@@ -142,10 +146,14 @@ class _AppHomeState extends State<_AppHome> {
           runUi(context, () async {
             final raw = await c.command(
               'consumeSharedImage',
+              ledger: true,
               refreshAfter: false,
             );
-            if (raw != null) {
-              c.setAssistantAttachment(Map<String, dynamic>.from(raw as Map));
+            if (raw != null && context.mounted) {
+              await stageRecognitionImage(
+                c,
+                Map<String, dynamic>.from(raw as Map),
+              );
             }
           });
         } else if (launch['route'] == 'assistant') {

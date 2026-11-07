@@ -16,6 +16,9 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 @Serializable
+enum class ReceiptImageMode { VERIFIED_RECEIPT, IMAGE_ONLY }
+
+@Serializable
 data class RecognitionTask(
     val id: String,
     val eventKey: String,
@@ -32,7 +35,8 @@ data class RecognitionTask(
     val evidenceVersion: Int = 1,
     val structure: String? = null,
     val receipt: CaptureSemanticReceipt? = null,
-    val semanticFingerprint: String? = null
+    val semanticFingerprint: String? = null,
+    val receiptImageMode: ReceiptImageMode? = null
 )
 
 internal interface TaskCipher { fun encrypt(bytes: ByteArray): ByteArray; fun decrypt(bytes: ByteArray): ByteArray }
@@ -66,18 +70,30 @@ class RecognitionTaskStore internal constructor(private val file: File, private 
         require(task.receipt == CaptureSemanticContext(receipt = task.receipt).bounded().receipt &&
             (task.semanticFingerprint?.length ?: 0) <= 128)
         com.pennypilot.app.data.llm.MultimodalMessages.validate(listOf(com.pennypilot.app.data.llm.Message("user", task.text, imageDataUrls = task.images)))
+        require(task.receiptImageMode == null || task.images.size == 1 &&
+            task.structure == null && task.semanticFingerprint == null && task.receipt == null)
         val tasks = read().filter { fresh(it, now) }
         val existing = tasks.firstOrNull { it.id == task.id }
-        if (existing != null && ((existing.configurationId != task.configurationId && !(existing.images.isEmpty() && task.images.isNotEmpty())) || existing.ledgerRevision != task.ledgerRevision ||
-                existing.source != task.source || existing.text == task.text && existing.images == task.images && existing.structure == task.structure &&
-                existing.semanticFingerprint == task.semanticFingerprint && existing.receipt == task.receipt)) return@synchronized EnqueueResult.ALREADY_QUEUED
+        if (existing != null) {
+            val upgradesToImage = task.images.isNotEmpty() && (existing.images.isEmpty() ||
+                existing.receiptImageMode == null && task.receiptImageMode != null)
+            if (existing.source != task.source || existing.ledgerRevision != task.ledgerRevision ||
+                existing.configurationId != task.configurationId && !upgradesToImage) return@synchronized EnqueueResult.ALREADY_QUEUED
+            if (existing.receiptImageMode == ReceiptImageMode.VERIFIED_RECEIPT ||
+                existing.receiptImageMode == ReceiptImageMode.IMAGE_ONLY && task.receiptImageMode != ReceiptImageMode.VERIFIED_RECEIPT)
+                return@synchronized EnqueueResult.ALREADY_QUEUED
+            if (existing.text == task.text && existing.images == task.images && existing.structure == task.structure &&
+                existing.semanticFingerprint == task.semanticFingerprint && existing.receipt == task.receipt &&
+                existing.receiptImageMode == task.receiptImageMode) return@synchronized EnqueueResult.ALREADY_QUEUED
+        }
         val others = tasks.filterNot { it.id == task.id }
         if (others.size >= MAX_TASKS || others.sumOf(::characterCount) + characterCount(task) > MAX_CACHE_CHARACTERS) return@synchronized EnqueueResult.FULL
         if (existing != null) {
             // New evidence shares one logical event and original TTL; it cannot reset a live request's identity.
             write(others + existing.copy(text = task.text, images = task.images, structure = task.structure,
                 receipt = task.receipt, semanticFingerprint = task.semanticFingerprint,
-                configurationId = task.configurationId, evidenceVersion = existing.evidenceVersion + 1, attempts = 0))
+                receiptImageMode = task.receiptImageMode, configurationId = task.configurationId,
+                evidenceVersion = existing.evidenceVersion + 1, attempts = 0))
             EnqueueResult.UPDATED
         } else { write(tasks + task); EnqueueResult.ENQUEUED }
     }

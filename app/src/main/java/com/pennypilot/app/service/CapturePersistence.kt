@@ -9,6 +9,7 @@ import com.pennypilot.app.data.recognition.CaptureSemanticResolver
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -97,7 +98,7 @@ object CapturePersistence {
                 ))
                 val existing = dao.getById(previous.transactionId)
                 if (existing != null && canEnrich(existing)) {
-                    val enriched = enrichTransaction(existing, transaction, enrichSemantics)
+                    val enriched = enrichTransaction(database, existing, transaction, enrichSemantics)
                     if (enriched != existing) {
                         dao.update(enriched)
                         if (visibleFieldsChanged(existing, enriched))
@@ -137,7 +138,7 @@ object CapturePersistence {
             ))
             val existing = dao.getById(duplicate.transactionId)
             if (existing != null && canEnrich(existing)) {
-                val enriched = enrichTransaction(existing, transaction, enrichSemantics)
+                val enriched = enrichTransaction(database, existing, transaction, enrichSemantics)
                 if (enriched != existing) {
                     dao.update(enriched)
                     if (visibleFieldsChanged(existing, enriched))
@@ -181,7 +182,7 @@ object CapturePersistence {
         transaction.source in setOf(TxSource.NOTIFICATION, TxSource.ACCESSIBILITY) &&
             transaction.editVersion == 0L && transaction.status != TxStatus.IGNORED && transaction.duplicateOf == null
 
-    private fun enrichTransaction(existing: TransactionEntity, incoming: TransactionEntity,
+    private suspend fun enrichTransaction(database: AppDatabase, existing: TransactionEntity, incoming: TransactionEntity,
         enrichSemantics: Boolean): TransactionEntity {
         val oldMetadata = metadata(existing.metadataJson)
         val newMetadata = metadata(incoming.metadataJson)
@@ -189,9 +190,37 @@ object CapturePersistence {
         // model classification with their original generic fallback category.
         val incomingModel = newMetadata?.get("semanticModelApplied") == JsonPrimitive(true)
         val modelHasCurrentContext = oldMetadata?.get("semanticEvidenceFingerprint") == null ||
-            newMetadata?.get("semanticEvidenceFingerprint") != null
+            newMetadata?.get("semanticEvidenceFingerprint") != null || newMetadata?.get("semanticAttemptedFingerprint") != null
         val replaceSemantics = enrichSemantics && (oldMetadata?.get("semanticModelApplied") != JsonPrimitive(true) ||
             incomingModel && modelHasCurrentContext)
+        val previousCategory = if (enrichSemantics && existing.categoryId != incoming.categoryId)
+            database.categoryDao().getById(existing.categoryId) else null
+        val oldCategoryFallback = oldMetadata?.get("semanticCategoryFallback")?.let { it == JsonPrimitive(true) }
+            ?: previousCategory?.name?.let(CaptureSemanticResolver::isFallbackCategory)
+        val categoryFallback = newMetadata?.get("semanticCategoryFallback")
+        val upgradeCategory = enrichSemantics && existing.categoryId != incoming.categoryId &&
+            oldCategoryFallback == true && categoryFallback == JsonPrimitive(false)
+        val keepSpecificCategory = replaceSemantics && categoryFallback == JsonPrimitive(true) &&
+            oldCategoryFallback == false && previousCategory?.let { it.enabled && it.type == incoming.type } == true
+        val keepKnownMeaning = replaceSemantics && incoming.businessKind == "unknown" &&
+            existing.businessKind in CaptureSemanticResolver.businessKinds
+        val incomingMetadata = if (newMetadata != null && (keepSpecificCategory || keepKnownMeaning)) {
+            val retained = newMetadata.toMutableMap()
+            val assumptions = (newMetadata["assumptions"] as? JsonArray).orEmpty().toMutableList()
+            if (keepSpecificCategory) {
+                retained["semanticCategoryId"] = JsonPrimitive(existing.categoryId)
+                retained["semanticCategoryFallback"] = JsonPrimitive(false)
+                assumptions.removeAll { (it as? JsonPrimitive)?.content?.startsWith("分类暂用") == true }
+                assumptions += JsonPrimitive("分类保留原结果，补充凭证没有更明确的归类依据")
+            }
+            if (keepKnownMeaning) {
+                retained["semanticBusinessKind"] = JsonPrimitive(existing.businessKind)
+                assumptions.remove(JsonPrimitive("已保留金额与资金方向，交易用途待确认"))
+                assumptions += JsonPrimitive("补充凭证的用途证据不足，保留已识别用途")
+            }
+            retained["assumptions"] = JsonArray(assumptions)
+            JsonObject(retained).toString()
+        } else incoming.metadataJson
         // 只升级明确标记为采集时间的回退值；旧记录缺少来源时，不靠时间相等猜测。
         val replaceTransactionTime = isReceiptTimeUpgrade(oldMetadata, newMetadata)
         fun String?.nonBlank(): String? = this?.takeIf { it.isNotBlank() }
@@ -220,11 +249,13 @@ object CapturePersistence {
         return existing.copy(
             merchant = fillMissing(existing.merchant, incoming.merchant),
             accountTag = account,
-            categoryId = if (replaceSemantics) incoming.categoryId else existing.categoryId,
+            categoryId = if (upgradeCategory || replaceSemantics && !keepSpecificCategory) incoming.categoryId else existing.categoryId,
             note = note,
             occurredAt = if (replaceTransactionTime) incoming.occurredAt else existing.occurredAt,
-            metadataJson = mergeMetadata(existing.metadataJson, incoming.metadataJson, replaceSemantics, replaceTransactionTime),
-            businessKind = if (replaceSemantics || existing.businessKind == "unknown") incoming.businessKind else existing.businessKind,
+            metadataJson = mergeMetadata(existing.metadataJson, incomingMetadata, replaceSemantics, replaceTransactionTime,
+                replaceCategory = upgradeCategory && !replaceSemantics),
+            businessKind = if (replaceSemantics && !keepKnownMeaning || existing.businessKind == "unknown")
+                incoming.businessKind else existing.businessKind,
             status = if (replaceSemantics && incoming.status == TxStatus.CONFIRMED) TxStatus.CONFIRMED else existing.status
         )
     }
@@ -243,12 +274,22 @@ object CapturePersistence {
             incoming?.get("transactionTimeSource") == JsonPrimitive("receipt")
 
     private fun mergeMetadata(previous: String?, incoming: String?, preferIncoming: Boolean = false,
-        replaceTransactionTime: Boolean = false): String? {
+        replaceTransactionTime: Boolean = false, replaceCategory: Boolean = false): String? {
         if (incoming == null) return previous
         return runCatching {
             val old = previous?.let { Json.parseToJsonElement(it) as JsonObject } ?: JsonObject(emptyMap())
             val fresh = Json.parseToJsonElement(incoming) as JsonObject
             val merged = (if (preferIncoming) old + fresh else fresh + old).toMutableMap()
+            fresh["semanticAttemptedFingerprint"]?.let { merged["semanticAttemptedFingerprint"] = it }
+            if (replaceCategory) {
+                fresh["semanticCategoryId"]?.let { merged["semanticCategoryId"] = it }
+                fresh["semanticCategoryFallback"]?.let { merged["semanticCategoryFallback"] = it }
+                fun isCategoryAssumption(value: kotlinx.serialization.json.JsonElement) =
+                    (value as? JsonPrimitive)?.content?.startsWith("分类") == true
+                merged["assumptions"] = JsonArray(
+                    (old["assumptions"] as? JsonArray).orEmpty().filterNot(::isCategoryAssumption) +
+                        (fresh["assumptions"] as? JsonArray).orEmpty().filter(::isCategoryAssumption))
+            }
             val timeKeys = setOf("transactionTimeSource", "timePrecision", "observedAt", "receiptOccurredAt")
             timeKeys.forEach { key ->
                 val value = if (replaceTransactionTime) fresh[key] else old[key]

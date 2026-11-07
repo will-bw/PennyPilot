@@ -3,9 +3,17 @@ import 'package:flutter/material.dart';
 import '../../core/ledger_controller.dart';
 import '../../core/models.dart';
 import '../../ui/common.dart';
+import 'capture_consent.dart';
 import 'settings_widgets.dart';
 import 'ai_settings_screen.dart';
 import 'voice_settings_screen.dart';
+
+const _recognitionServiceNames = {
+  '': '复用当前 AI 服务',
+  'chatgpt': 'ChatGPT',
+  'deepseek': 'DeepSeek',
+  'qwen': '通义千问 / 百炼',
+};
 
 /// Operate surface: reuse the existing settings rhythm, with explicit data
 /// choices followed by role configuration and an actual inference test.
@@ -63,6 +71,12 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
     animation: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
+      final visionProvider = c.settings['recognitionVisionProvider'];
+      final visionService =
+          _recognitionServiceNames[visionProvider == null ||
+                  visionProvider == ''
+              ? c.settings['activeProvider']
+              : visionProvider];
       List<dynamic> preferences;
       try {
         preferences =
@@ -88,7 +102,12 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                 (
                   'screenVisualCaptureEnabled',
                   '本地支付截图补充',
-                  '在支付候选页或指定微信空节点窗口按需截图，本机校验成功状态、金额和布局；不自动上传图片，离开后丢弃画面。',
+                  '本机读取支付截图。开启云端支付截图识别时，优先由图片模型读取。',
+                ),
+                (
+                  'screenCloudVisionEnabled',
+                  '云端支付截图识别',
+                  '开启页面采集后，将符合条件的支付结果窗口截图发送给所选图片模型，直接读取姓名、商户和凭证详情。',
                 ),
                 (
                   'screenCloudParsingEnabled',
@@ -98,12 +117,12 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                 (
                   'cloudImageParsingEnabled',
                   '云端图片识别',
-                  '你选择或分享的图片会发送至图片模型；请先检查图片内容。',
+                  '你选择或分享的图片可在发送后由图片模型直接读取。请先检查图片内容。',
                 ),
                 (
                   'captureAutoRecordEnabled',
                   '支付自动记账',
-                  '捕获支付后自动推断用途和分类并记账；仅金额冲突或疑似重复等情况留待处理。',
+                  '交易依据完整时自动记账。依据不足、金额冲突或疑似重复的交易留待确认。',
                 ),
                 (
                   'activeInputAutoSaveEnabled',
@@ -111,22 +130,35 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                   '文字、语音和已完成的图片凭证由 AI 补全后直接记账，可撤销。关闭后先展示草稿。',
                 ),
               ])
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(option.$2),
-                  subtitle: Text(option.$3),
-                  value:
-                      const {
-                        'captureAutoRecordEnabled',
-                        'activeInputAutoSaveEnabled',
-                      }.contains(option.$1)
-                      ? c.settings[option.$1] != false
-                      : c.settings[option.$1] == true,
-                  onChanged: busy
-                      ? null
-                      : (value) =>
-                            run(() => c.updateSettings({option.$1: value})),
-                ),
+                if (option.$1 != 'screenCloudVisionEnabled' ||
+                    c.capabilities['screenCloudVisionSupported'] == true)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(option.$2),
+                    subtitle: Text(option.$3),
+                    value:
+                        const {
+                          'captureAutoRecordEnabled',
+                          'activeInputAutoSaveEnabled',
+                        }.contains(option.$1)
+                        ? c.settings[option.$1] != false
+                        : c.settings[option.$1] == true,
+                    onChanged: busy
+                        ? null
+                        : (value) => run(() async {
+                            if (value &&
+                                option.$1 == 'screenCloudVisionEnabled' &&
+                                !await confirmCloudReceiptVision(
+                                  context,
+                                  serviceName: visionService,
+                                )) {
+                              return;
+                            }
+                            if (mounted) {
+                              await c.updateSettings({option.$1: value});
+                            }
+                          }),
+                  ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('语音转写授权与模型'),
@@ -159,20 +191,14 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                           labelText:
                               '${const {'recognitionTextModel': '文字', 'recognitionVisionModel': '图片', 'recognitionReviewModel': '复核'}[entry.key]}服务',
                         ),
-                        items:
-                            const {
-                                  '': '复用当前 AI 服务',
-                                  'chatgpt': 'ChatGPT',
-                                  'deepseek': 'DeepSeek',
-                                  'qwen': '通义千问 / 百炼',
-                                }.entries
-                                .map(
-                                  (e) => DropdownMenuItem(
-                                    value: e.key,
-                                    child: Text(e.value),
-                                  ),
-                                )
-                                .toList(),
+                        items: _recognitionServiceNames.entries
+                            .map(
+                              (e) => DropdownMenuItem(
+                                value: e.key,
+                                child: Text(e.value),
+                              ),
+                            )
+                            .toList(),
                         onChanged: busy
                             ? null
                             : (value) => setState(
@@ -260,7 +286,8 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                 label: const Text('测试文字识别（不入账）'),
               ),
               OutlinedButton.icon(
-                onPressed: busy
+                onPressed:
+                    busy || c.settings['cloudImageParsingEnabled'] != true
                     ? null
                     : () => run(() async {
                         final image = await c.command(
@@ -289,7 +316,7 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
                         }
                       }),
                 icon: const Icon(Icons.image_outlined),
-                label: const Text('选择图片测试（不入账）'),
+                label: const Text('选择图片测试（发送图片，不入账）'),
               ),
               if (busy)
                 const Padding(
