@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../core/ledger_controller.dart';
 import '../../core/models.dart';
@@ -21,8 +23,41 @@ class LedgerScreen extends StatefulWidget {
 class _LedgerScreenState extends State<LedgerScreen> {
   bool searching = false;
   late final search = TextEditingController(text: widget.controller.keyword);
+  // Retain the shown receipt after the timer ends so a refresh can't show it again.
+  RecognitionSaveReceipt? _lastShownRecognitionSave;
+  Timer? _recognitionNoticeTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _updateRecognitionNotice();
+  }
+
+  @override
+  void didUpdateWidget(covariant LedgerScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _updateRecognitionNotice();
+  }
+
+  void _updateRecognitionNotice() {
+    final controller = widget.controller;
+    final receipt = controller.lastRecognitionSave;
+    if (identical(receipt, _lastShownRecognitionSave) ||
+        (receipt != null && !controller.canUndoRecognitionSave)) {
+      return;
+    }
+    _lastShownRecognitionSave = receipt;
+    _recognitionNoticeTimer?.cancel();
+    _recognitionNoticeTimer = receipt == null
+        ? null
+        : Timer(const Duration(seconds: 8), () {
+            setState(() => _recognitionNoticeTimer = null);
+          });
+  }
+
   @override
   void dispose() {
+    _recognitionNoticeTimer?.cancel();
     search.dispose();
     super.dispose();
   }
@@ -84,7 +119,10 @@ class _LedgerScreenState extends State<LedgerScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      RecognitionSaveNotice(controller: c),
+                      RecognitionSaveNotice(
+                        controller: c,
+                        visible: _recognitionNoticeTimer != null,
+                      ),
                       SectionSurface(
                         padding: const EdgeInsets.fromLTRB(18, 2, 18, 16),
                         child: Column(

@@ -7,6 +7,37 @@ import '../../core/ai/model_reasoning.dart';
 import '../../ui/assistant_content.dart';
 import '../../ui/common.dart';
 
+String? assistantReasoningDuration(
+  List<Map<String, dynamic>> parts, {
+  bool active = false,
+}) {
+  if (parts.isEmpty) return null;
+  var total = 0;
+  for (final part in parts) {
+    final elapsed = _elapsed(part, active: active);
+    if (elapsed == null) return null;
+    total += elapsed;
+  }
+  return _duration(total);
+}
+
+int? _elapsed(Map<String, dynamic> part, {required bool active}) {
+  final start = part['startedAt'] as int?;
+  final end = part['endedAt'] as int?;
+  final receiving = active && part['status'] == 'streaming';
+  if (start == null || end == null && !receiving) return null;
+  return ((end ?? DateTime.now().millisecondsSinceEpoch) - start).clamp(
+    0,
+    1 << 52,
+  );
+}
+
+String _duration(int ms) {
+  if (ms < 1000) return '不足 1 秒';
+  final seconds = ms ~/ 1000;
+  return seconds < 60 ? '$seconds 秒' : '${seconds ~/ 60} 分 ${seconds % 60} 秒';
+}
+
 class AssistantReasoning extends StatefulWidget {
   const AssistantReasoning({
     super.key,
@@ -54,23 +85,6 @@ class _AssistantReasoningState extends State<AssistantReasoning> {
     super.dispose();
   }
 
-  int? _elapsed(Map<String, dynamic> part) {
-    final start = part['startedAt'] as int?;
-    final end = part['endedAt'] as int?;
-    final receiving = widget.active && part['status'] == 'streaming';
-    if (start == null || end == null && !receiving) return null;
-    return ((end ?? DateTime.now().millisecondsSinceEpoch) - start).clamp(
-      0,
-      1 << 52,
-    );
-  }
-
-  String _duration(int ms) {
-    if (ms < 1000) return '不足 1 秒';
-    final seconds = ms ~/ 1000;
-    return seconds < 60 ? '$seconds 秒' : '${seconds ~/ 60} 分 ${seconds % 60} 秒';
-  }
-
   @override
   Widget build(BuildContext context) {
     if (widget.parts.isEmpty) return const SizedBox.shrink();
@@ -93,10 +107,9 @@ class _AssistantReasoningState extends State<AssistantReasoning> {
         : empty
         ? '未返回内容'
         : '已完成';
-    final durations = widget.parts.map(_elapsed).whereType<int>().toList();
-    final duration = durations.length == widget.parts.length
-        ? _duration(durations.fold<int>(0, (sum, value) => sum + value))
-        : '耗时未记录';
+    final duration =
+        assistantReasoningDuration(widget.parts, active: widget.active) ??
+        '耗时未记录';
     final configurations = <String>{};
     for (final part in widget.parts) {
       final model = part['model'] as String?;
@@ -107,32 +120,24 @@ class _AssistantReasoningState extends State<AssistantReasoning> {
       ].join(' · ');
       if (description.isNotEmpty) configurations.add(description);
     }
-    final colors = Theme.of(context).colorScheme;
-    return ExpansionTile(
+    final theme = Theme.of(context);
+    final metadataStyle = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
+    return Column(
       key: const ValueKey('assistant-reasoning'),
-      expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
-      tilePadding: EdgeInsets.zero,
-      childrenPadding: const EdgeInsets.only(bottom: 16),
-      leading: Icon(
-        streaming
-            ? Icons.psychology_outlined
-            : interrupted
-            ? Icons.pause_circle_outline
-            : Icons.check_circle_outline,
-        size: 20,
-        color: colors.onSurfaceVariant,
-      ),
-      title: Text(
-        '$title · $status',
-        style: Theme.of(context).textTheme.bodyMedium,
-      ),
-      subtitle: Text(
-        [
-          '${widget.parts.length > 1 ? '${widget.parts.length} 次模型响应 · ' : ''}$duration',
-          ...configurations,
-        ].join('\n'),
-      ),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        Text('$title · $status', style: theme.textTheme.labelLarge),
+        const SizedBox(height: 4),
+        Text(
+          [
+            '${widget.parts.length > 1 ? '${widget.parts.length} 次模型响应 · ' : ''}$duration',
+            ...configurations,
+          ].join('\n'),
+          style: metadataStyle,
+        ),
+        const SizedBox(height: 8),
         for (var i = 0; i < widget.parts.length; i++)
           _part(context, widget.parts[i], i),
       ],
@@ -143,7 +148,7 @@ class _AssistantReasoningState extends State<AssistantReasoning> {
     final text = part['text'] as String? ?? '';
     final summary = part['kind'] == 'summary';
     final receiving = widget.active && part['status'] == 'streaming';
-    final elapsed = _elapsed(part);
+    final elapsed = _elapsed(part, active: widget.active);
     return Padding(
       key: ValueKey(part['id'] ?? part['messageId'] ?? index),
       padding: EdgeInsets.only(top: index == 0 ? 0 : 16),

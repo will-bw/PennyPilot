@@ -8,6 +8,7 @@ import 'package:pennypilot/core/ledger_repository.dart';
 import 'package:pennypilot/core/storage/assistant_attachment_store.dart';
 import 'package:pennypilot/features/chat/chat_screen.dart';
 import 'package:pennypilot/features/entry/entry_screen.dart';
+import 'package:pennypilot/features/ledger/ledger_screen.dart';
 import 'package:pennypilot/ui/theme.dart';
 
 import 'app_widget_test.dart' as app_test;
@@ -418,6 +419,51 @@ void main() {
       },
     );
   }
+
+  testWidgets('ledger auto-save notice expires and a new save can be undone', (
+    tester,
+  ) async {
+    final repository = EntryRepository(autoSave: true)
+      ..responses.addAll([
+        for (final index in [0, 1])
+          {
+            'transactions': [draft(index)],
+            'autoSaveEligible': true,
+          },
+      ]);
+    await app_test.pumpApp(tester, repository);
+    final ledger = find.byType(LedgerScreen);
+    final controller = tester.widget<LedgerScreen>(ledger).controller;
+    final notice = find.text('已自动记下 1 笔');
+    final undo = find.descendant(of: ledger, matching: find.text('撤销'));
+
+    await controller.recognizeInput(text: '盖饭 17 元');
+    await tester.pump();
+    expect(notice, findsOneWidget);
+    expect(undo, findsOneWidget);
+    await tester.pump(const Duration(seconds: 7));
+    await controller.refresh();
+    await tester.pump();
+    expect(notice, findsOneWidget);
+    await tester.pump(const Duration(seconds: 1));
+    expect(notice, findsNothing);
+    expect(undo, findsNothing);
+    expect(controller.transactions.single.merchant, '盖饭');
+
+    await app_test.chooseTab(tester, '统计');
+    await app_test.chooseTab(tester, '账本');
+    expect(notice, findsNothing);
+
+    await controller.recognizeInput(text: '地铁 17 元');
+    await tester.pump();
+    expect(notice, findsOneWidget);
+    await tester.tap(undo);
+    await tester.pumpAndSettle();
+    expect(notice, findsNothing);
+    expect(find.text('已撤销这次自动记账'), findsOneWidget);
+    expect(controller.transactions.single.merchant, '盖饭');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
     'manual entry opens directly while the assistant draft stays intact',

@@ -8,13 +8,17 @@ class RecognitionSaveNotice extends StatelessWidget {
     super.key,
     required this.controller,
     this.titlePrefix = '已自动记下',
+    this.visible = true,
   });
   final LedgerController controller;
   final String titlePrefix;
+  final bool visible;
 
   @override
   Widget build(BuildContext context) {
-    if (!controller.canUndoRecognitionSave) return const SizedBox.shrink();
+    if (!visible || !controller.canUndoRecognitionSave) {
+      return const SizedBox.shrink();
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: ListTile(

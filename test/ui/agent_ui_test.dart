@@ -23,7 +23,10 @@ class _AgentRepository extends TestLedgerRepository
       'status': 'awaiting_confirmation',
       'messages': [
         {'role': 'user', 'content': '检查预算'},
-        {'role': 'assistant', 'content': '已准备预算提案，等待核对。[依据 Q1]'},
+        <String, dynamic>{
+          'role': 'assistant',
+          'content': '已准备预算提案，等待核对。[依据 Q1]',
+        },
         {
           'role': 'tool',
           'tool_call_id': 'tool-1',
@@ -187,19 +190,56 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
-  testWidgets('execution evidence is accessible from the saved tool record', (
-    tester,
-  ) async {
-    await open(tester);
-    await tester.ensureVisible(find.text('执行记录 · 1 次工具调用'));
-    await tester.tap(find.text('执行记录 · 1 次工具调用'));
-    await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('第 1 步 · 依据 Q1'));
-    await tester.tap(find.text('第 1 步 · 依据 Q1'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('净支出：40.00 元'), findsOneWidget);
-    expect(find.textContaining('月预算：2,000.00 元'), findsOneWidget);
-  });
+  testWidgets(
+    'saved activity groups reasoning and tool evidence behind one summary',
+    (tester) async {
+      final repo = _AgentRepository();
+      final messages = (repo.state['session'] as Map)['messages'] as List;
+      messages[1]['parts'] = [
+        {
+          'type': 'reasoning',
+          'id': 'reasoning-1',
+          'kind': 'reasoning_content',
+          'text': '先核对本月的实际支出。',
+          'status': 'completed',
+          'startedAt': 1000,
+          'endedAt': 3000,
+          'model': 'deepseek-flash',
+          'effort': 'high',
+        },
+        {'type': 'receipt', 'status': 'complete', 'title': '账单识别结果'},
+      ];
+      await open(tester, repository: repo);
+      final summary = find.text('思考 2 秒 · 1 次调用');
+      final reasoning = find.text('先核对本月的实际支出。', findRichText: true);
+      final toolEvidence = find.text('第 1 步 · 依据 Q1');
+      final receipt = find.text('账单识别结果');
+      expect(summary, findsOneWidget);
+      final disclosure = find.ancestor(
+        of: summary,
+        matching: find.byType(ExpansionTile),
+      );
+      expect(tester.getSize(disclosure).height, 48);
+      expect(reasoning, findsNothing);
+      expect(find.textContaining('deepseek-flash'), findsNothing);
+      expect(toolEvidence, findsNothing);
+      expect(receipt, findsOneWidget);
+      expect(find.text('待你核对'), findsOneWidget);
+
+      await tester.ensureVisible(summary);
+      await tester.tap(summary);
+      await tester.pumpAndSettle();
+      expect(reasoning, findsOneWidget);
+      expect(find.textContaining('deepseek-flash'), findsOneWidget);
+      expect(receipt, findsOneWidget);
+      expect(find.text('回到最新'), findsNothing);
+      await tester.ensureVisible(toolEvidence);
+      await tester.tap(toolEvidence);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('净支出：40.00 元'), findsOneWidget);
+      expect(find.textContaining('月预算：2,000.00 元'), findsOneWidget);
+    },
+  );
   for (final layout in [
     (320.0, 1.5, Brightness.light),
     (768.0, 1.3, Brightness.dark),
@@ -435,8 +475,8 @@ void main() {
       await open(tester, repository: repo, width: 768);
       expect(find.text('已执行'), findsOneWidget);
       expect(find.text('确认执行'), findsNothing);
-      expect(find.text('执行记录 · 1 次工具调用'), findsNWidgets(2));
-      expect(find.text('执行记录 · 2 次工具调用'), findsNothing);
+      expect(find.text('1 次工具调用'), findsNWidgets(2));
+      expect(find.text('2 次工具调用'), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
