@@ -4,8 +4,69 @@ import com.pennypilot.app.data.db.entity.ParseRuleEntity
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
+import java.time.LocalDateTime
+import java.time.ZoneId
 
 class NotificationParserTest {
+    @Test
+    fun `wechat wallet labels supply an order only for an actual wechat receipt`() = runTest {
+        val order = "4200000000202611070000000001"
+        suspend fun parse(content: String, packageName: String = "com.tencent.mm", title: String = "微信支付") =
+            NotificationParser.parse(packageName, title, content, emptyList(), cloudParsingEnabled = false) { null }
+
+        val payment = "支付成功，实付18.00元，商户：样例咖啡店"
+        for (label in listOf("微信支付单号", "微信支付交易单号", "微信支付订单号")) {
+            val body = "$payment，$label：$order"
+            assertEquals(label, order, parse(body)?.orderId)
+            assertEquals(label, "样例咖啡店", parse(body)?.merchant)
+            assertNull(label, parse(body, title = "普通聊天"))
+            assertNull(label, parse(body, "com.eg.android.AlipayGphone", "支付宝")!!.orderId)
+        }
+        assertEquals(order, parse("$payment，商品说明：手冲咖啡，微信支付单号：$order")?.orderId)
+        assertNull(parse("$payment，备注：微信支付单号：$order")!!.orderId)
+        assertNull(parse("$payment，微信支付单号：123456789012")!!.orderId)
+        assertNull(parse("$payment，微信支付单号：$order，交易单号：4200000000202611070000000002"))
+        assertEquals("SHOP202611070123", parse("$payment，微信支付单号：$order，商户订单号：SHOP202611070123")?.orderId)
+    }
+
+    @Test
+    fun `unionpay records the unique visible transaction time after validating payment facts`() = runTest {
+        val postedAt = LocalDateTime.of(2026, 11, 7, 12, 0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val body = "支付成功，实付18.00元，商户：样例门店，交易单号：2026110700001234"
+        val time = "交易时间：2026-11-07 11:58:30"
+        suspend fun parse(content: String) = NotificationParser.parse("com.unionpay", "云闪付", content,
+            emptyList(), cloudParsingEnabled = false, observedAt = postedAt) { error("仅验证本地通知") }
+
+        val result = parse("$body，$time")!!
+        assertEquals(1800L, result.amountCents)
+        assertEquals("2026110700001234", result.orderId)
+        assertEquals(postedAt - 90_000, result.occurredAt)
+        assertEquals("通知·$time", result.fieldEvidence["occurredAt"])
+        assertEquals(result.occurredAt, parse("$body\n交易时间\n2026-11-07\n11:58:30")!!.occurredAt)
+        assertNull(parse("$body，$time".replace("支付成功", "支付失败")))
+
+        for (invalid in listOf("", "交易时间：11月7日 11:58:30", "交易时间：2026-02-30 11:58:30",
+                "交易时间：2026-11-07 12:00:01", "交易时间：2026-11-07 11:29:59",
+                "$time\n付款时间：2026-11-07 11:59:00", "备注：$time", "订单创建时间：2026-11-07 11:58:30")) {
+            val receipt = parse("$body\n$invalid")!!
+            assertNull(invalid, receipt.occurredAt)
+            assertFalse(invalid, "occurredAt" in receipt.fieldEvidence)
+        }
+    }
+
+    @Test
+    fun `refund notification only uses its own completion time`() = runTest {
+        val postedAt = LocalDateTime.of(2026, 11, 7, 12, 0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val body = "退款已到账\n退款金额：5元\n退款单号：RF2026110701234\n原支付时间：2026-11-07 11:45:00"
+        suspend fun parse(content: String) = NotificationParser.parse("com.unionpay", "退款提醒", content,
+            emptyList(), cloudParsingEnabled = false, observedAt = postedAt) { null }
+        assertNull(parse(body)!!.occurredAt)
+        val result = parse("$body\n退款到账时间：2026-11-07 11:58:30")!!
+        assertEquals("refund", result.businessKind)
+        assertEquals("RF2026110701234", result.orderId)
+        assertEquals(postedAt - 90_000, result.occurredAt)
+    }
+
     @Test
     fun `explicit transfer receipt works locally with cloud disabled`() = runTest {
         var calls = 0
@@ -280,6 +341,55 @@ class NotificationParserTest {
         val income = NotificationParser.parse("com.eg.android.AlipayGphone", "支付宝", body.replace("支出。", "收入。"),
             emptyList(), false) { null }!!
         assertEquals("INCOME", income.direction)
+    }
+
+    @Test
+    fun `Alipay automatic debit notice records the merchant and ignores loyalty points`() = runTest {
+        val body = "你在示例便利店有一笔18.50元的免密/自动扣款支付，点击领取18个支付宝积分。"
+        val result = NotificationParser.parse("com.eg.android.AlipayGphone", "交易提醒", body,
+            emptyList(), false) { null }!!
+        assertEquals(1850L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("示例便利店", result.merchant)
+        assertEquals("示例便利店", result.details.merchantName)
+        assertTrue(result.fieldEvidence.getValue("paymentStatus").contains("自动扣款支付"))
+        assertFalse(result.fieldEvidence.getValue("paymentStatus").contains("积分"))
+        assertNull(result.orderId)
+    }
+
+    @Test
+    fun `Alipay automatic debit requires a single completed transaction statement`() = runTest {
+        val pkg = "com.eg.android.AlipayGphone"
+        val debit = "你在示例便利店有一笔18.50元的免密/自动扣款支付"
+        val rule = ParseRuleEntity(appPackage = pkg, regexAmount = """(\d+)""")
+        val rejected = listOf("点击领取18个支付宝积分。", "$debit，实际未扣款", "$debit\n$debit",
+            "$debit，另有一笔18.50元的支出", "如果$debit", debit.replace("18.50", "-18.50"),
+            debit.replace("18.50", "1,8.50"), "$debit\n交易状态：处理中")
+        for (body in rejected) {
+            assertNull(NotificationParser.parse(pkg, "交易提醒", body, listOf(rule), true) {
+                fail("未完成或不明确的自动扣款不得回退识别"); null
+            })
+        }
+        assertNull(NotificationParser.parse("com.tencent.mm", "交易提醒", debit, emptyList(), false) { null })
+    }
+
+    @Test
+    fun `UnionPay assistant completed charge preserves actual funding tail without guessing the date`() = runTest {
+        val body = "本次消费1,234.56元，于7日9时5分完成，尾号为0000的银行卡。"
+        val result = NotificationParser.parse("com.unionpay", "银联支付助手", body, emptyList(), false) { null }!!
+        assertEquals(123456L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("银行卡（尾号 0000）", result.details.fundingAccount)
+        assertEquals("云闪付", result.details.paymentChannel)
+        assertNull(result.occurredAt)
+        val invalid = listOf(body.replace("完成", "处理中"), body.replace("消费", "退款受理"),
+            body + "另有一笔付款18元", body.replace("0000", "00000000"), body.replace("9时", "25时"))
+        for (sample in invalid) {
+            assertNull(NotificationParser.parse("com.unionpay", "银联支付助手", sample, emptyList(), true) {
+                fail("不能将未完成或冲突通知交给模型猜测"); null
+            })
+        }
+        assertNull(NotificationParser.parse("com.tencent.mm", "银联支付助手", body, emptyList(), false) { null })
     }
 
     @Test

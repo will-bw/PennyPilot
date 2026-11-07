@@ -12,8 +12,9 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], application = Application::class)
 class WechatOpaqueTransferReaderTest {
     private val snapshot = PaymentScreenReader.Snapshot(null, false, "empty_page", mapOf(
-        "visitedNodes" to 1, "hiddenNodes" to 1, "textNodes" to 0, "editableNodes" to 0,
-        "passwordNodes" to 0, "missingChildren" to 0, "foreignNodes" to 0))
+        "visitedNodes" to 1, "hiddenNodes" to 1, "textNodes" to 0, "hiddenTextNodes" to 0, "editableNodes" to 0,
+        "passwordNodes" to 0, "hiddenInputNodes" to 0, "missingChildren" to 0, "foreignNodes" to 0,
+        "unknownOwnerNodes" to 0))
     private fun line(text: String, left: Int, top: Int, right: Int, bottom: Int) =
         PaymentImageReader.OcrLine(text, Rect(left, top, right, bottom))
     // Coordinates transcribed from the 1264 x 2780 screenshot observed on the user's phone.
@@ -31,6 +32,9 @@ class WechatOpaqueTransferReaderTest {
         assertEquals(300L, parsed.amountCents)
         assertEquals("EXPENSE", parsed.direction)
         assertEquals("测试收款人", parsed.merchant)
+        assertEquals("测试收款人", parsed.details.payeeName)
+        assertEquals("本地OCR·收款人状态", parsed.details.fieldSources["payeeName"])
+        assertNull(parsed.details.merchantName)
         assertEquals("unknown", parsed.businessKind)
         assertEquals("transfer_sent", parsed.scene)
         assertTrue(parsed.fieldEvidence.values.all { it.startsWith("本地OCR") })
@@ -78,5 +82,7 @@ class WechatOpaqueTransferReaderTest {
         }
         assertFalse(WechatOpaqueTransferReader.accepts("com.tencent.mm", WechatOpaqueTransferReader.ACTIVITY,
             snapshot.copy(diagnostics = snapshot.diagnostics + ("missingChildren" to 1))))
+        assertFalse(WechatOpaqueTransferReader.accepts("com.tencent.mm", WechatOpaqueTransferReader.ACTIVITY,
+            snapshot.copy(diagnostics = snapshot.diagnostics + ("visitedNodes" to 50))))
     }
 }

@@ -145,7 +145,7 @@ class LedgerTransaction {
       const {
         'expense': '消费',
         'income': '收入',
-        'transfer': '账户转移',
+        'transfer': '资金转移',
         'receivable': '应收／垫付',
         'payable': '应付／偿还',
         'refund': '退款',

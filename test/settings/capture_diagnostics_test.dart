@@ -146,10 +146,15 @@ void main() {
       await tester.tap(find.text('已授权，服务尚未连接'));
       await tester.pumpAndSettle();
       expect(repository.calls, isEmpty);
+      await tester.tap(find.text('重新启用无障碍服务'));
+      await tester.pumpAndSettle();
+      expect(repository.calls.single.arguments, {'target': 'accessibility'});
+      await tester.ensureVisible(find.text('检查自启动与后台限制'));
       await tester.tap(find.text('检查自启动与后台限制'));
       await tester.pumpAndSettle();
-      expect(repository.calls.single.method, 'openSystemSettings');
-      expect(repository.calls.single.arguments, {'target': 'app'});
+      expect(repository.calls.last.method, 'openSystemSettings');
+      expect(repository.calls.last.arguments, {'target': 'app'});
+      expect(find.text('页面采集已就绪'), findsNothing);
     },
   );
 
@@ -167,6 +172,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('页面采集已就绪'), findsOneWidget);
     expect(find.text('已授权，服务尚未连接'), findsNothing);
+    expect(find.text('重新启用无障碍服务'), findsNothing);
     expect(find.text('检查自启动与后台限制'), findsNothing);
     expect(repository.calls, isEmpty);
   });
@@ -225,8 +231,8 @@ void main() {
     ),
     (
       'visual_required',
-      '此页面需要本地截图补充',
-      '微信仅提供了空节点。请在“识别与录入”中开启“本地支付截图补充”，再打开这张成功页；图片只在本机处理。',
+      '此页面需要截图识别',
+      '微信未提供可读取的文字。可以在“识别与自动录入”开启云端支付截图识别或本地支付截图补充，再打开这张成功页。',
     ),
     (
       'visual_not_receipt',
@@ -330,6 +336,7 @@ void main() {
       }),
       '检查 1 个节点 · 可读文字 0 处',
     );
+    expect(screenReadDiagnosticsSummary({'visualOcrTimeout': 1}), '本次截图识别超时');
   });
 
   for (final outcome in [('saved', '已保存识别结果'), ('not_receipt', '未识别到完整支付凭证')]) {

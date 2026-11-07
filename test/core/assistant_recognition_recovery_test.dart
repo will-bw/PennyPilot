@@ -134,6 +134,116 @@ void main() {
   setUpAll(sqfliteFfiInit);
 
   test(
+    'local image draft survives restart, never calls AI, and needs a selected date',
+    () async {
+      final now = DateTime(2026, 11, 7, 12);
+      final store = PortableLedgerStore(
+        databaseFactory: databaseFactoryFfi,
+        databasePath: inMemoryDatabasePath,
+        clock: () => now,
+      );
+      await store.invoke('updateSettings', {
+        'activeInputAutoSaveEnabled': true,
+        'cloudImageParsingEnabled': false,
+      });
+      final agentStore = MemoryAgentStore();
+      final credentials = _Credentials();
+      final attachments = _Attachments();
+      final aiInstances = <_RecognitionAi>[];
+      late CrossPlatformLedgerRepository repository;
+      late LedgerController controller;
+      Future<void> open() async {
+        final ai = _RecognitionAi(credentials, now);
+        aiInstances.add(ai);
+        repository = CrossPlatformLedgerRepository(
+          store: _BorrowedLedger(store),
+          agentStore: agentStore,
+          credentials: credentials,
+          ai: ai,
+          platformServices: _Platform(),
+          android: false,
+        );
+        controller = LedgerController(
+          repository: repository,
+          attachmentStore: attachments,
+          clock: () => now,
+        );
+        await controller.init();
+        await controller.loadAgentState();
+      }
+
+      await open();
+      addTearDown(() async {
+        controller.dispose();
+        await repository.close();
+        await store.close();
+      });
+      final receipt = <String, dynamic>{
+        'amount': 1800,
+        'type': 'EXPENSE',
+        'merchant': '测试餐馆',
+        'businessKind': 'expense',
+        'metadata': {
+          'operationId': 'local-receipt:test',
+          'receiptInput': 'local_image',
+        },
+      };
+      await controller.addLocalReceiptDraft(receipt);
+      expect((await store.snapshot()).transactions, isEmpty);
+      expect(controller.drafts.single.status, TxStatus.pending);
+      expect(controller.pendingRecognition, isTrue);
+      expect(controller.canSupplementRecognition, isFalse);
+      expect(attachments.image, isNull);
+      controller.dispose();
+      await repository.close();
+      await open();
+      expect(controller.error, isNull);
+      expect(controller.drafts, hasLength(1));
+      final restored = controller.drafts.single;
+      expect(restored.recognitionMetadata['receiptDateUnconfirmed'], isTrue);
+      expect(restored.status, TxStatus.pending);
+      expect(controller.canSupplementRecognition, isFalse);
+      final state = controller.messages
+          .expand((message) => message.parts)
+          .singleWhere((part) => part['type'] == 'recognition_state');
+      expect(state['localOnly'], isTrue);
+      expect(state['attachments'], isEmpty);
+      await expectLater(
+        controller.sendAssistantInput('这笔是午餐', isSupplement: true),
+        throwsA(isA<LedgerException>()),
+      );
+      await expectLater(
+        controller.addLocalReceiptDraft(receipt),
+        throwsA(isA<LedgerException>()),
+      );
+      controller.updateDraft(0, restored.copyWith(merchant: '编辑后的测试餐馆'));
+      await expectLater(
+        controller.saveDrafts(),
+        throwsA(isA<LedgerException>()),
+      );
+      expect((await store.snapshot()).transactions, isEmpty);
+      final reviewed = controller.drafts.single;
+      final actualDate = DateTime(2026, 10, 30);
+      controller.updateDraft(
+        0,
+        reviewed.copyWith(
+          occurredAt: actualDate,
+          metadataJson: jsonEncode({
+            ...reviewed.recognitionMetadata,
+            'receiptDateUnconfirmed': false,
+          }),
+        ),
+      );
+      expect(await controller.saveDrafts(), 1);
+      expect(
+        (await store.snapshot()).transactions.single.occurredAt,
+        actualDate,
+      );
+      expect(aiInstances.expand((ai) => ai.requests), isEmpty);
+    },
+  );
+
+  test(
     'an undone image record stays deleted after supplementing the same live run and reopening the controller',
     () async {
       final now = DateTime(2026, 11, 1, 12);

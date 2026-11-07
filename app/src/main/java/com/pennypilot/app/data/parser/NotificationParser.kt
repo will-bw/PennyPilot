@@ -14,6 +14,7 @@ object NotificationParser {
         content: String,
         rules: List<ParseRuleEntity>,
         cloudParsingEnabled: Boolean,
+        observedAt: Long? = null,
         cloudParse: suspend (String) -> NotificationParseResult?
     ): NotificationParseResult? {
         if (!PaymentTextParser.isNotificationCandidate(packageName, title, content)) return null
@@ -22,9 +23,15 @@ object NotificationParser {
         PaymentTextParser.parseNotification(packageName, title, content)?.let { local ->
             // 自定义规则仍可补充商户，不能覆盖本地凭证已确认的金额和方向。
             val custom = if (local.merchant == null) ParseRuleEngine.parse(text, matchingRules) else null
-            return if (custom != null && custom.amountCents == local.amountCents && custom.direction == local.direction) {
+            val receipt = if (custom != null && custom.amountCents == local.amountCents && custom.direction == local.direction) {
                 local.copy(merchant = custom.merchant?.takeIf { it.isNotBlank() })
             } else local
+            val refund = receipt.scene in setOf("refund_received", "red_packet_returned")
+            val time = observedAt?.let {
+                WalletReceiptDetailsParser.completedTime(PaymentTextParser.receiptFacts(text), refund, it)
+            } ?: return receipt
+            return receipt.copy(occurredAt = time.occurredAt,
+                fieldEvidence = receipt.fieldEvidence + ("occurredAt" to "通知·${time.evidence}"))
         }
         if (!PaymentTextParser.canUseFallback(text)) return null
         val result = ParseRuleEngine.parse(text, matchingRules)

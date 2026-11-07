@@ -19,13 +19,52 @@ class CaptureSemanticResolverTest {
     private fun parsed(merchant: String? = "小林", direction: String = "EXPENSE", scene: String? = null) =
         NotificationParseResult(1700, merchant, direction, scene = scene)
 
-    @Test fun `unknown completed transfer records money movement without counting consumption`() {
-        val result = CaptureSemanticResolver.resolve(parsed(), "com.tencent.mm", "转账成功 17元 收款方小林", context)
-        assertEquals("transfer", result.businessKind)
+    @Test fun `model other and historical other cannot mask specific current receipt`() {
+        val history = List(2) { CaptureSemanticHistory("小林", "EXPENSE", "expense", 2) }
+        val receipt = parsed().copy(details = PaymentReceiptDetails(productDescription = "鸡腿饭"))
+        val classified = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "支付成功17元",
+            context.copy(relatedHistory = history), PaymentProposal(businessKind = "expense", categoryId = 2))
+        assertEquals(1L, classified.categoryId)
+        assertFalse(classified.categoryIsFallback)
+        val sparse = CaptureSemanticResolver.resolve(parsed(), "com.tencent.mm", "支付成功17元",
+            context.copy(relatedHistory = history))
+        assertEquals(2L, sparse.categoryId)
+        assertTrue(sparse.categoryIsFallback)
+        assertFalse(sparse.assumptions.any { it.contains("稳定记账习惯") })
+    }
+
+    @Test fun `ordinary outgoing transfer to a counterparty is an expense with its actual funding account`() {
+        val receipt = parsed(scene = "transfer_sent").copy(details = PaymentReceiptDetails(
+            payeeName = "小林", remark = "今天还款", fundingAccount = "零钱通"))
+        val result = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "转账成功 17元\n收款方：小林\n付款方式：零钱通", context)
+        assertEquals("expense", result.businessKind)
         assertEquals(2L, result.categoryId)
-        assertEquals("微信", result.accountTag)
+        assertEquals("零钱通", result.accountTag)
         assertTrue(result.autoEligible)
-        assertTrue(result.assumptions.any { it.contains("不计入消费") })
+        assertEquals("备注：今天还款", result.note)
+    }
+
+    @Test fun `ordinary incoming transfer uses the known direction and unknown counterpart waits for review`() {
+        val receipt = parsed(direction = "INCOME", scene = "transfer_received")
+        val incoming = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "收到小林的转账17元", context)
+        assertEquals("income", incoming.businessKind)
+        assertTrue(incoming.autoEligible)
+        val incomplete = CaptureSemanticResolver.resolve(parsed(merchant = null, scene = "transfer_sent"),
+            "com.tencent.mm", "转账成功 17元", context)
+        assertEquals("unknown", incomplete.businessKind)
+        assertFalse(incomplete.autoEligible)
+        assertTrue(incomplete.assumptions.any { it.contains("用途待确认") })
+    }
+
+    @Test fun `old model defaults and transfer history cannot label a peer payment as an internal move`() {
+        val receipt = parsed(scene = "transfer_sent").copy(businessKind = "transfer")
+        val history = List(2) { CaptureSemanticHistory("小林", "EXPENSE", "transfer", 2) }
+        val oldDefault = PaymentProposal(businessKind = "transfer", note = "本人账户互转",
+            assumptions = listOf("不计入消费"))
+        val result = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "转账成功 17元", context.copy(relatedHistory = history), oldDefault)
+        assertEquals("expense", result.businessKind)
+        assertNull(result.note)
+        assertFalse(result.assumptions.any { it.contains("不计入消费") })
     }
 
     @Test fun `merchant consumption and salary classify without another confirmation`() {
@@ -38,12 +77,43 @@ class CaptureSemanticResolverTest {
         assertEquals("支付宝", salary.accountTag)
     }
 
+    @Test fun `receipt keywords match common equivalent category names in existing ledgers`() {
+        val categories = listOf(CaptureSemanticCategory(20, "其他", "EXPENSE"),
+            CaptureSemanticCategory(21, "餐饮美食", "EXPENSE"),
+            CaptureSemanticCategory(22, "交通出行", "EXPENSE"))
+        val context = CaptureSemanticContext(allowedCategories = categories)
+        val result = CaptureSemanticResolver.resolve(parsed("示例面馆"), "com.tencent.mm", "支付成功17元", context)
+        assertEquals(21L, result.categoryId)
+        assertFalse(result.categoryIsFallback)
+    }
+
     @Test fun `self transfers stored value and credit card repayment do not become expenses`() {
-        listOf("转给自己的支付宝", "本人账户互转", "余额充值", "信用卡还款成功").forEach { description ->
+        listOf("转给自己的支付宝", "转账给自己", "收款方：本人账户", "本人账户互转", "余额充值", "信用卡还款成功").forEach { description ->
             val result = CaptureSemanticResolver.resolve(parsed(), "com.tencent.mm", description, context)
             assertEquals(description, "transfer", result.businessKind)
             assertTrue(result.autoEligible)
         }
+    }
+
+    @Test fun `payment channel and status cannot establish a peer transfer counterparty`() {
+        listOf("微信支付", "转账成功", "对方").forEach { label ->
+            val result = CaptureSemanticResolver.resolve(parsed(label, scene = "transfer_sent"),
+                "com.tencent.mm", "转账成功17元", context)
+            assertEquals("unknown", result.businessKind)
+            assertFalse(result.autoEligible)
+        }
+    }
+
+    @Test fun `incoming transfer payee is not evidence of an external sender`() {
+        val receipt = parsed("示例收款人", "INCOME", "transfer_received")
+            .copy(details = PaymentReceiptDetails(payeeName = "示例收款人"))
+        val result = CaptureSemanticResolver.resolve(receipt, "com.tencent.mm", "转账到账17元", context)
+        assertEquals("unknown", result.businessKind)
+        assertFalse(result.autoEligible)
+        val withSender = CaptureSemanticResolver.resolve(receipt.copy(merchant = "示例付款人"),
+            "com.tencent.mm", "转账到账17元", context)
+        assertEquals("income", withSender.businessKind)
+        assertTrue(withSender.autoEligible)
     }
 
     @Test fun `loans advances reimbursements and refunds retain their accounting meaning`() {

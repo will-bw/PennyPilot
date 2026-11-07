@@ -256,6 +256,55 @@ Future<void> supplement(WidgetTester tester, String text) async {
 }
 
 void main() {
+  testWidgets('a receipt draft without a date requires using the date picker', (
+    tester,
+  ) async {
+    final repository = EntryRepository(autoSave: true);
+    final controller = await openAssistant(tester, repository);
+    await controller.addLocalReceiptDraft({
+      'amount': 1800,
+      'type': 'EXPENSE',
+      'merchant': '测试截图商家',
+      'businessKind': 'expense',
+      'metadata': {
+        'operationId': 'local-receipt:widget-test',
+        'receiptInput': 'local_image',
+      },
+    });
+    await tester.pumpAndSettle();
+    final draft = find.text('交易日期待选');
+    await tester.ensureVisible(draft);
+    await tester.tap(draft);
+    await tester.pumpAndSettle();
+    expect(find.byType(EntryScreen), findsOneWidget);
+    await tester.tap(find.text('完成核对'));
+    await tester.pumpAndSettle();
+    expect(find.text('请先选择这张凭证的实际交易日期。'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    final date = find.text('交易日期');
+    await Scrollable.ensureVisible(tester.element(date), alignment: .4);
+    await tester.pumpAndSettle();
+    await tester.tap(date);
+    await tester.pumpAndSettle();
+    final picker = find.byType(DatePickerDialog);
+    await tester.tap(find.descendant(of: picker, matching: find.text('22')));
+    await tester.tap(find.descendant(of: picker, matching: find.text('OK')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('完成核对'));
+    await tester.pumpAndSettle();
+    expect(find.byType(EntryScreen), findsNothing);
+    expect(controller.drafts.single.occurredAt, DateTime(2026, 10, 22));
+    expect(
+      controller.drafts.single.recognitionMetadata['receiptDateUnconfirmed'],
+      isFalse,
+    );
+    expect(
+      repository.calls.where((call) => call.method == 'saveTransactions'),
+      isEmpty,
+    );
+  });
+
   setUpAll(app_test.loadScreenshotFonts);
 
   testWidgets(

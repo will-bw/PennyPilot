@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
+import android.os.SystemClock
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pennypilot.app.data.db.AppDatabase
@@ -22,6 +23,8 @@ import com.pennypilot.app.data.settings.AppPreferences
 import com.pennypilot.app.domain.model.TxType
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.*
@@ -46,12 +49,13 @@ class CaptureRichContextTest {
     private var calls = 0
     private var messages: List<Message> = emptyList()
     private var duringRequest: (suspend () -> Unit)? = null
+    private var modelReply = """{"valid":true,"amount_cents":1800,"direction":"EXPENSE","currency":"CNY","payment_status":"COMPLETED","amount_evidence":"18.00元","direction_evidence":"支付成功","status_evidence":"支付成功","business_kind":"expense","category_id":2,"note":"午餐"}"""
     private val cloud = object : LLMClient {
         override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String {
             calls++
             this@CaptureRichContextTest.messages = messages
             duringRequest?.also { duringRequest = null }?.invoke()
-            return """{"valid":true,"amount_cents":1800,"direction":"EXPENSE","currency":"CNY","payment_status":"COMPLETED","amount_evidence":"18.00元","direction_evidence":"支付成功","status_evidence":"支付成功","business_kind":"expense","category_id":2,"note":"午餐"}"""
+            return modelReply
         }
         override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("unused")
     }
@@ -205,5 +209,159 @@ class CaptureRichContextTest {
         assertTrue(store.pending().isEmpty())
         assertEquals(2, calls)
         assertEquals(1, database.backupDao().transactions().size)
+    }
+
+    @Test fun `already verified receipt accepts category without another financial extraction`() = fixture {
+        val original = receipt().copy(merchant = "计划经营店", details = PaymentReceiptDetails(merchantName = "计划经营店"))
+        modelReply = """{"business_kind":"expense","category_id":2,"note":"牛肉面","amount_cents":9900,"direction":"INCOME","merchant":"编造的名称"}"""
+        assertTrue(processor.processScreen("com.tencent.mm", original, "verified-semantic", now, LedgerRevision.current))
+        val before = database.backupDao().transactions().single()
+        assertEquals(1L, before.categoryId)
+        assertTrue(processor.processRecognitionTask(store.pending().single().id))
+        val after = database.backupDao().transactions().single()
+        assertEquals(before.id, after.id)
+        assertEquals(1800L, after.amount)
+        assertEquals(TxType.EXPENSE, after.type)
+        assertEquals("计划经营店", after.merchant)
+        assertEquals(2L, after.categoryId)
+        assertEquals("牛肉面", after.note)
+        assertEquals(original.orderId, database.transactionDao().captureEvidenceByKey("verified-semantic")!!.orderId)
+    }
+
+    @Test fun `semantic only reply never records an unverified candidate`() = fixture {
+        modelReply = """{"business_kind":"expense","category_id":2,"note":"午餐"}"""
+        processor.processUnrecognizedScreen("com.tencent.mm", "支付成功\n实付18.00元\n完成",
+            "unverified-semantic", now, LedgerRevision.current)
+        val queued = store.pending().single()
+        assertNull(queued.semanticFingerprint)
+        assertTrue(processor.processRecognitionTask(queued.id))
+        assertEquals(1, calls)
+        assertTrue(database.backupDao().transactions().isEmpty())
+    }
+
+    @Test fun `generic reply is one attempt and cannot block richer local classification`() = fixture {
+        modelReply = """{"business_kind":"expense","category_id":1,"note":"已有用途摘要"}"""
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(), "generic-semantic", now, LedgerRevision.current))
+        assertTrue(processor.processRecognitionTask(store.pending().single().id))
+        val generic = database.backupDao().transactions().single()
+        assertEquals(1L, generic.categoryId)
+        val metadata = Json.parseToJsonElement(generic.metadataJson!!).jsonObject
+        assertTrue(metadata.containsKey("semanticAttemptedFingerprint"))
+        assertFalse(metadata.containsKey("semanticEvidenceFingerprint"))
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(), "generic-semantic", now + 100, LedgerRevision.current))
+        assertTrue(store.pending().isEmpty())
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(true), "generic-semantic", now + 200, LedgerRevision.current))
+        val upgraded = database.backupDao().transactions().single()
+        assertEquals(generic.id, upgraded.id)
+        assertEquals(2L, upgraded.categoryId)
+        assertEquals(generic.note, upgraded.note)
+        assertTrue(processor.processRecognitionTask(store.pending().single().id))
+        assertEquals(2L, database.backupDao().transactions().single().categoryId)
+    }
+
+    @Test fun `later sparse order alias cannot erase specific category`() = fixture {
+        preferences.setScreenCloudParsingEnabled(false)
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(true), "rich-order-alias", now, LedgerRevision.current))
+        val rich = database.backupDao().transactions().single()
+        assertEquals(2L, rich.categoryId)
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(), "sparse-order-alias", now + 100, LedgerRevision.current))
+        val replay = database.backupDao().transactions().single()
+        assertEquals(rich.id, replay.id)
+        assertEquals(rich.categoryId, replay.categoryId)
+    }
+
+    @Test fun `legacy generic model completion is retried on the same verified receipt once`() = fixture {
+        modelReply = """{"business_kind":"expense","category_id":1}"""
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(), "legacy-generic", now, LedgerRevision.current))
+        val queued = store.pending().single()
+        assertTrue(processor.processRecognitionTask(queued.id))
+        val before = database.backupDao().transactions().single()
+        val metadata = Json.parseToJsonElement(before.metadataJson!!).jsonObject.toMutableMap()
+        metadata.remove("semanticAttemptedFingerprint")
+        metadata.remove("semanticCategoryFallback")
+        metadata["semanticEvidenceFingerprint"] = JsonPrimitive(queued.semanticFingerprint!!)
+        database.transactionDao().update(before.copy(metadataJson = JsonObject(metadata).toString()))
+
+        modelReply = """{"business_kind":"expense","category_id":2,"note":"午餐"}"""
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(), "legacy-generic", now + 100, LedgerRevision.current))
+        assertTrue(processor.processRecognitionTask(store.pending().single().id))
+        val upgraded = database.backupDao().transactions().single()
+        assertEquals(before.id, upgraded.id)
+        assertEquals(2L, upgraded.categoryId)
+        assertTrue(processor.processScreen("com.tencent.mm", receipt(), "legacy-generic", now + 200, LedgerRevision.current))
+        assertTrue(store.pending().isEmpty())
+        assertEquals(2, calls)
+    }
+
+    @Test fun `uncertain model or replay cannot downgrade an already verified income kind`() = fixture {
+        database.categoryDao().insert(CategoryEntity(id = 3, name = "其他", icon = "", colorIndex = 0, type = TxType.INCOME, sortOrder = 0))
+        modelReply = """{"business_kind":"unknown","category_id":null}"""
+        val income = NotificationParseResult(1800, "示例付款方", "INCOME", businessKind = "income")
+        assertTrue(processor.processScreen("com.tencent.mm", income, "known-income", now, LedgerRevision.current))
+        assertTrue(processor.processScreen("com.tencent.mm", income.copy(businessKind = "unknown"),
+            "known-income", now + 100, LedgerRevision.current))
+        assertEquals("income", database.backupDao().transactions().single().businessKind)
+        assertTrue(processor.processRecognitionTask(store.pending().single().id))
+        val stored = database.backupDao().transactions().single()
+        assertEquals(-1800L, stored.amount)
+        assertEquals("income", stored.businessKind)
+        val metadata = Json.parseToJsonElement(stored.metadataJson!!).jsonObject
+        assertEquals(JsonPrimitive("income"), metadata["semanticBusinessKind"])
+    }
+
+    @Test fun `local checkout description affects local category but is never included in cloud context`() = fixture {
+        val base = receipt()
+        val withCheckout = base.copy(details = base.details.copy(context = listOf(
+            PaymentReceiptContext("商品名称", "鸡腿饭", CheckoutContext.LOCAL_SOURCE),
+            PaymentReceiptContext("商品规格", "份量大", "页面"))))
+        assertTrue(processor.processScreen("com.tencent.mm", withCheckout, "checkout-local", now, LedgerRevision.current))
+        assertEquals(2L, database.backupDao().transactions().single().categoryId)
+        val queued = store.pending().single()
+        assertEquals(listOf("份量大"), queued.receipt!!.context.map { it.value })
+        assertTrue(processor.processRecognitionTask(queued.id))
+        assertTrue(messages.last().content.contains("份量大"))
+        assertFalse(messages.last().content.contains("鸡腿饭"))
+        assertFalse(messages.last().content.contains(CheckoutContext.LOCAL_SOURCE))
+        assertTrue(database.backupDao().transactions().single().metadataJson!!.contains("鸡腿饭"))
+    }
+
+    @Test fun `live verified notification enriches local checkout without giving its text to notification AI`() = fixture {
+        val notice = walletNoticeWithCheckout()
+        val arrival = CheckoutContext.LiveNotification(now, SystemClock.elapsedRealtime())
+        processor.processNotification(notice, LedgerRevision.current, arrival)
+        val saved = database.backupDao().transactions().single()
+        assertEquals(1800L, saved.amount)
+        assertTrue(saved.metadataJson!!.contains("本机订单牛肉面"))
+        val task = store.pending().single()
+        assertFalse(task.text.contains("本机订单牛肉面"))
+        assertTrue(task.receipt!!.context.none { it.source == CheckoutContext.LOCAL_SOURCE })
+        assertTrue(processor.processRecognitionTask(task.id))
+        assertFalse(messages.last().content.contains("本机订单牛肉面"))
+        assertEquals(saved.id, database.backupDao().transactions().single().id)
+    }
+
+    @Test fun `recovered or page disabled notification keeps normal independent capture`() = fixture {
+        val notice = walletNoticeWithCheckout()
+        processor.processNotification(notice, LedgerRevision.current)
+        val before = database.backupDao().transactions().single()
+        assertFalse(before.metadataJson!!.contains("本机订单牛肉面"))
+        preferences.setScreenCaptureEnabled(false)
+        val arrival = CheckoutContext.LiveNotification(now, SystemClock.elapsedRealtime())
+        processor.processNotification(notice.copy(notificationKey = "checkout-page-disabled"), LedgerRevision.current, arrival)
+        val after = database.backupDao().transactions().single()
+        assertEquals(before.id, after.id)
+        assertFalse(after.metadataJson!!.contains("本机订单牛肉面"))
+    }
+
+    private fun walletNoticeWithCheckout(): CapturedNotification {
+        val wallet = "com.tencent.mm"
+        val order = "CHECKOUT202611070123"
+        val elapsed = SystemClock.elapsedRealtime()
+        processor.checkoutContext.remember(CheckoutContext.Preview("com.sankuai.meituan", order, 1800L, "示例经营部",
+            listOf(PaymentReceiptContext("商品名称", "本机订单牛肉面", CheckoutContext.LOCAL_SOURCE))),
+            LedgerRevision.current, elapsed - 1_000L)
+        processor.checkoutContext.onWindowChanged(wallet, LedgerRevision.current, elapsed - 500L, now - 500L)
+        return CapturedNotification(wallet, "checkout-live", now, "微信支付",
+            "支付成功\n实付18.00元\n商户名称：示例经营部\n商户订单号：$order")
     }
 }

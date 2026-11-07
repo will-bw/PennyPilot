@@ -88,6 +88,9 @@ class PaymentScreenSession {
 
     fun evidence(eventKey: String): NotificationParseResult? = windows.values.firstOrNull { it.key == eventKey }?.receipt
 
+    fun handledReceiptKey(packageName: String, windowId: Int): String? =
+        windows["$packageName:$windowId"]?.takeIf { it.handledReceipt != null }?.key
+
     fun markHandled(eventKey: String) {
         windows.values.firstOrNull { it.key == eventKey }?.apply {
             handledReceipt = receipt

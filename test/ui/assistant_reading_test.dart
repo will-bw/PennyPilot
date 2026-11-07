@@ -11,10 +11,20 @@ import 'package:pennypilot/ui/theme.dart';
 
 import 'test_ledger_repository.dart';
 
+const _imageBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+
 class _ReadingRepository extends TestLedgerRepository
     implements AgentSessionRepository {
-  _ReadingRepository({bool withHistory = false}) {
-    (data['settings'] as Map)['cloudImageParsingEnabled'] = true;
+  _ReadingRepository({
+    bool withHistory = false,
+    bool cloudImages = true,
+    this.receiptImage,
+  }) {
+    (data['settings'] as Map)['cloudImageParsingEnabled'] = cloudImages;
+    if (receiptImage != null) {
+      (data['capabilities'] as Map)['localReceiptImageSupported'] = true;
+    }
     if (withHistory) {
       (state['session'] as Map)['messages'] = <Map<String, dynamic>>[
         for (var i = 0; i < 18; i++) ...[
@@ -30,6 +40,7 @@ class _ReadingRepository extends TestLedgerRepository
     }
   }
 
+  final Map<String, dynamic>? receiptImage;
   final pending = Completer<Map<String, dynamic>>();
   final state = <String, dynamic>{
     'session': {
@@ -56,12 +67,8 @@ class _ReadingRepository extends TestLedgerRepository
     }
     if (method == 'pickRecognitionImage') {
       calls.add((method: method, arguments: arguments));
-      return {
-        'base64':
-            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=',
-        'mimeType': 'image/png',
-        'name': '测试凭证',
-      };
+      if (receiptImage != null) return receiptImage;
+      return {'base64': _imageBase64, 'mimeType': 'image/png', 'name': '测试凭证'};
     }
     return super.invoke(method, arguments);
   }
@@ -392,10 +399,21 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('choosing an image keeps the keyboard closed and draft intact', (
+  testWidgets('cloud image keeps input and skips a stale local receipt', (
     tester,
   ) async {
-    final repository = _ReadingRepository();
+    final repository = _ReadingRepository(
+      receiptImage: {
+        'base64': _imageBase64,
+        'mimeType': 'image/png',
+        'name': '测试凭证',
+        'localReceipt': {
+          'amount': 1234,
+          'type': 'EXPENSE',
+          'merchant': '本机误读的测试人名',
+        },
+      },
+    );
     final result = await _open(tester, repository);
     await tester.enterText(_input, '这张凭证的用途说明');
     final inputFocus = tester.widget<TextField>(_input).focusNode!;
@@ -407,9 +425,51 @@ void main() {
     expect(inputFocus.hasFocus, false);
     expect(result.controller.assistantDraft, '这张凭证的用途说明');
     expect(result.controller.assistantAttachment?['name'], '测试凭证');
+    expect(result.controller.assistantAttachment?['imageBase64'], _imageBase64);
+    expect(result.controller.drafts, isEmpty);
     expect(
       repository.calls.where(
         (call) => call.method == 'ask' || call.method == 'recognizeInput',
+      ),
+      isEmpty,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Android local receipt stays a draft without cloud permission', (
+    tester,
+  ) async {
+    final repository = _ReadingRepository(
+      cloudImages: false,
+      receiptImage: {
+        'localReceipt': {
+          'amount': 1234,
+          'type': 'EXPENSE',
+          'merchant': '示例商户',
+          'businessKind': 'expense',
+          'metadata': {'operationId': 'local-receipt:synthetic'},
+        },
+      },
+    );
+    final result = await _open(tester, repository);
+    await tester.tap(find.byTooltip('添加附件和更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('添加记账图片'));
+    await tester.pumpAndSettle();
+
+    final controller = result.controller;
+    expect(controller.assistantAttachment, isNull);
+    expect(controller.drafts.single.amountFen, 1234);
+    expect(controller.drafts.single.merchant, '示例商户');
+    expect(
+      controller.drafts.single.recognitionMetadata['receiptDateUnconfirmed'],
+      isTrue,
+    );
+    await expectLater(controller.saveDrafts(), throwsA(isA<LedgerException>()));
+    expect(
+      repository.calls.where(
+        (call) =>
+            {'ask', 'recognizeInput', 'saveTransactions'}.contains(call.method),
       ),
       isEmpty,
     );

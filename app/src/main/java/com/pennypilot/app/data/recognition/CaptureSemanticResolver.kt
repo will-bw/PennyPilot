@@ -86,12 +86,20 @@ data class CaptureSemanticResolution(
     val accountTag: String?,
     val note: String?,
     val assumptions: List<String>,
-    val autoEligible: Boolean = true
+    val autoEligible: Boolean = true,
+    val categoryIsFallback: Boolean = false
 )
 
 /** Classifies already verified money movements; never supplies amounts or payment state. */
 object CaptureSemanticResolver {
     val businessKinds = setOf("expense", "income", "transfer", "receivable", "payable", "refund")
+
+    internal fun isFallbackCategory(name: String) = name.trim() in
+        setOf("其他", "其他收入", "其他支出", "其它", "其它收入", "其它支出")
+    private val peerTransferScenes = setOf("transfer_sent", "transfer_received")
+    private val completedTransfer = Regex("转账(?:已)?(?:成功|完成|到账)|已转账|(?:已收到|收到)[^\\n，。；]{0,40}转账")
+    private val genericCounterparties = setOf("微信", "微信支付", "支付宝", "支付宝支付", "云闪付", "银行", "银行卡",
+        "本人", "自己", "对方", "收款方", "付款方", "商户", "未知", "转账成功", "支付成功", "付款成功")
 
     fun compatible(kind: String?, direction: String): Boolean = kind in businessKinds && when (kind) {
         "expense", "receivable" -> direction == "EXPENSE"
@@ -121,9 +129,21 @@ object CaptureSemanticResolver {
             bounded.receipt?.details.orEmpty().values +
             bounded.receipt?.context.orEmpty().map { "${it.label}：${it.value}" }).joinToString("\n")
         val current = currentMeaning(parsed, description)
-        val explicit = explicitMeaning(parsed, text, bounded.receipt?.scene)
+        val facts = PaymentTextParser.receiptFacts(text)
+        val scenes = setOfNotNull(parsed.scene, bounded.receipt?.scene)
+        val explicit = explicitMeaning(parsed, facts, scenes)
+        val isPeerTransfer = scenes.any(peerTransferScenes::contains) || completedTransfer.containsMatchIn(facts)
+        val payees = listOfNotNull(parsed.details.payeeName, bounded.receipt?.details?.get("payeeName")).map(String::trim)
+        val parties = listOf(merchant) + bounded.receipt?.context.orEmpty()
+            .filter { it.label == "交易对方" }.map { it.value.trim() }
+        // On an incoming receipt the displayed payee can be the account holder, not the sender.
+        val counterparties = if (parsed.direction == "EXPENSE") parties + payees else parties.filterNot(payees::contains)
+        val hasCounterparty = counterparties.any { it.trim().let { name -> name.isNotEmpty() && name !in genericCounterparties } }
         val stableKind = history.map { it.businessKind }.distinct().singleOrNull()
-            ?.takeIf { history.size >= 2 && compatible(it, parsed.direction) }
+            ?.takeIf { history.size >= 2 && it != "transfer" && compatible(it, parsed.direction) }
+        // The former model prompt used transfer as its default. Neither a model suggestion nor
+        // its copy in the parsed result establishes a transfer between the user's own accounts.
+        val modelKind = proposal?.businessKind?.takeIf { it != "transfer" && compatible(it, parsed.direction) }
         val kind = when {
             explicit?.first == "refund" -> {
                 assumptions += explicit.second
@@ -137,9 +157,13 @@ object CaptureSemanticResolver {
                 assumptions += explicit.second
                 explicit.first
             }
-            compatible(proposal?.businessKind, parsed.direction) -> {
+            current?.first == "transfer" -> {
+                assumptions += current.second
+                current.first
+            }
+            modelKind != null -> {
                 assumptions += "用途结合本次支付场景推断"
-                proposal!!.businessKind
+                modelKind
             }
             current != null -> {
                 assumptions += current.second
@@ -149,27 +173,33 @@ object CaptureSemanticResolver {
                 assumptions += "用途沿用“$merchant”最近 ${history.size} 笔同方向已确认记录"
                 stableKind
             }
-            compatible(parsed.businessKind, parsed.direction) -> parsed.businessKind
+            isPeerTransfer && hasCounterparty -> {
+                assumptions += "已识别交易对方，按本人的资金方向记录转账"
+                if (parsed.direction == "EXPENSE") "expense" else "income"
+            }
+            parsed.businessKind != "transfer" && compatible(parsed.businessKind, parsed.direction) -> parsed.businessKind
             else -> {
-                assumptions += "已记录资金变动；用途暂按资金转移，不计入消费或收入"
-                "transfer"
+                assumptions += "已保留金额与资金方向，交易用途待确认"
+                "unknown"
             }
         }
+        val applicableProposal = proposal?.takeUnless { it.businessKind == "transfer" && kind != "transfer" }
         val categories = bounded.allowedCategories.filter { it.direction == parsed.direction }
         fun allowed(id: Long?) = id?.takeIf { candidate -> categories.any { it.id == candidate } }
         val preferredCategory = allowed(preference?.categoryId)
-        val modelCategory = allowed(proposal?.categoryId)
+        val fallbackIds = categories.filter { isFallbackCategory(it.name) }.map { it.id }.toSet()
+        val modelCategory = allowed(applicableProposal?.categoryId)?.takeUnless(fallbackIds::contains)
         val historyCategory = history.map { it.categoryId }.distinct().singleOrNull()
-            ?.takeIf { history.size >= 2 }?.let(::allowed)
+            ?.takeIf { history.size >= 2 && it !in fallbackIds }?.let(::allowed)
         val inferredCategory = categories.firstOrNull { categoryMatches(it.name, description) }?.id
-        val categoryId = preferredCategory ?: modelCategory ?: historyCategory ?: inferredCategory
-            ?: categories.firstOrNull { it.name == "其他" || it.name == "其他收入" }?.id
+        val matchedCategory = preferredCategory ?: modelCategory ?: inferredCategory ?: historyCategory
+        val categoryId = matchedCategory ?: categories.firstOrNull { it.id in fallbackIds }?.id
             ?: categories.firstOrNull()?.id
         when {
             preferredCategory != null -> assumptions += "分类沿用你为“$merchant”设置的偏好"
             modelCategory != null -> assumptions += "分类结合支付内容推荐"
-            historyCategory != null -> assumptions += "分类沿用“$merchant”的稳定记账习惯"
             inferredCategory != null -> assumptions += "分类按商户和支付内容推断"
+            historyCategory != null -> assumptions += "分类沿用“$merchant”的稳定记账习惯"
             categoryId != null -> assumptions += "分类暂用“${categories.first { it.id == categoryId }.name}”"
         }
         val historyAccount = history.mapNotNull { it.accountTag?.takeIf(String::isNotBlank) }
@@ -177,7 +207,7 @@ object CaptureSemanticResolver {
         val receiptAccount = parsed.details.fundingAccount?.takeIf(String::isNotBlank)
         val account = receiptAccount ?: parsed.paymentMethod?.takeIf(String::isNotBlank)
             ?: preference?.accountTag?.takeIf(String::isNotBlank)?.take(100)
-            ?: proposal?.accountTag?.takeIf(String::isNotBlank)?.take(100)
+            ?: applicableProposal?.accountTag?.takeIf(String::isNotBlank)?.take(100)
             ?: historyAccount
             ?: when (packageName) {
                 "com.tencent.mm" -> "微信"
@@ -187,14 +217,12 @@ object CaptureSemanticResolver {
         if (receiptAccount == null && parsed.paymentMethod.isNullOrBlank() && account != null) {
             assumptions += "支付账户按本次渠道或已有习惯推断为“$account”"
         }
-        assumptions += proposal?.assumptions.orEmpty().take(8).map { it.take(200) }
+        assumptions += applicableProposal?.assumptions.orEmpty().take(8).map { it.take(200) }
         val note = receiptNote(
             parsed.details.productDescription ?: bounded.receipt?.details?.get("productDescription"),
-            parsed.details.remark ?: bounded.receipt?.details?.get("remark"), proposal?.note)
-            ?: if (kind == "transfer" && current == null && stableKind == null &&
-                !compatible(preference?.businessKind, parsed.direction) &&
-                !compatible(proposal?.businessKind, parsed.direction)) "用途暂按资金转移记录" else null
-        return CaptureSemanticResolution(kind, categoryId, account, note, assumptions.distinct().take(12))
+            parsed.details.remark ?: bounded.receipt?.details?.get("remark"), applicableProposal?.note)
+        return CaptureSemanticResolution(kind, categoryId, account, note, assumptions.distinct().take(12),
+            autoEligible = kind != "unknown", categoryIsFallback = matchedCategory == null)
     }
 
     internal fun receiptNote(productDescription: String?, remark: String?, summary: String? = null): String? {
@@ -211,14 +239,13 @@ object CaptureSemanticResolver {
         return main.take(499 - detailBudget) + "；" + details.take(detailBudget)
     }
 
-    private fun explicitMeaning(parsed: NotificationParseResult, text: String, capturedScene: String?): Pair<String, String>? {
-        val facts = PaymentTextParser.receiptFacts(text)
-        val scenes = setOfNotNull(parsed.scene, capturedScene)
+    private fun explicitMeaning(parsed: NotificationParseResult, facts: String, scenes: Set<String>): Pair<String, String>? {
         return when {
             parsed.direction == "INCOME" && (parsed.businessKind == "refund" || scenes.any { it in setOf("refund_received", "red_packet_returned") } ||
                 Regex("(?:退款|退回|退还)(?:已)?(?:成功|到账|完成)|款项已退回|已原路退回").containsMatchIn(facts)) ->
                 "refund" to "退款到账用于冲减支出"
-            "account_transfer" in scenes -> "transfer" to "已识别本人账户调拨，按资金转移记录"
+            "account_transfer" in scenes || PaymentTextParser.isAccountMovement(facts) ->
+                "transfer" to "已识别账户调拨、储值或还款，按资金转移记录"
             parsed.direction == "EXPENSE" && "red_packet_sent" in scenes -> "expense" to "发出红包按人情支出记录"
             parsed.direction == "INCOME" && "red_packet_received" in scenes -> "income" to "收到红包按收入记录"
             else -> null
@@ -231,8 +258,6 @@ object CaptureSemanticResolver {
         return when {
             incoming && (parsed.businessKind == "refund" || parsed.scene == "refund_received" || Regex("退款|退回|退还").containsMatchIn(text)) ->
                 meaning("refund", "退款到账用于冲减支出")
-            Regex("本人(?:账户|银行卡|互转)|自己(?:的)?(?:账户|银行卡|微信|支付宝)|转给自己|账户互转|银行卡转入|零钱充值|余额充值|余额宝|零钱通|提现|信用卡还款|还信用卡|账单还款|还款").containsMatchIn(text) ->
-                meaning("transfer", "本人账户调拨或还款按资金转移记录，不计消费")
             !incoming && Regex("借给|借出|代付|垫付").containsMatchIn(text) ->
                 meaning("receivable", "借出或垫付款按应收记录，不计消费")
             incoming && Regex("借入|借到|借款到账|贷款到账|放款").containsMatchIn(text) ->
@@ -245,8 +270,6 @@ object CaptureSemanticResolver {
                 meaning("expense", "发出红包或礼金按人情支出记录")
             parsed.scene == "red_packet_received" || incoming && Regex("红包|礼金").containsMatchIn(text) ->
                 meaning("income", "收到红包或礼金按收入记录")
-            !incoming && Regex("充值").containsMatchIn(text) && !Regex("话费|流量|游戏").containsMatchIn(text) ->
-                meaning("transfer", "储值充值先按资金转移记录，避免重复计算消费")
             !incoming && categoryKeywords.filterKeys { it !in setOf("工资", "红包", "人情") }
                 .values.any { it.containsMatchIn(text) } -> meaning("expense", "商户与支付内容表明是日常消费")
             parsed.scene == "merchant_payment" -> meaning("expense", "商户支付按消费记录")
@@ -268,5 +291,20 @@ object CaptureSemanticResolver {
         "工资" to Regex("工资|薪资|薪酬|代发|奖金")
     )
 
-    private fun categoryMatches(name: String, text: String) = categoryKeywords[name]?.containsMatchIn(text) == true
+    private fun categoryMatches(name: String, text: String): Boolean {
+        val key = when (val normalized = name.trim()) {
+            "餐饮美食", "餐饮食品", "饮食" -> "餐饮"
+            "交通出行", "出行交通" -> "交通"
+            "日用百货", "购物消费", "日常购物" -> "购物"
+            "住房缴费", "住房物业" -> "居住"
+            "休闲娱乐", "文娱休闲" -> "娱乐"
+            "医疗健康", "健康医疗" -> "医疗"
+            "教育学习", "学习教育" -> "教育"
+            "人情往来", "人情礼金" -> "人情"
+            "红包收入" -> "红包"
+            "工资收入", "工资薪酬" -> "工资"
+            else -> normalized
+        }
+        return categoryKeywords[key]?.containsMatchIn(text) == true
+    }
 }

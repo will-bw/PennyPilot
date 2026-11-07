@@ -24,6 +24,7 @@ import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
@@ -86,6 +87,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         preferences.setScreenCaptureEnabled(false)
         preferences.setScreenCloudParsingEnabled(false)
         preferences.setScreenVisualCaptureEnabled(false)
+        preferences.setScreenCloudVisionEnabled(false)
         preferences.setCloudImageParsingEnabled(false)
         preferences.setCaptureAutoRecordEnabled(false)
         CaptureDiagnosticStore.clear()
@@ -134,6 +136,7 @@ class PaymentAccessibilityServiceIntegrationTest {
             preferences.setNotificationCaptureEnabled(true)
             preferences.setScreenCloudParsingEnabled(false)
             preferences.setScreenVisualCaptureEnabled(false)
+            preferences.setScreenCloudVisionEnabled(false)
             preferences.setCloudImageParsingEnabled(false)
         }
         shadowOf(context.getSystemService(NotificationManager::class.java)).setNotificationsEnabled(true)
@@ -493,6 +496,29 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(0, cloudCalls)
     }
 
+    @Test fun `known transfer recipient still allows local OCR to complete the remark and funding account`() {
+        connect(enabled = true)
+        window.root = { screen("转账成功\n￥18.00\n收款方：示例收款人\n订单号：WX20261107000001\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        val original = rows().single()
+        assertEquals("示例收款人", receiptDetail("payeeName"))
+        assertNull(receiptDetail("remark"))
+
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = { "转账说明：分摊午餐\n付款方式：零钱" }
+        sendEvent()
+        awaitCondition("known recipient prevented OCR from reading other transfer fields") {
+            receiptDetail("remark") == "分摊午餐" && receiptDetail("fundingAccount") == "零钱"
+        }
+        val updated = rows().single()
+        assertEquals(original.captureEventKey, updated.captureEventKey)
+        assertEquals(original.amount, updated.amount)
+        assertEquals("示例收款人", receiptDetail("payeeName"))
+        assertEquals(0, cloudCalls)
+    }
+
     @Test fun `known product does not stop bounded OCR from collecting store and more items`() {
         connect(enabled = true)
         runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
@@ -643,6 +669,44 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(0, cloudCalls)
     }
 
+    @Test fun `background wallet redraw cannot invalidate foreground OCR`() {
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+                packageName = "com.eg.android.AlipayGphone", windowId = 9)
+            "￥18.00"
+        }
+        connect(enabled = true)
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(1800L, rows().single().amount)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `new foreground receipt preempts slow OCR in the preceding window`() {
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var started = false
+        var cancelled = false
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            started = true
+            try { awaitCancellation() } finally { cancelled = true }
+        }
+        connect(enabled = true)
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("old OCR not started") { started }
+        val wallet = "com.eg.android.AlipayGphone"
+        window.root = { screen("支付成功\n实付金额：29.00元\n商户名称：示例店\n完成", packageName = wallet, windowId = 9) }
+        sendEvent(packageName = wallet, windowId = 9)
+        awaitStatus("saved")
+        assertTrue(cancelled)
+        assertEquals(2900L, rows().single().amount)
+        assertEquals(0, cloudCalls)
+    }
+
     @Test fun `temporary screenshot failure recovers without another accessibility event`() {
         connect(enabled = true)
         runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
@@ -683,6 +747,140 @@ class PaymentAccessibilityServiceIntegrationTest {
         awaitCondition("delayed OCR was not recovered") { rows().size == 1 }
         assertEquals(2800L, rows().single().amount)
         assertEquals(2, ocrCalls)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `authorized receipt image retries on the saved transaction without OCR`() {
+        connect(enabled = true)
+        runBlocking {
+            preferences.setScreenVisualCaptureEnabled(true)
+            preferences.setScreenCloudVisionEnabled(true)
+        }
+        service.visualOcr = { error("Cloud vision must read the receipt image directly") }
+        val frame = Bitmap.createBitmap(80, 100, Bitmap.Config.ARGB_8888)
+        var captures = 0
+        service.visualCapture = { if (++captures == 1) null else frame }
+        var submitted = 0
+        service.receiptImageHandler = { _, image, key, _, _, imageOnly ->
+            assertFalse(imageOnly)
+            assertTrue(image.startsWith("data:image/jpeg;base64,"))
+            assertEquals(rows().single().id, database.transactionDao().captureEvidenceByKey(key)?.transactionId)
+            submitted++
+            true
+        }
+        window.root = { screen("转账成功\n¥18.00\n完成") }
+        sendEvent()
+        awaitCondition("the first frame was not attempted after saving") { captures == 1 && rows().size == 1 }
+        val originalId = rows().single().id
+        scheduler.advanceTimeBy(250)
+        awaitCondition("receipt image was not submitted") { submitted == 1 }
+        assertEquals(originalId, rows().single().id)
+        assertEquals(1800L, rows().single().amount)
+        assertTrue(frame.isRecycled)
+    }
+
+    @Test fun `opaque transfer sends the receipt without saving the OCR counterparty`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        runBlocking { preferences.setScreenCloudVisionEnabled(true) }
+        var submitted = 0
+        service.receiptImageHandler = { _, image, key, _, _, imageOnly ->
+            assertFalse(imageOnly)
+            assertTrue(image.startsWith("data:image/jpeg;base64,"))
+            assertEquals(rows().single().id, database.transactionDao().captureEvidenceByKey(key)?.transactionId)
+            submitted++
+            true
+        }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitCondition("verified opaque image was not submitted") { submitted == 1 }
+        val row = rows().single()
+        assertEquals(300L, row.amount)
+        assertEquals(TxStatus.PENDING, row.status)
+        assertNull(row.merchant)
+        assertFalse(row.metadataJson.orEmpty().contains("测试收款人"))
+    }
+
+    @Test fun `manual image permission cannot upload an automatic receipt`() {
+        connect(enabled = true)
+        runBlocking { preferences.setCloudImageParsingEnabled(true) }
+        var captures = 0
+        service.visualCapture = { captures++; null }
+        window.root = { screen("转账成功\n¥18.00\n完成") }
+        sendEvent()
+        awaitStatus("saved")
+        assertEquals(0, captures)
+        assertEquals(1, rows().size)
+    }
+
+    @Test fun `a success label alone cannot upload a cloud receipt image`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenCloudVisionEnabled(true) }
+        var captures = 0
+        service.visualCapture = { captures++; null }
+        window.root = { screen("支付成功") }
+        sendEvent()
+        awaitStatus("not_receipt")
+        assertEquals(0, captures)
+        assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `disabling cloud vision before submission preserves the locally confirmed payment only`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenCloudVisionEnabled(true) }
+        var frames = 0
+        service.visualCapture = {
+            preferences.setScreenCloudVisionEnabled(false)
+            frames++
+            Bitmap.createBitmap(80, 100, Bitmap.Config.ARGB_8888)
+        }
+        var submitted = 0
+        service.receiptImageHandler = { _, _, _, _, _, _ -> submitted++; true }
+        window.root = { screen("转账成功\n¥18.00\n完成") }
+        sendEvent()
+        awaitCondition("receipt image was not attempted") { frames == 1 }
+        drainRetries()
+        assertEquals(0, submitted)
+        assertEquals(1800L, rows().single().amount)
+    }
+
+    @Test fun `stalled amount OCR releases the frame and retries the same payment window`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        val frames = mutableListOf<Bitmap>()
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888).also(frames::add) }
+        service.visualOcr = { if (frames.size == 1) awaitCancellation() else "￥28.00" }
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("first frame was not captured") { frames.size == 1 }
+        scheduler.advanceTimeBy(2_501)
+        awaitCondition("first OCR did not time out") {
+            monitor.health.value.screenReadDiagnostics["visualOcrTimeout"] == 1
+        }
+        assertTrue(frames.single().isRecycled)
+        assertTrue(rows().isEmpty())
+        scheduler.advanceTimeBy(250)
+        awaitStatus("saved")
+        assertEquals(2, frames.size)
+        assertEquals(2800L, rows().single().amount)
+    }
+
+    @Test fun `amount recovered from OCR is discarded when visual authorization is revoked`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        var calls = 0
+        service.visualCapture = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }
+        service.visualOcr = {
+            calls++
+            preferences.setScreenVisualCaptureEnabled(false)
+            "￥28.00"
+        }
+        window.root = { screen("转账成功\n完成") }
+        sendEvent()
+        awaitCondition("visual OCR did not settle after revocation") {
+            calls == 1 && monitor.health.value.screenCaptureStatus == "not_receipt"
+        }
+        drainRetries()
+        assertTrue(rows().isEmpty())
         assertEquals(0, cloudCalls)
     }
 
@@ -784,6 +982,83 @@ class PaymentAccessibilityServiceIntegrationTest {
         sendEvent(packageName = "untrusted.app")
         drainRetries()
         assertEquals(priorReads, window.reads)
+        assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `active payment dialog can be read while the global root still points at the preceding window`() {
+        connect(enabled = true)
+        window.root = { screen("页面正在加载", windowId = 7) }
+        sendEvent()
+        awaitStatus("not_receipt")
+
+        val dialog = screen("转账成功\n¥18.00\n收款方：小明\n完成", windowId = 9)
+        window.setWindows(listOf(
+            applicationWindow(screen("页面正在加载", windowId = 7), focused = true),
+            applicationWindow(dialog, active = true)
+        ))
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, windowId = 9)
+
+        awaitStatus("saved")
+        assertEquals(1800L, rows().single().amount)
+        assertEquals("小明", receiptDetail("payeeName"))
+        assertTrue(window.screenshotWindows.isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `active wallet can be read while the global root still points at the shopping app`() {
+        connect(enabled = true)
+        val shopping = "com.sankuai.meituan"
+        val wallet = "com.eg.android.AlipayGphone"
+        window.root = { screen("正在打开支付", packageName = shopping, windowId = 7) }
+        sendEvent(packageName = shopping)
+        awaitStatus("not_receipt")
+
+        val receipt = screen("支付成功\n实付金额：18.00元\n商户名称：测试商户\n完成", packageName = wallet, windowId = 9)
+        window.setWindows(listOf(
+            applicationWindow(screen("正在打开支付", packageName = shopping, windowId = 7), focused = true),
+            applicationWindow(receipt, active = true)
+        ))
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = wallet, windowId = 9)
+        awaitStatus("saved")
+        assertEquals(1800L, rows().single().amount)
+        assertEquals("测试商户", receiptDetail("merchantName"))
+        assertTrue(window.screenshotWindows.isEmpty())
+    }
+
+    @Test fun `exact window lookup refuses background receipts and roots without matching ownership`() {
+        connect(enabled = true)
+        val previous = screen("页面正在加载", windowId = 7)
+        val receipt = screen("转账成功\n¥18.00\n完成", windowId = 9)
+        window.root = { screen("页面正在加载", windowId = 7) }
+        window.setWindows(listOf(applicationWindow(previous, active = true), applicationWindow(receipt, focused = true)))
+        sendEvent(windowId = 9)
+        awaitStatus("unreadable")
+
+        val wrongOwner = screen("转账成功\n¥18.00\n完成", packageName = "untrusted.app", windowId = 9)
+        window.setWindows(listOf(applicationWindow(wrongOwner, active = true)))
+        sendEvent(windowId = 9)
+        drainRetries()
+
+        window.root = { screen("系统面板", packageName = "com.android.systemui", windowId = 8) }
+        window.setWindows(listOf(applicationWindow(receipt, active = true)))
+        sendEvent(windowId = 9)
+        drainRetries()
+
+        assertTrue(rows().isEmpty())
+        assertTrue(window.screenshotWindows.isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `opaque capture targets the exact active dialog when global root is stale`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
+        window.root = { screen("页面正在加载", windowId = 7) }
+        val dialog = screen("", windowId = 9, visible = false)
+        window.setWindows(listOf(applicationWindow(dialog, active = true)))
+        sendEvent(windowId = 9, className = WechatOpaqueTransferReader.ACTIVITY)
+
+        awaitStatus("visual_unavailable")
+        assertEquals(listOf(9), window.screenshotWindows)
         assertTrue(rows().isEmpty())
     }
 
@@ -1278,7 +1553,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertTrue(rows().isEmpty())
     }
 
-    @Test fun `real phone empty root result is recovered locally and redraws save only one pending transfer`() {
+    @Test fun `empty root result is recovered locally and redraws save only one pending outbound payment`() {
         connect(enabled = true)
         allowOpaqueCapture()
         sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
@@ -1287,8 +1562,9 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(300L, row.amount)
         assertEquals(TxType.EXPENSE, row.type)
         assertEquals(TxStatus.PENDING, row.status)
-        assertEquals("transfer", row.businessKind)
+        assertEquals("expense", row.businessKind)
         assertTrue(row.metadataJson!!.contains("wechat-opaque-transfer"))
+        assertEquals("测试收款人", receiptDetail("payeeName"))
         repeat(2) {
             scheduler.advanceTimeBy(1_000)
             sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, className = "android.view.View")
@@ -1313,6 +1589,28 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertTrue(rows().isEmpty())
     }
 
+    @Test fun `blank wallet tree with foreign nodes or hidden input never reaches visual recovery`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        var screenshots = 0
+        service.visualCapture = { screenshots++; null }
+        for ((diagnostic, child) in listOf<Pair<String, () -> AccessibilityNodeInfo>>(
+            "foreignNodes" to { screen("", packageName = "other.app") },
+            "unknownOwnerNodes" to { screen("").apply { packageName = null } },
+            "hiddenInputNodes" to { screen("", visible = false).apply { isPassword = true } },
+            "hiddenInputNodes" to { screen("", visible = false).apply { className = "android.widget.EditText" } },
+            "hiddenTextNodes" to { screen("隐藏标签", visible = false) }
+        )) {
+            window.root = { screen("").apply { shadowOf(this).addChild(child()) } }
+            sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+            drainRetries()
+            assertEquals("empty_page", monitor.health.value.screenCaptureStatus)
+            assertEquals(1, monitor.health.value.screenReadDiagnostics[diagnostic])
+        }
+        assertEquals(0, screenshots)
+        assertTrue(rows().isEmpty())
+    }
+
     @Test fun `opaque capture uses the exact window and screenshot failure cannot reach OCR or database`() {
         connect(enabled = true)
         runBlocking { preferences.setScreenVisualCaptureEnabled(true) }
@@ -1324,6 +1622,24 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(listOf(7), window.screenshotWindows)
         assertEquals(0, ocrCalls)
         assertTrue(rows().isEmpty())
+    }
+
+    @Test fun `stalled opaque OCR times out and an unchanged wallet window can be retried`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        var calls = 0
+        service.opaqueVisualOcr = { if (++calls == 1) awaitCancellation() else opaqueLines() }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitCondition("first opaque OCR was not attempted") { calls == 1 }
+        scheduler.advanceTimeBy(2_501)
+        awaitCondition("opaque OCR did not time out") {
+            monitor.health.value.screenReadDiagnostics["visualOcrTimeout"] == 1
+        }
+        assertTrue(rows().isEmpty())
+        scheduler.advanceTimeBy(250)
+        awaitStatus("saved")
+        assertEquals(2, calls)
+        assertEquals(300L, rows().single().amount)
     }
 
     @Test fun `leaving the opaque window or revoking visual consent discards in flight OCR`() {
@@ -1394,6 +1710,113 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(400L, rows().single().amount)
     }
 
+    @Test fun `fresh opaque direct merchant uses its wallet id to deduplicate across windows`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        window.root = { screen("").apply { shadowOf(this).addChild(screen("", visible = false)) } }
+        val order = "4200001234202611070000012345"
+        val paidAt = (startedAt - 20_000) / 1000 * 1000
+        val date = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(paidAt))
+        service.opaqueVisualOcr = {
+            fun line(text: String, top: Int) = PaymentImageReader.OcrLine(text, Rect(350, top, 900, top + 45))
+            listOf(line("支付成功", 200), line("实付金额：￥18.00", 620), line("商户：松林饭馆", 810),
+                line("微信支付单号：$order", 980), line("支付时间：$date", 1080), line("完成", 2380))
+        }
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        assertEquals(2, monitor.health.value.screenReadDiagnostics["visitedNodes"])
+        val saved = rows().single()
+        assertEquals(1800L, saved.amount)
+        assertEquals(paidAt, saved.occurredAt)
+        assertEquals("松林饭馆", saved.merchant)
+        assertTrue(saved.metadataJson!!.contains("wechat-opaque-merchant-direct"))
+        window.root = { screen("", windowId = 8, visible = false) }
+        sendEvent(windowId = 8, className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("duplicate")
+        assertEquals(saved.id, rows().single().id)
+        assertTrue(runBlocking { database.backupDao().captureEvents() }.all { it.orderId == order && it.orderDomain == "wechat" })
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `opaque merchant receipt needs a matching checkout handoff in the existing wallet activity`() {
+        connect(enabled = true)
+        allowOpaqueCapture()
+        val order = "SYNTHETICORDER1800"
+        val merchant = "松林饭馆"
+        var ocrCalls = 0
+        service.opaqueVisualOcr = {
+            ocrCalls++
+            fun line(text: String, top: Int) = PaymentImageReader.OcrLine(text, Rect(350, top, 900, top + 45))
+            listOf(line("支付成功", 200), line("实付金额：￥18.00", 620), line("商户：$merchant", 810),
+                line("商户订单号：$order", 980), line("完成", 2380))
+        }
+        sendEvent(className = "com.tencent.mm.plugin.appbrand.ui.AppBrandUI")
+        awaitStatus("empty_page")
+        assertEquals(0, ocrCalls)
+        sendEvent(className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("visual_not_receipt")
+        assertTrue(rows().isEmpty())
+
+        val shopping = "com.sankuai.meituan"
+        window.root = {
+            screen("确认订单", packageName = shopping, windowId = 8).apply {
+                listOf("提交订单", "商户：$merchant", "商家订单号：$order", "应付金额：18.00元", "商品名称：红烧牛肉面")
+                    .forEach { shadowOf(this).addChild(screen(it, packageName = shopping, windowId = 8)) }
+            }
+        }
+        sendEvent(packageName = shopping, windowId = 8)
+        awaitStatus("not_receipt")
+        assertTrue(rows().isEmpty())
+        window.root = { screen("", windowId = 9, visible = false) }
+        sendEvent(windowId = 9, className = WechatOpaqueTransferReader.ACTIVITY)
+        awaitStatus("saved")
+        val row = rows().single()
+        assertEquals(1800L, row.amount)
+        assertEquals(TxType.EXPENSE, row.type)
+        assertEquals(merchant, row.merchant)
+        assertEquals(TxStatus.PENDING, row.status)
+        assertTrue(row.metadataJson!!.contains(CheckoutContext.LOCAL_SOURCE))
+        assertTrue(row.metadataJson!!.contains("红烧牛肉面"))
+        assertEquals(order, runBlocking { database.backupDao().captureEvents() }.single().orderId)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `read only checkout enriches its verified same order without creating a payment before completion`() {
+        connect(enabled = true)
+        val pkg = "com.sankuai.meituan"
+        val order = "MT20261107001234"
+        window.root = {
+            screen("确认订单", packageName = pkg).apply {
+                listOf("提交订单", "商家订单号：$order", "应付金额：18.00元", "商品名称：红烧牛肉面", "数量：2")
+                    .forEach { shadowOf(this).addChild(screen(it, packageName = pkg)) }
+            }
+        }
+        sendEvent(packageName = pkg)
+        awaitStatus("not_receipt")
+        assertTrue(rows().isEmpty())
+        assertTrue(window.screenshotWindows.isEmpty())
+
+        window.root = {
+            screen("支付成功\n完成\n实付金额：18.00元", packageName = pkg, windowId = 8).apply {
+                shadowOf(this).addChild(screen("商户订单号：$order", packageName = pkg, windowId = 8))
+            }
+        }
+        sendEvent(packageName = pkg, windowId = 8)
+        awaitStatus("saved")
+        val first = rows().single()
+        val metadata = first.metadataJson!!
+        assertEquals(1800L, first.amount)
+        assertTrue(metadata.contains("红烧牛肉面"))
+        assertTrue(metadata.contains(CheckoutContext.LOCAL_SOURCE))
+        assertEquals(order, runBlocking { database.transactionDao().captureEvidenceByKey(first.captureEventKey!!)!!.orderId })
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = pkg, windowId = 8)
+        drainRetries()
+        assertEquals(first.id, rows().single().id)
+        assertTrue(rows().single().metadataJson!!.contains("红烧牛肉面"))
+        assertEquals(0, cloudCalls)
+    }
+
     private fun connect(enabled: Boolean, expectedStatus: String = if (enabled) "waiting" else "disabled") {
         runBlocking { preferences.setScreenCaptureEnabled(enabled) }
         ReflectionHelpers.callInstanceMethod<Unit>(service, "onServiceConnected")
@@ -1433,6 +1856,18 @@ class PaymentAccessibilityServiceIntegrationTest {
             }
         }
     }
+
+    private fun applicationWindow(root: AccessibilityNodeInfo, active: Boolean = false,
+                                  focused: Boolean = false): AccessibilityWindowInfo =
+        AccessibilityWindowInfo.obtain().also { window ->
+            shadowOf(window).apply {
+                setId(root.windowId)
+                setType(AccessibilityWindowInfo.TYPE_APPLICATION)
+                setActive(active)
+                setFocused(focused)
+                setRoot(root)
+            }
+        }
 
     private fun amountFirstPaymentScreen(packageName: String, amount: String, orderId: String,
                                          editableChild: Boolean = false): AccessibilityNodeInfo =

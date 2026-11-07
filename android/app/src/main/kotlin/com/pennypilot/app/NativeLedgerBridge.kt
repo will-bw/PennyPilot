@@ -1,6 +1,7 @@
 package com.pennypilot.app
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -43,6 +44,7 @@ import com.pennypilot.app.domain.usecase.InsightUseCase
 import com.pennypilot.app.domain.usecase.ParseTextUseCase
 import com.pennypilot.app.service.CaptureProcessor
 import com.pennypilot.app.service.CaptureServiceMonitor
+import com.pennypilot.app.service.NotificationCapturePermission
 import com.pennypilot.app.service.NotificationCaptorService
 import com.pennypilot.app.service.NotificationHelper
 import com.pennypilot.app.service.PaymentAccessibilityPermission
@@ -296,9 +298,14 @@ class NativeLedgerBridge @Inject constructor(
             if (args.containsKey("lastBackupAt")) preferences.setLastBackupAt(args.long("lastBackupAt").also { require(it >= 0) })
             emit("changed"); null
         }
-        "pickRecognitionImage" -> activity.chooseRecognitionDocument(true)?.let { RecognitionDocuments.image(context, it) }
+        "pickRecognitionImage" -> activity.chooseRecognitionDocument(true)?.let {
+            RecognitionDocuments.image(context, it, preferences.cloudImageParsingEnabled.first())
+        }
         "pickBillFile" -> activity.chooseRecognitionDocument(false)?.let { RecognitionDocuments.bill(context, it) }
-        "consumeSharedImage" -> sharedImageUri?.let { uri -> sharedImageUri = null; RecognitionDocuments.image(context, uri) }
+        "consumeSharedImage" -> sharedImageUri?.let { uri ->
+            sharedImageUri = null
+            RecognitionDocuments.image(context, uri, preferences.cloudImageParsingEnabled.first())
+        }
         "armCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.arm()
         "readCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.read()
         "clearCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.clear()
@@ -315,6 +322,7 @@ class NativeLedgerBridge @Inject constructor(
         "openSystemSettings" -> { openSystemSettings(args.string("target")); null }
         "requestNotificationPermission" -> mapOf("granted" to requestNotificationPermission())
         "rebindNotificationService" -> {
+            require(NotificationCapturePermission.isGranted(context)) { "请在系统设置中开启 PennyPilot 的通知使用权。" }
             NotificationListenerService.requestRebind(ComponentName(context, NotificationCaptorService::class.java)); null
         }
         "signIn" -> {
@@ -361,6 +369,7 @@ class NativeLedgerBridge @Inject constructor(
                 "notificationCloudParsingEnabled" to preferences.notificationCloudParsingEnabled.first(),
                 "screenCloudParsingEnabled" to preferences.screenCloudParsingEnabled.first(),
                 "screenVisualCaptureEnabled" to preferences.screenVisualCaptureEnabled.first(),
+                "screenCloudVisionEnabled" to preferences.screenCloudVisionEnabled.first(),
                 "captureAutoRecordEnabled" to preferences.captureAutoRecordEnabled.first(),
                 "activeInputAutoSaveEnabled" to preferences.activeInputAutoSaveEnabled.first(),
                 "cloudImageParsingEnabled" to preferences.cloudImageParsingEnabled.first(),
@@ -404,21 +413,21 @@ class NativeLedgerBridge @Inject constructor(
     }
 
     private fun capabilities(): Map<String, Any?> {
-        val component = ComponentName(context, NotificationCaptorService::class.java)
-        val listenerGranted = runCatching {
-            Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-                ?.split(':')?.any { ComponentName.unflattenFromString(it) == component } == true
-        }.getOrDefault(false)
+        val listenerGranted = NotificationCapturePermission.isGranted(context)
         val accessibilityGranted = PaymentAccessibilityPermission.isGranted(context)
         val health = monitor.health.value
         return mapOf(
             "platform" to "android", "notificationListenerGranted" to listenerGranted,
-            "automaticCaptureSupported" to true, "chatGptSupported" to true,
+            "automaticCaptureSupported" to true, "chatGptSupported" to true, "localReceiptImageSupported" to true,
+            "screenCloudVisionSupported" to (Build.VERSION.SDK_INT >= 34),
             "accessibilityGranted" to accessibilityGranted,
             "remindersEnabled" to runCatching { NotificationHelper.captureNotificationsEnabled(context) }.getOrDefault(false),
             "captureHeadsUpEnabled" to runCatching { NotificationHelper.captureHeadsUpEnabled(context) }.getOrDefault(false),
             "microphoneGranted" to isGranted(Manifest.permission.RECORD_AUDIO),
             "batteryExempt" to runCatching { context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName) }.getOrDefault(false),
+            "backgroundRestricted" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) runCatching {
+                context.getSystemService(ActivityManager::class.java)?.isBackgroundRestricted
+            }.getOrNull() else null,
             "speechAvailable" to runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false),
             "notificationServiceConnected" to health.isBound,
             "accessibilityServiceConnected" to health.isAccessibilityBound,
@@ -690,7 +699,7 @@ class NativeLedgerBridge @Inject constructor(
             require(it == uiPreferences.getLong("budget_cents", 0)) { "预算已变化，请重新核对提案。" }
         }
         // Validate everything before any writes. Omitted keys preserve existing secrets.
-        listOf("onboardingDone", "notificationCaptureEnabled", "screenCaptureEnabled", "notificationCloudParsingEnabled", "screenCloudParsingEnabled", "screenVisualCaptureEnabled", "captureAutoRecordEnabled", "activeInputAutoSaveEnabled", "cloudImageParsingEnabled", "chatGptThinkingEnabled", "deepSeekThinkingEnabled", "qwenThinkingEnabled")
+        listOf("onboardingDone", "notificationCaptureEnabled", "screenCaptureEnabled", "notificationCloudParsingEnabled", "screenCloudParsingEnabled", "screenVisualCaptureEnabled", "screenCloudVisionEnabled", "captureAutoRecordEnabled", "activeInputAutoSaveEnabled", "cloudImageParsingEnabled", "chatGptThinkingEnabled", "deepSeekThinkingEnabled", "qwenThinkingEnabled")
             .filter(args::containsKey).forEach { args.boolean(it) }
         mapOf(
             "chatGptReasoningEffort" to setOf("minimal", "low", "medium", "high", "xhigh", "max"),
@@ -754,6 +763,7 @@ class NativeLedgerBridge @Inject constructor(
         if (args.containsKey("notificationCloudParsingEnabled")) preferences.setNotificationCloudParsingEnabled(args.boolean("notificationCloudParsingEnabled"))
         if (args.containsKey("screenCloudParsingEnabled")) preferences.setScreenCloudParsingEnabled(args.boolean("screenCloudParsingEnabled"))
         if (args.containsKey("screenVisualCaptureEnabled")) preferences.setScreenVisualCaptureEnabled(args.boolean("screenVisualCaptureEnabled"))
+        if (args.containsKey("screenCloudVisionEnabled")) preferences.setScreenCloudVisionEnabled(args.boolean("screenCloudVisionEnabled"))
         if (args.containsKey("captureAutoRecordEnabled")) preferences.setCaptureAutoRecordEnabled(args.boolean("captureAutoRecordEnabled"))
         if (args.containsKey("activeInputAutoSaveEnabled")) preferences.setActiveInputAutoSaveEnabled(args.boolean("activeInputAutoSaveEnabled"))
         if (args.containsKey("cloudImageParsingEnabled")) preferences.setCloudImageParsingEnabled(args.boolean("cloudImageParsingEnabled"))

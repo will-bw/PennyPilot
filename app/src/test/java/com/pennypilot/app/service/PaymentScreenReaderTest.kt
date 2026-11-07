@@ -332,9 +332,10 @@ class PaymentScreenReaderTest {
         assertEquals("empty_page", snapshot.status)
         assertEquals(
             mapOf(
-                "visitedNodes" to 1, "textNodes" to 0, "editableNodes" to 0,
-                "passwordNodes" to 0, "missingChildren" to 0, "hiddenNodes" to 0,
-                "foreignNodes" to 0
+                "visitedNodes" to 1, "textNodes" to 0, "hiddenTextNodes" to 0,
+                "editableNodes" to 0, "passwordNodes" to 0, "hiddenInputNodes" to 0,
+                "missingChildren" to 0, "hiddenNodes" to 0, "foreignNodes" to 0,
+                "unknownOwnerNodes" to 0
             ),
             snapshot.diagnostics
         )

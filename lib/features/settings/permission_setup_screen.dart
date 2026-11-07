@@ -73,6 +73,14 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
       await c.openSystemSettings('notificationListener');
     } else if (c.capabilities['notificationServiceConnected'] != true) {
       await c.rebindNotificationService();
+      if (mounted) {
+        settingsFeedback(
+          context,
+          c.capabilities['notificationServiceConnected'] == true
+              ? '通知监听服务已连接。'
+              : '已请求重新连接。若仍未连接，可在系统中重新开启通知使用权。',
+        );
+      }
     } else {
       await c.openSystemSettings('notificationListener');
     }
@@ -140,23 +148,31 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
       final android = c.capabilities['platform'] == 'android';
       final colors = Theme.of(context).colorScheme;
       final disabled = _busy || c.isBusy;
-      final notificationReady =
-          _captureStatus(
-            'notificationCaptureEnabled',
-            'notificationListenerGranted',
-            'notificationServiceConnected',
-          ) ==
-          '已就绪';
-      final screenReady =
-          _captureStatus(
-            'screenCaptureEnabled',
-            'accessibilityGranted',
-            'accessibilityServiceConnected',
-          ) ==
-          '已就绪';
+      final notificationStatus = _captureStatus(
+        'notificationCaptureEnabled',
+        'notificationListenerGranted',
+        'notificationServiceConnected',
+      );
+      final screenStatus = _captureStatus(
+        'screenCaptureEnabled',
+        'accessibilityGranted',
+        'accessibilityServiceConnected',
+      );
+      final notificationReady = notificationStatus == '已就绪';
+      final screenReady = screenStatus == '已就绪';
       final microphone = c.capabilities['microphoneGranted'] == true;
       final reminders = c.capabilities['remindersEnabled'] == true;
       final battery = c.capabilities['batteryExempt'] == true;
+      final backgroundRestricted =
+          c.capabilities['backgroundRestricted'] == true;
+      final notificationDisconnected =
+          c.settings['notificationCaptureEnabled'] == true &&
+          c.capabilities['notificationListenerGranted'] == true &&
+          !notificationReady;
+      final screenDisconnected =
+          c.settings['screenCaptureEnabled'] == true &&
+          c.capabilities['accessibilityGranted'] == true &&
+          !screenReady;
       return PopScope(
         canPop: !widget.firstRun && !disabled,
         onPopInvokedWithResult: (didPop, _) {
@@ -209,31 +225,32 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
                         title: '支付通知',
                         detail:
                             '通过通知使用权读取微信、支付宝、云闪付、美团和抖音的支付通知，在本机识别金额。没有通知或金额被隐藏时可能漏记。',
-                        status: _captureStatus(
-                          'notificationCaptureEnabled',
-                          'notificationListenerGranted',
-                          'notificationServiceConnected',
-                        ),
+                        status: notificationStatus,
                         ready: notificationReady,
                         action: notificationReady
                             ? '查看通知使用权'
-                            : c.capabilities['notificationListenerGranted'] ==
-                                      true &&
-                                  c.settings['notificationCaptureEnabled'] ==
-                                      true
+                            : notificationDisconnected
                             ? '重新连接通知服务'
                             : '开启通知采集',
                         onPressed: disabled ? null : _notifications,
+                        secondaryAction: notificationDisconnected
+                            ? '查看通知使用权'
+                            : null,
+                        onSecondary: disabled
+                            ? null
+                            : () => _run(
+                                () => c.openSystemSettings(
+                                  'notificationListener',
+                                ),
+                              ),
                       ),
                       const Divider(),
                       _PermissionItem(
                         title: '支付页面',
-                        detail: '通过无障碍服务读取可见支付结果，补充没有通知的支付或转账。开启前会说明读取范围，由你确认。',
-                        status: _captureStatus(
-                          'screenCaptureEnabled',
-                          'accessibilityGranted',
-                          'accessibilityServiceConnected',
-                        ),
+                        detail: screenDisconnected
+                            ? '系统授权仍保留。若服务持续未连接，请打开无障碍设置，关闭再开启 PennyPilot 无障碍服务。'
+                            : '通过无障碍服务读取可见支付结果，补充没有通知的支付或转账。开启前会说明读取范围，由你确认。',
+                        status: screenStatus,
                         ready: screenReady,
                         action: c.settings['screenCaptureEnabled'] == true
                             ? '查看无障碍设置'
@@ -259,10 +276,15 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
                       const Divider(),
                       _PermissionItem(
                         title: '后台运行',
-                        detail:
-                            '系统省电可能中断自动采集。可将 PennyPilot 设为不优化；部分手机还需在应用系统设置中允许自启动。',
-                        status: battery ? '电池优化已豁免' : '尚未豁免电池优化',
-                        ready: battery,
+                        detail: backgroundRestricted
+                            ? captureBackgroundRestriction
+                            : '系统省电可能中断自动采集。可将 PennyPilot 设为不优化；部分手机还需在应用系统设置中允许自启动。',
+                        status: backgroundRestricted
+                            ? '后台运行受限'
+                            : battery
+                            ? '电池优化已豁免'
+                            : '尚未豁免电池优化',
+                        ready: battery && !backgroundRestricted,
                         action: '查看电池设置',
                         onPressed: disabled
                             ? null

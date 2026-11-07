@@ -5,6 +5,13 @@ import android.app.NotificationManager
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import androidx.work.Clock
+import androidx.work.Configuration
+import androidx.work.impl.Processor
+import androidx.work.impl.WorkDatabase
+import androidx.work.impl.WorkManagerImpl
+import androidx.work.impl.constraints.trackers.Trackers
+import androidx.work.impl.utils.taskexecutor.WorkManagerTaskExecutor
 import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.db.entity.CategoryEntity
@@ -14,6 +21,8 @@ import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ToolDefinition
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentScreenNode
+import com.pennypilot.app.data.parser.PaymentScreenStructure
 import com.pennypilot.app.data.parser.PaymentTextParser
 import com.pennypilot.app.data.parser.WalletReceiptDetailsParser
 import com.pennypilot.app.data.settings.AppPreferences
@@ -21,6 +30,7 @@ import com.pennypilot.app.data.recognition.PaymentProposal
 import com.pennypilot.app.data.recognition.PaymentProposalValidator
 import com.pennypilot.app.data.recognition.RecognitionTask
 import com.pennypilot.app.data.recognition.RecognitionTaskStore
+import com.pennypilot.app.data.recognition.ReceiptImageMode
 import com.pennypilot.app.data.recognition.TaskCipher
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
@@ -29,6 +39,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -36,6 +49,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
+import java.util.concurrent.Executor
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -53,6 +67,159 @@ class CaptureProcessorTest {
             error("本地凭证不得调用云端")
         }
         override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("not used")
+    }
+
+    @Test fun `direct receipt image names the counterparty without uploading local text`() = runBlocking {
+        withVisionCapture { database, processor, store ->
+            val now = System.currentTimeMillis()
+            val revision = LedgerRevision.current
+            val receipt = NotificationParseResult(1700, null, "EXPENSE", scene = "transfer_sent")
+            assertTrue(processor.processScreen("com.tencent.mm", receipt, "visual-transfer", now, revision, queueSemanticModel = false))
+            val original = database.backupDao().transactions().single()
+            assertTrue(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "visual-transfer", now, revision))
+            val task = store.pending().single()
+            assertEquals(ReceiptImageMode.VERIFIED_RECEIPT, task.receiptImageMode)
+            assertNull(task.receipt)
+            cloudResponse = visualReply(1800, amount = "¥18.00")
+            assertTrue(processor.processRecognitionTask(task.id))
+            assertEquals(original, database.backupDao().transactions().single())
+
+            cloudResponse = visualReply(1700)
+            assertTrue(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "visual-transfer", now, revision))
+            assertTrue(processor.processRecognitionTask(store.pending().single().id))
+            val enriched = database.backupDao().transactions().single()
+            assertEquals(original.id, enriched.id)
+            assertEquals(original.amount, enriched.amount)
+            assertEquals("测试同学", enriched.merchant)
+            assertTrue(enriched.metadataJson.orEmpty().contains("云端视觉"))
+            val request = sentMessages.last()
+            assertEquals(listOf(TEST_IMAGE), request.imageDataUrls)
+            assertFalse(request.content.contains("测试同学"))
+            assertFalse(request.content.contains("1700"))
+            assertFalse(request.content.contains("支付成功"))
+        }
+    }
+
+    @Test fun `image only needs a recent reliable receipt and remains pending with order deduplication`() = runBlocking {
+        withVisionCapture { database, processor, store ->
+            val now = System.currentTimeMillis()
+            val revision = LedgerRevision.current
+            cloudResponse = visualReply(1700, party = "收款方：测试同学")
+            assertTrue(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "image-missing-order", now, revision, allowImageOnly = true))
+            assertTrue(processor.processRecognitionTask(store.pending().single().id))
+            assertTrue(database.backupDao().transactions().isEmpty())
+
+            val date = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss")
+                .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(now - 1_000))
+            val orderId = "4200001234202611071234567890"
+            cloudResponse = visualReply(1700, party = "收款方：测试同学",
+                otherLines = "\",\"交易时间：$date\",\"微信支付单号：$orderId")
+            assertTrue(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "image-pending", now, revision, allowImageOnly = true))
+            assertTrue(processor.processRecognitionTask(store.pending().single().id))
+            val pending = database.backupDao().transactions().single()
+            assertEquals(TxStatus.PENDING, pending.status)
+            assertEquals("测试同学", pending.merchant)
+            assertEquals(orderId, database.transactionDao().captureEvidenceByKey("image-pending")?.orderId)
+
+            val local = NotificationParseResult(1700, "测试同学", "EXPENSE", orderId = orderId, businessKind = "expense")
+            assertTrue(processor.processScreen("com.tencent.mm", local, "later-verified-page", now, revision))
+            assertEquals(pending.id, database.backupDao().transactions().single().id)
+        }
+    }
+
+    @Test fun `automatic images require current consent and do not resume a legacy cropped upload`() = runBlocking {
+        withVisionCapture { _, processor, store ->
+            val now = System.currentTimeMillis()
+            val revision = LedgerRevision.current
+            assertTrue(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "revoked-image", now, revision, allowImageOnly = true))
+            preferences.setScreenCloudVisionEnabled(false)
+            assertFalse(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "denied-image", now, revision, allowImageOnly = true))
+            assertTrue(processor.processRecognitionTask(store.pending().single().id))
+            assertEquals(0, cloudCalls)
+
+            preferences.setScreenCloudVisionEnabled(true)
+            val legacy = RecognitionTask("legacy-image-task", "legacy-image", "com.tencent.mm", "支付成功\n¥17.00",
+                now, revision, cloud.operationIdentity(), TxSource.ACCESSIBILITY.name, images = listOf(TEST_IMAGE))
+            store.enqueue(legacy)
+            assertTrue(processor.processRecognitionTask(legacy.id))
+            assertTrue(store.pending().isEmpty())
+            assertEquals(0, cloudCalls)
+        }
+    }
+
+    private suspend fun withVisionCapture(block: suspend (AppDatabase, CaptureProcessor, RecognitionTaskStore) -> Unit) {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val direct = Executor { it.run() }
+        val clock = Clock(System::currentTimeMillis)
+        val configuration = Configuration.Builder().setExecutor(direct).setTaskExecutor(direct).setClock(clock).build()
+        val tasks = WorkManagerTaskExecutor(direct)
+        val workDatabase = WorkDatabase.create(context, direct, clock, true)
+        val manager = WorkManagerImpl(context, configuration, tasks, workDatabase, emptyList(),
+            Processor(context, configuration, tasks, workDatabase), Trackers(context, tasks))
+        WorkManagerImpl.setDelegate(manager)
+        val file = File.createTempFile("capture-vision", ".enc").apply { delete() }
+        val store = RecognitionTaskStore(file, object : TaskCipher {
+            override fun encrypt(bytes: ByteArray) = bytes.map { (it.toInt() xor 63).toByte() }.toByteArray()
+            override fun decrypt(bytes: ByteArray) = encrypt(bytes)
+        })
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+            preferences.setScreenCaptureEnabled(true)
+            preferences.setScreenCloudVisionEnabled(true)
+            preferences.setCaptureAutoRecordEnabled(true)
+            val processor = CaptureProcessor(context, database, preferences, cloud, CaptureServiceMonitor(), store)
+            block(database, processor, store)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            preferences.setScreenCloudVisionEnabled(false)
+            preferences.setCaptureAutoRecordEnabled(false)
+            WorkManagerImpl.setDelegate(null)
+            workDatabase.close()
+            store.clear()
+            database.close()
+        }
+    }
+
+    private fun visualReply(cents: Int, amount: String = "¥17.00", party: String = "待测试同学确认收款",
+        otherLines: String = "") = """{"valid":true,"amount_cents":$cents,"direction":"EXPENSE","currency":"CNY",
+            "payment_status":"COMPLETED","amount_evidence":"$amount","direction_evidence":"支付成功","status_evidence":"支付成功",
+            "merchant":"测试同学","merchant_evidence":"$party","business_kind":"expense",
+            "receipt_lines":["支付成功","$amount","$party$otherLines"]}"""
+
+    private companion object {
+        const val TEST_IMAGE = "data:image/jpeg;base64,dGVzdA=="
+    }
+
+    @Test fun `wechat notification and a reversed wallet order row enrich the same transaction`() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0, type = TxType.EXPENSE, sortOrder = 0))
+            preferences.setNotificationCaptureEnabled(true)
+            preferences.setNotificationCloudParsingEnabled(false)
+            preferences.setScreenCaptureEnabled(true)
+            preferences.setScreenCloudParsingEnabled(false)
+            preferences.setCaptureAutoRecordEnabled(false)
+            val processor = CaptureProcessor(context, database, preferences, cloud, CaptureServiceMonitor())
+            val now = System.currentTimeMillis()
+            val order = "4200000000202611070000000001"
+            processor.processNotification(CapturedNotification("com.tencent.mm", "wallet-payment", now,
+                "微信支付", "支付成功，实付18.00元，交易单号：$order"), LedgerRevision.current)
+            val initial = database.backupDao().transactions().single()
+            val structure = PaymentScreenStructure(listOf(PaymentScreenNode(1, null), PaymentScreenNode(2, 1),
+                PaymentScreenNode(3, 2, text = order), PaymentScreenNode(4, 2, text = "微信支付单号")))
+            val receipt = PaymentTextParser.analyzeScreen("com.tencent.mm",
+                "支付成功\n实付金额：18.00元\n商户：样例咖啡店\n$order\n微信支付单号\n完成", structure).parsed!!
+            assertEquals(order, receipt.orderId)
+            assertTrue(processor.processScreen("com.tencent.mm", receipt, "wallet-page", now, LedgerRevision.current))
+            val enriched = database.backupDao().transactions().single()
+            assertEquals(initial.id, enriched.id)
+            assertEquals("样例咖啡店", enriched.merchant)
+            assertEquals(2, database.backupDao().captureEvents().size)
+            assertEquals(0, cloudCalls)
+        } finally {
+            preferences.setScreenCaptureEnabled(false)
+            database.close()
+        }
     }
 
     @Test fun `identified later receipt replaces observation time and adds field evidence without another transaction`() = runBlocking {
@@ -283,7 +450,7 @@ class CaptureProcessorTest {
             database.close()
         }
     }
-    @Test fun `automatic recording preserves unknown transfer as money movement without inflating expense`() = runBlocking {
+    @Test fun `automatic recording confirms a named peer transfer but keeps an unidentified transfer for review`() = runBlocking {
         val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         val manager = context.getSystemService(NotificationManager::class.java)
         try {
@@ -294,14 +461,25 @@ class CaptureProcessorTest {
             NotificationHelper.createChannels(context)
             val processor = CaptureProcessor(context, database, preferences, cloud, CaptureServiceMonitor())
             val now = System.currentTimeMillis()
-            assertTrue(processor.processScreen("com.tencent.mm", NotificationParseResult(1800, "小林", "EXPENSE", businessKind = "unknown"), "unknown-transfer", now, LedgerRevision.current))
+            assertTrue(processor.processScreen("com.tencent.mm", NotificationParseResult(1800, null, "EXPENSE",
+                scene = "transfer_sent"), "unknown-transfer", now, LedgerRevision.current))
             val transfer = database.backupDao().transactions().single()
-            assertEquals(TxStatus.CONFIRMED, transfer.status)
-            assertEquals("transfer", transfer.businessKind)
+            assertEquals(TxStatus.PENDING, transfer.status)
+            assertEquals("unknown", transfer.businessKind)
             assertEquals("微信", transfer.accountTag)
             val notification = manager.activeNotifications.single { it.tag == "unknown-transfer" }.notification
             assertFalse(notification.actions.orEmpty().any { it.title.toString() == "记入" })
-            assertTrue(notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString().contains("不计入消费"))
+            assertTrue(notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString().contains("核对用途"))
+            val receipt = PaymentTextParser.analyzeScreen("com.tencent.mm",
+                "转账成功\n￥17.00\n转账给小林\n付款方式：零钱通\n订单号：TESTORDER1700\n完成").parsed!!
+            assertTrue(processor.processScreen("com.tencent.mm", receipt, "peer-transfer", now, LedgerRevision.current))
+            assertTrue(processor.processScreen("com.tencent.mm", receipt, "peer-transfer-replay", now, LedgerRevision.current))
+            val peer = database.transactionDao().getByCaptureEvent("peer-transfer")!!
+            assertEquals(TxStatus.CONFIRMED, peer.status)
+            assertEquals("expense", peer.businessKind)
+            assertEquals("小林", peer.merchant)
+            assertEquals("零钱通", peer.accountTag)
+            assertEquals(2, database.backupDao().transactions().size)
             assertTrue(processor.processScreen("com.tencent.mm", NotificationParseResult(2800, "咖啡店", "EXPENSE", businessKind = "expense"), "known-consumption", now, LedgerRevision.current))
             assertEquals(TxStatus.CONFIRMED, database.backupDao().transactions().single { it.captureEventKey == "known-consumption" }.status)
         } finally {
@@ -362,7 +540,7 @@ class CaptureProcessorTest {
             val original = NotificationParseResult(1700, "小林", "EXPENSE", scene = "transfer_sent")
             assertTrue(processor.processScreen("com.tencent.mm", original, "model-enrichment", now, LedgerRevision.current))
             val before = database.transactionDao().getByCaptureEvent("model-enrichment")!!
-            assertEquals("transfer", before.businessKind)
+            assertEquals("expense", before.businessKind)
             val text = "转账成功\n17.00元\n商户：小林"
             val proposal = PaymentProposal(valid = true, amountCents = 1700, direction = "EXPENSE", currency = "CNY",
                 paymentStatus = "COMPLETED", amountEvidence = "17.00元", directionEvidence = "转账成功", statusEvidence = "转账成功",

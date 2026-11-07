@@ -444,7 +444,7 @@ void main() {
     await tester.ensureVisible(purpose);
     await tester.tap(purpose);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('本人账户转移').last);
+    await tester.tap(find.text('资金转移').last);
     await tester.pumpAndSettle();
     expect(_aaSwitch, findsNothing);
     await _save(tester);

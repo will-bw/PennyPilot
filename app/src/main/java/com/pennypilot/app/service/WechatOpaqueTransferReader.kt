@@ -2,6 +2,7 @@ package com.pennypilot.app.service
 
 import android.graphics.Rect
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentReceiptDetails
 import com.pennypilot.app.util.MoneyUtil
 
 /** Versioned WeChat transfer result templates; never a generic screenshot parser. */
@@ -39,11 +40,8 @@ internal object WechatOpaqueTransferReader {
     }
 
     fun accepts(packageName: String, className: String?, snapshot: PaymentScreenReader.Snapshot): Boolean =
-        packageName == PACKAGE && className in setOf(ACTIVITY, WechatReceivedTransferReader.ACTIVITY) && snapshot.status == "empty_page" &&
-            !snapshot.hasInput && snapshot.diagnostics["visitedNodes"] == 1 &&
-            snapshot.diagnostics["hiddenNodes"] == 1 && snapshot.diagnostics["textNodes"] == 0 &&
-            listOf("editableNodes", "passwordNodes", "missingChildren", "foreignNodes")
-                .all { snapshot.diagnostics[it] == 0 }
+        packageName == PACKAGE && className in setOf(ACTIVITY, WechatReceivedTransferReader.ACTIVITY) &&
+            snapshot.isBoundedOpaqueTree
 
     fun parse(lines: List<PaymentImageReader.OcrLine>, width: Int, height: Int): NotificationParseResult? {
         if (width <= 0 || height <= width || lines.size !in 4..40) return null
@@ -96,6 +94,7 @@ internal object WechatOpaqueTransferReader {
                 "direction" to "本地OCR·本人付款完成：支付成功",
                 "paymentStatus" to "本地OCR·顶部状态：支付成功",
                 "merchant" to "本地OCR·收款人状态：${waiting.first}"
-            ))
+            ), details = PaymentReceiptDetails(payeeName = name, paymentChannel = "微信支付",
+                fieldSources = mapOf("payeeName" to "本地OCR·收款人状态", "paymentChannel" to "应用渠道")))
     }
 }
