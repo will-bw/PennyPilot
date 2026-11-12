@@ -120,6 +120,159 @@ void main() {
   );
 
   test(
+    'clarification defers writes and keeps only the first question',
+    () async {
+      final result = await run((_, _) async {
+        final proposals = [
+          call('budget', 'propose_budget', {
+            'amount': 300000,
+            'evidence': '预算设为3000元',
+          }),
+          call('first', 'ask_user', {'question': '还有一笔支出的金额是多少？'}),
+          call('second', 'ask_user', {'question': '第二个问题'}),
+        ];
+        return AgentReply(
+          message: {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': proposals.expand((reply) => reply.calls).toList(),
+          },
+        );
+      }, question: '预算设为3000元，还有一笔支出');
+      final session = agentMap(result['session']);
+      expect(session['status'], 'awaiting_input');
+      expect(session['actions'], isEmpty);
+      expect(result['answer'], '还有一笔支出的金额是多少？');
+      final outcomes = (session['messages'] as List)
+          .where((message) => message['role'] == 'tool')
+          .map((message) => jsonDecode(message['content'] as String)['status']);
+      expect(outcomes, ['deferred', 'awaiting_input', 'deferred']);
+    },
+  );
+
+  test(
+    'old proposal does not make an unrelated turn await confirmation',
+    () async {
+      final session = await runtime.active(0);
+      session.actions.add({
+        'id': 'older',
+        'runId': 'older',
+        'status': 'pending',
+      });
+      session.status = 'awaiting_confirmation';
+      await store.write('session:0:${session.id}', session.toMap());
+      final result = await run((_, _) async => answer('你好。'), question: '你好');
+      final saved = agentMap(result['session']);
+      expect(saved['status'], 'completed');
+      expect((saved['actions'] as List).single['status'], 'pending');
+    },
+  );
+
+  test(
+    'a repeated proposal still waits for its existing confirmation',
+    () async {
+      const question = '预算设为3000元';
+      Future<Map<String, dynamic>> propose(String id) => run((
+        messages,
+        _,
+      ) async {
+        if (messages.last['role'] == 'tool') return answer('请确认月预算改为3000元。');
+        return call(id, 'propose_budget', {
+          'amount': 300000,
+          'evidence': question,
+        });
+      }, question: question);
+      await propose('initial-budget');
+      final repeated = agentMap((await propose('repeated-budget'))['session']);
+      expect(repeated['status'], 'awaiting_confirmation');
+      final actionId = (repeated['actions'] as List).single['id'] as String;
+      final repository = TestLedgerRepository(populated: true);
+      addTearDown(repository.updates.close);
+      await runtime.resolve(
+        revision: 0,
+        actionId: actionId,
+        approve: false,
+        ledger: repository,
+        guard: guard,
+      );
+      expect((await runtime.active(0)).status, 'completed');
+    },
+  );
+
+  test('text clarification cancels locally and keeps the transcript', () async {
+    await run(
+      (_, _) async => call('ask-amount', 'ask_user', {'question': '午饭花了多少元？'}),
+      question: '记下午饭',
+    );
+    expect(
+      await runtime.cancelClarification(
+        revision: 0,
+        question: '订单取消了',
+        source: 'AI_TEXT',
+        guard: guard,
+      ),
+      isNull,
+    );
+    final result = (await runtime.cancelClarification(
+      revision: 0,
+      question: '取消！',
+      source: 'AI_TEXT',
+      guard: guard,
+    ))!;
+    final session = agentMap(result['session']);
+    expect(session['status'], 'completed');
+    expect(
+      (session['messages'] as List).map((m) => m['content']),
+      containsAllInOrder(['记下午饭', '午饭花了多少元？', '取消！', '已结束这次补问。']),
+    );
+  });
+
+  test(
+    'image recognition updates do not change a newer text question',
+    () async {
+      Future<Map<String, dynamic>> image(String status) => runtime.appendInput(
+        revision: 0,
+        question: '图片里 30 元',
+        source: 'AI_IMAGE',
+        answer: '图片识别回执',
+        parts: [
+          {'type': 'recognition_state'},
+        ],
+        status: status,
+        runId: 'image',
+        guard: guard,
+      );
+      expect(
+        agentMap((await image('awaiting_input'))['session'])['status'],
+        'awaiting_recognition',
+      );
+      await run(
+        (_, _) async => call('later', 'ask_user', {'question': '午饭花了多少元？'}),
+        question: '记下午饭',
+      );
+      final session = agentMap((await image('completed'))['session']);
+      expect(session['status'], 'awaiting_input');
+      expect(
+        (session['messages'] as List)
+            .where((m) => m['role'] == 'user')
+            .last['continuesTask'],
+        isNull,
+      );
+    },
+  );
+
+  test('completed write claims need a current turn receipt', () async {
+    var step = 0;
+    final result = await run((messages, _) async {
+      if (++step == 1) return answer('已记下 30 元。');
+      expect(messages.last['content'], contains('没有成功写入账本的回执'));
+      return answer('请补充这笔支出的用途。');
+    }, question: '午饭30元');
+    expect(result['answer'], '请补充这笔支出的用途。');
+    expect(step, 2);
+  });
+
+  test(
     'dependent multi-step queries use previous observations before choosing next tool',
     () async {
       var step = 0;
@@ -502,6 +655,17 @@ void main() {
     },
   );
 
+  test('interrupted local approval is marked uncertain on reload', () async {
+    final session = await runtime.active(0);
+    session.status = 'awaiting_confirmation';
+    session.actions.add({'id': 'interrupted-approval', 'status': 'applying'});
+    await store.write('session:0:${session.id}', session.toMap());
+
+    final restored = await LedgerAgentRuntime(store: store).active(0);
+    expect(restored.actions.single['status'], 'uncertain');
+    expect(restored.messages, isEmpty);
+  });
+
   test(
     'budget proposal does not mutate ledger; only stored approval applies once',
     () async {
@@ -527,7 +691,10 @@ void main() {
         ledger: repo,
         guard: guard,
       );
-      expect(receipt, contains('applied'));
+      expect(receipt, '月预算已改为 3,000.00 元。');
+      final restored = await runtime.active(0);
+      expect(restored.actions.single['status'], 'applied');
+      expect(restored.messages.last['content'], receipt);
       expect((repo.data['settings'] as Map)['budgetCents'], 300000);
       expect(repo.calls.single.arguments['revision'], 0);
       await expectLater(
@@ -560,7 +727,7 @@ void main() {
       'evidence': '预算设为3000元',
     });
     await store.write('session:0:${session.id}', session.toMap());
-    await runtime.resolve(
+    final receipt = await runtime.resolve(
       revision: 0,
       actionId: proposal['action_id'] as String,
       approve: false,
@@ -568,6 +735,9 @@ void main() {
       guard: guard,
     );
     expect(repo.calls, isEmpty);
+    final restored = await runtime.active(0);
+    expect(restored.actions.single['status'], 'rejected');
+    expect(restored.messages.last['content'], receipt);
     await repo.updates.close();
   });
 

@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
+import 'package:pennypilot/core/ledger_repository.dart'
+    show AgentSessionRepository;
 import 'package:pennypilot/core/ai/model_reasoning.dart';
 import 'package:pennypilot/core/models.dart';
 
@@ -34,6 +36,36 @@ class _StreamingRepository extends TestLedgerRepository {
       );
 }
 
+class _SavedSessionsRepository extends TestLedgerRepository
+    implements AgentSessionRepository {
+  @override
+  Future<Map<String, dynamic>> agentState() async => _session('failed');
+
+  Map<String, dynamic> _session(String status) => {
+    'session': {
+      'id': status,
+      'status': status,
+      'messages': [
+        {'role': 'user', 'runId': 'previous', 'content': '查昨天的支出'},
+        {
+          'role': 'assistant',
+          'runId': 'previous',
+          'content': '上次回答',
+          'isError': status == 'failed',
+        },
+      ],
+    },
+  };
+
+  @override
+  Future<Object?> invoke(String method, Map<String, dynamic> arguments) async {
+    if (method == 'agentSelectSession') {
+      return _session(arguments['id'] as String);
+    }
+    return super.invoke(method, arguments);
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late _StreamingRepository repository;
@@ -46,6 +78,19 @@ void main() {
   tearDown(() async {
     controller.dispose();
     await repository.updates.close();
+  });
+
+  test('the selected conversation owns its retry action', () async {
+    final store = _SavedSessionsRepository();
+    addTearDown(store.updates.close);
+    final history = LedgerController(repository: store);
+    addTearDown(history.dispose);
+    await history.init();
+    expect(history.retryQuestion, '查昨天的支出');
+    await history.agentCommand('agentSelectSession', {'id': 'completed'});
+    expect(history.retryQuestion, isNull);
+    await history.agentCommand('agentSelectSession', {'id': 'failed'});
+    expect(history.retryQuestion, '查昨天的支出');
   });
 
   test(

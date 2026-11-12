@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pennypilot/core/agent/agent_presentation.dart';
 import 'package:pennypilot/core/agent/agent_store.dart';
 import 'package:pennypilot/core/ai/shared_ai_service.dart';
 import 'package:pennypilot/core/cross_platform_repository.dart';
@@ -340,6 +341,68 @@ void main() {
           automatic ? 'completed' : 'awaiting_confirmation',
         );
         if (automatic) expect(result['autoSavedIds'], [99]);
+      },
+    );
+  }
+
+  for (final approve in [true, false]) {
+    test(
+      'resolves a stored proposal without a configured model: $approve',
+      () async {
+        final store = _RecordingNativeStore(automatic: false);
+        final credentials = MemoryCredentials();
+        final repo = CrossPlatformLedgerRepository(
+          store: store,
+          agentStore: MemoryAgentStore(),
+          credentials: credentials,
+          ai: SharedAiService(credentials: credentials),
+          platformServices: _Platform(),
+          android: true,
+        );
+        addTearDown(repo.close);
+        addTearDown(store.updates.close);
+        final proposed =
+            await repo.invoke('ask', {'revision': 0, 'question': '午饭17元'})
+                as Map;
+        final action = (proposed['session']['actions'] as List).single as Map;
+        expect(action['status'], 'pending');
+        (store.data['settings'] as Map)['chatGptModel'] = '';
+        store.data['auth'] = {};
+
+        final result =
+            await repo.invoke('agentResolveAction', {
+                  'revision': 0,
+                  'actionId': action['id'],
+                  'approve': approve,
+                })
+                as Map;
+        final answer = result['answer'] as String;
+        expect(answer, startsWith(approve ? '已新增' : '已取消'));
+        expect(answer, contains('17'));
+        expect(result['isError'], false);
+        expect(store.turns, 2);
+        expect(
+          store.calls.where((call) => call.method == 'saveTransaction'),
+          approve ? hasLength(1) : isEmpty,
+        );
+        final saved = (await store.snapshot()).transactions.where(
+          (tx) => tx.id == 99,
+        );
+        if (approve) {
+          expect(saved.single.amountFen, 1700);
+        } else {
+          expect(saved, isEmpty);
+        }
+        final session = stringMap((await repo.agentState())['session']);
+        expect(session['status'], 'completed');
+        expect(
+          (session['actions'] as List).single['status'],
+          approve ? 'applied' : 'rejected',
+        );
+        final transcript = presentAgentSession(session);
+        expect(transcript.first.text, '午饭17元');
+        expect(transcript[1].text, '账单等待核对。');
+        expect(transcript.last.text, answer);
       },
     );
   }

@@ -8,3 +8,6 @@ const captureBackgroundGuidance =
 
 const captureBackgroundRestriction =
     '系统报告 PennyPilot 的后台运行受限。请在应用系统设置中允许后台活动，再返回确认采集服务已连接。';
+
+String notificationReconnectFeedback(bool connected) =>
+    connected ? '通知监听服务已连接。' : '通知监听仍未连接。可在系统中关闭再开启 PennyPilot 的通知使用权。';

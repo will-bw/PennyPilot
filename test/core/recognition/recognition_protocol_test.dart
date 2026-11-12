@@ -48,6 +48,42 @@ Map<String, dynamic> validate(
   operationId: 'request',
 );
 void main() {
+  test(
+    'receipt uses the explicit current time after a repeated correction',
+    () {
+      final result = validate(
+        [
+          {
+            ...proposal(status: 'completed'),
+            'missingFields': ['occurred_at'],
+            'questions': ['请补充截图里的交易日期。'],
+          },
+        ],
+        source: 'AI_IMAGE',
+        input: '现在点的\n补充：时间就是现在啊\n补充：就是现在！！！',
+      );
+      expect(result['questions'], isEmpty);
+      final transaction = (result['transactions'] as List).single;
+      expect(transaction['occurredAt'], now.millisecondsSinceEpoch);
+      expect(result['autoSaveEligible'], isTrue);
+    },
+  );
+
+  test('receipt time correction cannot replace missing payment evidence', () {
+    final result = validate(
+      [
+        {
+          ...proposal(status: 'unknown'),
+          'questions': ['请补充付款时间和支付状态。'],
+        },
+      ],
+      source: 'AI_IMAGE',
+      input: '时间就是现在啊',
+    );
+    expect(result['transactions'], isEmpty);
+    expect(result['questions'], contains('请补充付款时间和支付状态。'));
+  });
+
   Map<String, dynamic> aa({int amount = 2500, int count = 4}) => {
     ...proposal(amount: amount, quote: '100元'),
     'aaSplit': {'totalAmountFen': 10000, 'participantCount': count},

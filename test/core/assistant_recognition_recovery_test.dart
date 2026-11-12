@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:pennypilot/core/agent/agent_models.dart';
 import 'package:pennypilot/core/agent/agent_store.dart';
 import 'package:pennypilot/core/ai/shared_ai_service.dart';
 import 'package:pennypilot/core/cross_platform_repository.dart';
@@ -82,6 +83,39 @@ class _RecognitionAi extends SharedAiService {
 
   final DateTime now;
   final requests = <Map<String, dynamic>>[];
+  final agentQuestions = <String>[];
+
+  @override
+  Future<AgentModel> openAgentModel(
+    LedgerSnapshot snapshot, {
+    AgentStreamComplete? nativeTurn,
+    AgentReasoningStreamComplete? nativeReasoningTurn,
+    AiModel? catalogModel,
+    required Future<void> Function() guard,
+  }) async => AgentModel(
+    identity: 'test:model',
+    complete: (messages, _) async {
+      final question = messages.last['content'] as String;
+      agentQuestions.add(question);
+      if (question == '昨天打了车') {
+        return const AgentReply(
+          message: {
+            'tool_calls': [
+              {
+                'id': 'ask-amount',
+                'type': 'function',
+                'function': {
+                  'name': 'ask_user',
+                  'arguments': '{"question":"打车花了多少钱？"}',
+                },
+              },
+            ],
+          },
+        );
+      }
+      return const AgentReply(message: {'content': '已收到你的新问题。'});
+    },
+  );
 
   @override
   Future<Map<String, dynamic>> recognizeInput(
@@ -132,6 +166,87 @@ class _RecognitionAi extends SharedAiService {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUpAll(sqfliteFfiInit);
+
+  for (final newerQuestion in [false, true]) {
+    test('cancelled receipt keeps prior saves and stays closed after restart '
+        '(newer question: $newerQuestion)', () async {
+      final now = DateTime(2026, 11, 1, 12);
+      final ledger = PortableLedgerStore(
+        databaseFactory: databaseFactoryFfi,
+        databasePath: inMemoryDatabasePath,
+        clock: () => now,
+      );
+      addTearDown(ledger.close);
+      await ledger.invoke('updateSettings', {
+        'activeInputAutoSaveEnabled': true,
+        'cloudImageParsingEnabled': true,
+      });
+      final agentStore = MemoryAgentStore();
+      final credentials = _Credentials();
+      final ai = _RecognitionAi(credentials, now);
+      final repository = CrossPlatformLedgerRepository(
+        store: _BorrowedLedger(ledger),
+        agentStore: agentStore,
+        credentials: credentials,
+        ai: ai,
+        platformServices: _Platform(),
+        android: false,
+      );
+      addTearDown(repository.close);
+      final controller = LedgerController(
+        repository: repository,
+        attachmentStore: _Attachments(),
+        clock: () => now,
+      );
+      addTearDown(controller.dispose);
+      await controller.init();
+      await controller.sendAssistantInput(
+        '识别午餐和地铁这两笔',
+        attachment: {'imageBase64': 'AQID', 'mimeType': 'image/png'},
+      );
+      final runId = controller.messages.first.runId;
+      final saved = controller.transactions.single;
+      expect(controller.pendingRecognition, isTrue);
+      expect(controller.drafts, hasLength(1));
+
+      if (newerQuestion) {
+        await controller.sendAssistantInput('订单取消了');
+        expect(ai.agentQuestions, ['订单取消了']);
+        expect(controller.pendingRecognition, isTrue);
+        await controller.sendAssistantInput('昨天打了车');
+        expect(controller.agentSession['status'], 'awaiting_input');
+        await controller.sendAssistantInput('取消');
+        expect(controller.messages.last.text, '已结束这次补问。');
+        expect(controller.pendingRecognition, isTrue);
+      }
+
+      await controller.sendAssistantInput(newerQuestion ? '取消这次识别' : '取消');
+      expect(ai.requests, hasLength(1));
+      expect(ai.agentQuestions, hasLength(newerQuestion ? 2 : 0));
+      expect(controller.pendingRecognition, isFalse);
+      expect(controller.recognitionQuestions, isEmpty);
+      expect(controller.drafts, isEmpty);
+      expect(controller.transactions.single.id, saved.id);
+      expect(controller.canUndoAssistantRun(runId), isTrue);
+      expect(controller.messages[1].text, '已取消这次识别。');
+      if (newerQuestion) {
+        expect(controller.messages.last.text, '已结束这次补问。');
+      }
+
+      final reopened = LedgerController(
+        repository: repository,
+        attachmentStore: _Attachments(),
+        clock: () => now,
+      );
+      addTearDown(reopened.dispose);
+      await reopened.init();
+      expect(reopened.pendingRecognition, isFalse);
+      expect(reopened.recognitionQuestions, isEmpty);
+      expect(reopened.drafts, isEmpty);
+      expect(reopened.messages[1].text, '已取消这次识别。');
+      expect(reopened.transactions.single.id, saved.id);
+    });
+  }
 
   test(
     'local image draft survives restart, never calls AI, and needs a selected date',

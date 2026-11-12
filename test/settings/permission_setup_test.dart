@@ -202,7 +202,7 @@ void main() {
       expect(find.text('已授权 · 采集已暂停'), findsOneWidget);
       await _tap(tester, '重新连接通知服务');
       expect(repository.calls.single.method, 'rebindNotificationService');
-      expect(find.textContaining('已请求重新连接'), findsOneWidget);
+      expect(find.textContaining('通知监听仍未连接'), findsOneWidget);
       expect(find.text('已授权 · 服务未连接'), findsOneWidget);
       await _tap(tester, '开启页面采集');
       await _tap(tester, '同意并开启');

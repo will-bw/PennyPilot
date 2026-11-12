@@ -248,6 +248,11 @@ Future<void> chooseAssistantInputOption(
 }
 
 Future<void> supplement(WidgetTester tester, String text) async {
+  final mode = find.widgetWithText(TextButton, '补充这次识别').hitTestable();
+  expect(mode, findsOneWidget);
+  expect(find.widgetWithText(TextButton, '取消识别').hitTestable(), findsOneWidget);
+  await tester.tap(mode);
+  await tester.pumpAndSettle();
   await tester.enterText(messageInput(), text);
   await tester.pump();
   final send = find.byTooltip('发送补充');

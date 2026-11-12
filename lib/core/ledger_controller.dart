@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'recognition/recognition_protocol.dart';
 import 'agent/agent_models.dart' show agentId;
 import 'agent/agent_presentation.dart';
+import 'agent/agent_runtime.dart' show LedgerAgentRuntime;
 import 'storage/assistant_attachment_store.dart';
 import 'ai/model_reasoning.dart';
 
@@ -166,6 +167,9 @@ class LedgerController extends ChangeNotifier {
           ) ||
           recognitionQuestions.isNotEmpty);
   bool get canSupplementRecognition => pendingRecognition && !_localReceiptRun;
+  static final _explicitRecognitionCancellation = RegExp(
+    r'^取消(?:这次)?识别[。！!\s]*$',
+  );
   String? _retryQuestion;
   String? get retryQuestion => _retryQuestion;
   String _speechText = '';
@@ -1398,6 +1402,8 @@ class LedgerController extends ChangeNotifier {
           .whereType<Map>()
           .where((m) => m['role'] == 'user' && m['internal'] != true);
       _retryQuestion = users.lastOrNull?['content'] as String?;
+    } else {
+      _retryQuestion = null;
     }
     if (_recognitionRunId == null) _restoreAssistantRecognition();
   }
@@ -1557,6 +1563,15 @@ class LedgerController extends ChangeNotifier {
     }
     if (_assistantDraft.trim() == text.trim()) setAssistantDraft('');
     if (identical(image, _assistantAttachment)) _assistantAttachment = null;
+    if (image == null &&
+        pendingRecognition &&
+        LedgerAgentRuntime.isCancellationInput(text) &&
+        (isSupplement ||
+            _messages.lastOrNull?.runId == _recognitionRunId ||
+            _explicitRecognitionCancellation.hasMatch(text.trim()))) {
+      await cancelAssistantRecognition();
+      return;
+    }
     if (image == null && !(isSupplement && pendingRecognition)) {
       await _ask(text, retry: false, source: source);
       return;
@@ -1613,16 +1628,38 @@ class LedgerController extends ChangeNotifier {
     });
   }
 
-  Future<void> _persistAssistantRecognition() async {
+  Future<void> cancelAssistantRecognition() =>
+      _operation('assistantInput', () async {
+        if (!pendingRecognition) return;
+        final generation = _generation;
+        final runId = _recognitionRunId;
+        await _persistAssistantRecognition(cancelled: true);
+        _requireCurrent(generation);
+        _drafts.removeWhere(
+          (tx) => tx.recognitionMetadata['requestSessionId'] == runId,
+        );
+        recognitionQuestions = [];
+        recognitionNotice = null;
+        _recognitionRunId = null;
+        _localReceiptRun = false;
+        _recognitionText = '';
+        _recognitionImage = null;
+        _recognitionAttachments = [];
+      });
+
+  Future<void> _persistAssistantRecognition({bool cancelled = false}) async {
     final runId = _recognitionRunId;
     if (runId == null) return;
     final generation = _generation;
     final saved = transactions
         .where((t) => t.recognitionMetadata['requestSessionId'] == runId)
         .toList();
-    final ownedDrafts = _drafts
-        .where((t) => t.recognitionMetadata['requestSessionId'] == runId)
-        .toList();
+    final ownedDrafts = cancelled
+        ? const <LedgerTransaction>[]
+        : _drafts
+              .where((t) => t.recognitionMetadata['requestSessionId'] == runId)
+              .toList();
+    final questions = cancelled ? const <String>[] : recognitionQuestions;
     final receipt = {
       'type': 'receipt',
       'title': saved.isEmpty
@@ -1633,13 +1670,15 @@ class LedgerController extends ChangeNotifier {
           .map((t) => {...t.toMap(), 'editVersion': 0})
           .toList(),
     };
-    final pending = ownedDrafts.isNotEmpty || recognitionQuestions.isNotEmpty;
-    final answer = [
-      if (saved.isNotEmpty) '已记下 ${saved.length} 笔。',
-      if (ownedDrafts.isNotEmpty) '还有 ${ownedDrafts.length} 笔待核对。',
-      ...recognitionQuestions,
-      if (!pending && saved.isEmpty) recognitionNotice ?? '这次没有新增账单。',
-    ].join('\n');
+    final pending = ownedDrafts.isNotEmpty || questions.isNotEmpty;
+    final answer = cancelled
+        ? '已取消这次识别。'
+        : [
+            if (saved.isNotEmpty) '已记下 ${saved.length} 笔。',
+            if (ownedDrafts.isNotEmpty) '还有 ${ownedDrafts.length} 笔待核对。',
+            ...questions,
+            if (!pending && saved.isEmpty) recognitionNotice ?? '这次没有新增账单。',
+          ].join('\n');
     final args = {
       'revision': revision,
       'runId': runId,
@@ -1652,11 +1691,11 @@ class LedgerController extends ChangeNotifier {
           ? 'AI_IMAGE'
           : 'AI_TEXT',
       'answer': answer,
-      'status': pending ? 'awaiting_input' : 'completed',
+      'status': pending ? 'awaiting_recognition' : 'completed',
       if (_recognitionAttachments.isNotEmpty)
         'attachment': _recognitionAttachments.first,
       'parts': [
-        receipt,
+        if (saved.isNotEmpty || !cancelled) receipt,
         {
           'type': 'recognition_state',
           'runId': runId,
@@ -1671,7 +1710,7 @@ class LedgerController extends ChangeNotifier {
                 },
               )
               .toList(),
-          'questions': List<String>.of(recognitionQuestions),
+          'questions': List<String>.of(questions),
           'undoneOperations': _undoneRecognitionOperations.toList(),
         },
       ],
@@ -1691,9 +1730,7 @@ class LedgerController extends ChangeNotifier {
         _requireCurrent(generation);
         _adoptAgentState(result);
       } else {
-        final prior = _messages.where((m) => m.runId != runId).toList();
-        _messages = [
-          ...prior,
+        final updated = [
           ChatMessage(
             id: '$runId:user',
             runId: runId,
@@ -1709,6 +1746,13 @@ class LedgerController extends ChangeNotifier {
             parts: (args['parts'] as List).cast<Map<String, dynamic>>(),
           ),
         ];
+        final index = _messages.indexWhere((m) => m.runId == runId);
+        if (index == -1) {
+          _messages = [..._messages, ...updated];
+        } else {
+          final count = _messages.where((m) => m.runId == runId).length;
+          _messages.replaceRange(index, index + count, updated);
+        }
       }
       _notify();
     }();
@@ -1753,7 +1797,6 @@ class LedgerController extends ChangeNotifier {
       recognitionQuestions = [];
     }
     _adoptAgentState(result);
-    _retryQuestion = null;
     _notify();
   });
   Future<void> stopAgent() async {
