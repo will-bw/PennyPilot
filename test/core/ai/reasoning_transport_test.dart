@@ -643,6 +643,36 @@ void main() {
   );
 
   test(
+    'recognition retries malformed response once with the original receipt',
+    () async {
+      final service = SharedAiService(
+        credentials: fixtures.MemoryCredentials(),
+      );
+      addTearDown(service.dispose);
+      var requests = 0;
+      final result = await service.recognizeInput(
+        {'text': '现在点的', 'imageBase64': 'AAAA', 'mimeType': 'image/png'},
+        LedgerSnapshot(
+          revision: 0,
+          settings: {
+            'activeProvider': 'chatgpt',
+            'cloudImageParsingEnabled': true,
+          },
+        ),
+        nativeChat: (messages, role) async {
+          expect(role, 'vision');
+          expect(jsonEncode(messages), contains('data:image/png;base64,AAAA'));
+          if (++requests == 1) return '我需要核对一下。';
+          expect(messages.last['content'], contains('只返回一个'));
+          return '{"intent":"record","proposals":[]}';
+        },
+      );
+      expect(requests, 2);
+      expect(result['transactions'], isEmpty);
+    },
+  );
+
+  test(
     'synchronous recognition overrides do not inherit chat thinking preferences',
     () async {
       final service = SharedAiService(

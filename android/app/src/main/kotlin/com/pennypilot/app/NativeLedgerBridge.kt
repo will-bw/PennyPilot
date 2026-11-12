@@ -2,7 +2,6 @@ package com.pennypilot.app
 
 import android.Manifest
 import android.app.ActivityManager
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,7 +9,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
-import android.service.notification.NotificationListenerService
 import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
 import androidx.room.InvalidationTracker
@@ -44,8 +42,8 @@ import com.pennypilot.app.domain.usecase.InsightUseCase
 import com.pennypilot.app.domain.usecase.ParseTextUseCase
 import com.pennypilot.app.service.CaptureProcessor
 import com.pennypilot.app.service.CaptureServiceMonitor
+import com.pennypilot.app.service.NotificationCaptureConnection
 import com.pennypilot.app.service.NotificationCapturePermission
-import com.pennypilot.app.service.NotificationCaptorService
 import com.pennypilot.app.service.NotificationHelper
 import com.pennypilot.app.service.PaymentAccessibilityPermission
 import com.pennypilot.app.util.MoneyUtil
@@ -88,6 +86,7 @@ class NativeLedgerBridge @Inject constructor(
     private val insight: InsightUseCase,
     private val backup: BackupUseCase,
     private val monitor: CaptureServiceMonitor,
+    private val notificationConnection: NotificationCaptureConnection,
     private val captureProcessor: CaptureProcessor,
     private val llmClient: com.pennypilot.app.data.llm.LLMClient
 ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
@@ -154,6 +153,7 @@ class NativeLedgerBridge @Inject constructor(
 
     fun onResume() {
         emit("changed")
+        scope.launch { notificationConnection.restoreIfNeeded() }
         scope.launch { runCatching { captureProcessor.refreshTodayCount() } }
     }
 
@@ -323,7 +323,8 @@ class NativeLedgerBridge @Inject constructor(
         "requestNotificationPermission" -> mapOf("granted" to requestNotificationPermission())
         "rebindNotificationService" -> {
             require(NotificationCapturePermission.isGranted(context)) { "请在系统设置中开启 PennyPilot 的通知使用权。" }
-            NotificationListenerService.requestRebind(ComponentName(context, NotificationCaptorService::class.java)); null
+            notificationConnection.restoreIfNeeded()
+            null
         }
         "signIn" -> {
             val url = auth.beginSignIn(args.optionalString("accountId"), args.boolean("requestPlanPermission", false))
@@ -430,6 +431,7 @@ class NativeLedgerBridge @Inject constructor(
             }.getOrNull() else null,
             "speechAvailable" to runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false),
             "notificationServiceConnected" to health.isBound,
+            "notificationServiceReconnecting" to health.isNotificationRecoveryInProgress,
             "accessibilityServiceConnected" to health.isAccessibilityBound,
             "lastScreenEventTime" to health.lastScreenEventTime,
             "lastScreenReadTime" to health.lastScreenReadTime,
@@ -758,7 +760,11 @@ class NativeLedgerBridge @Inject constructor(
             args.optionalString("recognitionReviewModel")?.let { keyStore.recognitionReviewModel = it.trim() }
             keyStore.clearRecoveryNotice()
         }
-        if (args.containsKey("notificationCaptureEnabled")) preferences.setNotificationCaptureEnabled(args.boolean("notificationCaptureEnabled"))
+        if (args.containsKey("notificationCaptureEnabled")) {
+            val enabled = args.boolean("notificationCaptureEnabled")
+            preferences.setNotificationCaptureEnabled(enabled)
+            if (enabled) scope.launch { notificationConnection.restoreIfNeeded() }
+        }
         if (args.containsKey("screenCaptureEnabled")) preferences.setScreenCaptureEnabled(args.boolean("screenCaptureEnabled"))
         if (args.containsKey("notificationCloudParsingEnabled")) preferences.setNotificationCloudParsingEnabled(args.boolean("notificationCloudParsingEnabled"))
         if (args.containsKey("screenCloudParsingEnabled")) preferences.setScreenCloudParsingEnabled(args.boolean("screenCloudParsingEnabled"))

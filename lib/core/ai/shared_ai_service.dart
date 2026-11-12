@@ -192,7 +192,9 @@ class SharedAiService {
                 {
                   'type': 'text',
                   'text':
-                      '用户主动选择的支付截图。提取其中已完成的交易，时间和本人角色不明确时提问。'
+                      '用户主动选择的支付截图。提取其中已完成的交易。用户明确补充的时间优先；'
+                      '“现在点的”“时间就是现在”按系统给出的当地时间处理，不再追问时间。'
+                      '凭证和用户都没有提供时间，或本人角色确实不明确时，只问仍缺少的信息。'
                       '逐字抄录凭证上清晰可读的收款人、付款人或商户名称。遮挡或模糊的姓名留空，'
                       '不要按同音字、相似字或历史账单补全。用户明确更正的名称可按更正填写。用户补充：$text',
                 },
@@ -217,21 +219,34 @@ class SharedAiService {
           : _chat(snapshot, payload, jsonMode: true, modelRole: selectedRole);
     }
 
-    final response = await send(messages, role);
+    var response = await send(messages, role);
     final operationId =
         arguments['operationId'] as String? ??
         RecognitionProtocol.identity(
           '$source:${now.microsecondsSinceEpoch}:$text',
         );
-    Map<String, dynamic> validate(String raw) => RecognitionProtocol.validate(
-      decodeAiObject(raw),
-      snapshot: snapshot,
-      input: text,
-      source: source,
-      now: now,
-      operationId: operationId,
-    );
-    var result = validate(response);
+    Map<String, dynamic> validate(Map<String, dynamic> raw) =>
+        RecognitionProtocol.validate(
+          raw,
+          snapshot: snapshot,
+          input: text,
+          source: source,
+          now: now,
+          operationId: operationId,
+        );
+    Map<String, dynamic> decoded;
+    try {
+      decoded = decodeAiObject(response);
+    } on LedgerException {
+      // No ledger writes have happened. Ask the same model to repair the
+      // response format once while keeping the original text and attachment.
+      response = await send([
+        ...messages,
+        _message('user', '请重新处理上面的同一份输入，只返回一个符合协议的 JSON 对象。'),
+      ], role);
+      decoded = decodeAiObject(response);
+    }
+    var result = validate(decoded);
     final reviewModel =
         snapshot.settings['recognitionReviewModel'] as String? ?? '';
     if ((reviewModel.isNotEmpty ||
@@ -248,7 +263,7 @@ class SharedAiService {
           ),
         ];
         final reviewed = await send(reviewMessages, 'review');
-        final checked = validate(reviewed);
+        final checked = validate(decodeAiObject(reviewed));
         final revised = checked['transactions'] as List;
         final revisedIds = revised
             .map((row) => jsonDecode(row['metadataJson'])['operationId'])

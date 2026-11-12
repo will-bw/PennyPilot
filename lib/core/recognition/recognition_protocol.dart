@@ -42,10 +42,18 @@ class RecognitionProtocol {
     required DateTime now,
     required String operationId,
   }) {
-    final questions = _strings(
-      result['questions'],
-    ).where((q) => source == 'AI_IMAGE' || !_optionalQuestion(q)).toList();
     final intent = result['intent'];
+    final raw = result['proposals'];
+    final imageTimeDeclared =
+        source == 'AI_IMAGE' &&
+        intent == 'record' &&
+        raw is List &&
+        raw.length == 1 &&
+        _imageTimeIsNow(input);
+    final questions = _strings(result['questions']).where((q) {
+      if (imageTimeDeclared && _onlyAsksForTime(q)) return false;
+      return source == 'AI_IMAGE' || !_optionalQuestion(q);
+    }).toList();
     if (intent != 'record') {
       return {
         'transactions': <dynamic>[],
@@ -62,7 +70,6 @@ class RecognitionProtocol {
         'autoSaveEligible': false,
       };
     }
-    final raw = result['proposals'];
     if (raw is! List || raw.length > 100) {
       throw const LedgerException('模型返回的账单列表无效。');
     }
@@ -72,14 +79,16 @@ class RecognitionProtocol {
       final row = stringMap(raw[index]);
       final activeInput = source == 'AI_TEXT' || source == 'AI_VOICE';
       final assumptions = _strings(row['assumptions']);
-      final missing = _strings(
-        row['missingFields'],
-      ).where((q) => !activeInput || !_optionalQuestion(q)).toList();
+      final missing = _strings(row['missingFields']).where((q) {
+        if (imageTimeDeclared && _onlyAsksForTime(q)) return false;
+        return !activeInput || !_optionalQuestion(q);
+      }).toList();
       final conflicts = _strings(row['conflicts']);
       final localQuestions = [
-        ..._strings(
-          row['questions'],
-        ).where((q) => !activeInput || !_optionalQuestion(q)),
+        ..._strings(row['questions']).where((q) {
+          if (imageTimeDeclared && _onlyAsksForTime(q)) return false;
+          return !activeInput || !_optionalQuestion(q);
+        }),
         ...missing.map((v) => '请补充：$v'),
         ...conflicts.map((v) => '请核对：$v'),
       ];
@@ -278,6 +287,10 @@ class RecognitionProtocol {
         date = declaredDate.date;
         localPrecision = declaredDate.precision;
         assumptions.addAll(declaredDate.assumptions);
+      } else if (imageTimeDeclared) {
+        date = now;
+        localPrecision = 'user_entry_time';
+        assumptions.add('按你补充的时间，记录为这次输入的时间');
       } else {
         if (date == null) {
           localQuestions.add(
@@ -431,6 +444,31 @@ class RecognitionProtocol {
       r'年份|完整年月日|具体年月日|具体日期|日期.{0,8}(?:明确|缺失|缺少)|具体时间|商户名称|账户名称|支付状态|完成状态|是否.{0,4}(?:已完成|已支付)|是否完成',
     ).hasMatch(value);
   }
+
+  static bool _imageTimeIsNow(String input) {
+    final turns = input.split(RegExp(r'\n补充[：:]')).reversed;
+    final timeTurn = turns
+        .where(
+          (turn) => RegExp(
+            r'现在|刚刚|刚才|今天|昨日|昨天|前天|明天|上周|星期|[年月日号]|\d{1,2}[:：点]',
+          ).hasMatch(turn),
+        )
+        .firstOrNull;
+    return timeTurn != null &&
+        RegExp(
+          r'^(?:(?:付款|支付|交易|下单)?时间\s*)?(?:就是|是)?\s*(?:现在|刚刚|刚才)(?:(?:才)?(?:点|付|支付|买|下单)的)?[啊呀呢的。！？!?\s]*$',
+        ).hasMatch(timeTurn.trim());
+  }
+
+  static bool _onlyAsksForTime(String question) =>
+      RegExp(
+        r'日期|时间|年月日|几点|哪天|^(?:date|time|year|occurred_at|occurredat)$',
+        caseSensitive: false,
+      ).hasMatch(question) &&
+      !RegExp(
+        r'金额|币种|方向|用途|角色|谁|账户|支付状态|付款状态|是否.{0,3}(?:完成|支付)|退款|冲突|amount|currency',
+        caseSensitive: false,
+      ).hasMatch(question);
 
   static int _amountAnchor(
     String input,

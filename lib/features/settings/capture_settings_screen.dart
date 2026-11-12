@@ -244,6 +244,14 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
     }, value ? '页面采集开关已开启，请查看授权与连接状态' : '支付页面读取已暂停');
   }
 
+  Future<void> _reconnectNotifications() => _run(() async {
+    await widget.controller.rebindNotificationService();
+    if (!mounted) return;
+    final connected =
+        widget.controller.capabilities['notificationServiceConnected'] == true;
+    settingsFeedback(context, notificationReconnectFeedback(connected));
+  });
+
   Future<void> _setCloud(bool value) async {
     if (value) {
       final confirmed = await confirmSettingsAction(
@@ -351,6 +359,8 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
       final headsUp = capabilities['captureHeadsUpEnabled'] == true;
       final listenerConnected =
           capabilities['notificationServiceConnected'] == true;
+      final listenerReconnecting =
+          capabilities['notificationServiceReconnecting'] == true;
       final accessibilityConnected =
           capabilities['accessibilityServiceConnected'] == true;
       final accessibilityDisconnected =
@@ -480,6 +490,8 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                         ? '读取已暂停，系统授权仍保留。'
                         : listenerConnected
                         ? '通知监听服务已连接。'
+                        : listenerReconnecting
+                        ? '正在重新连接通知监听服务。'
                         : '通知监听服务未连接，可尝试重新连接。',
                   ),
                   if (listenerGranted && notification && !listenerConnected)
@@ -488,13 +500,12 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: TextButton(
-                          onPressed: _busy
+                          onPressed: _busy || listenerReconnecting
                               ? null
-                              : () => _run(
-                                  widget.controller.rebindNotificationService,
-                                  '已请求重新连接；若仍未连接，可在系统中重新开启通知使用权',
-                                ),
-                          child: const Text('重新连接通知服务'),
+                              : _reconnectNotifications,
+                          child: Text(
+                            listenerReconnecting ? '正在重新连接…' : '重新连接通知服务',
+                          ),
                         ),
                       ),
                     ),

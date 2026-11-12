@@ -17,6 +17,7 @@ data class ScreenReadTrace(
 
 data class ServiceHealth(
     val isBound: Boolean = false,
+    val isNotificationRecoveryInProgress: Boolean = false,
     val isAccessibilityBound: Boolean = false,
     val lastNotificationTime: Long = 0L,
     val todayCaptureCount: Int = 0,
@@ -43,6 +44,10 @@ class CaptureServiceMonitor @Inject constructor() {
 
     fun onServiceDisconnected() {
         _health.update { it.copy(isBound = false) }
+    }
+
+    fun onNotificationRecovery(inProgress: Boolean) {
+        _health.update { it.copy(isNotificationRecoveryInProgress = inProgress) }
     }
 
     fun onNotificationCaptured() {

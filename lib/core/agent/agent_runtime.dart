@@ -28,7 +28,7 @@ class LedgerAgentRuntime {
   final Duration maxDuration;
   AgentCancellation? _cancellation;
   Completer<void>? _finished;
-  bool get running => _cancellation != null;
+  bool get running => _finished != null;
   void cancel() => _cancellation?.cancel();
   Future<void> shutdown() async {
     cancel();
@@ -43,7 +43,7 @@ class LedgerAgentRuntime {
     final session = saved == null
         ? AgentSession.create(revision, _clock())
         : AgentSession.fromMap(saved);
-    if (session.status == 'running' && !running) {
+    if (session.status == 'running' && _cancellation == null) {
       _repairPendingCalls(session, '应用上次运行中断。此工具没有可确认的执行结果，请重新查询；不要假定成功。');
       session.status = 'interrupted';
       session.messages.add({
@@ -51,6 +51,10 @@ class LedgerAgentRuntime {
         'content': '上次任务因应用关闭而中断。已保留执行记录，可以继续提问。',
         'isError': true,
       });
+      await _save(session);
+    } else if (!running &&
+        session.actions.any((action) => action['status'] == 'applying')) {
+      _repairPendingCalls(session, '上次提案执行中断，请核对账本的实际结果。');
       await _save(session);
     }
     if (saved == null) {
@@ -140,7 +144,11 @@ class LedgerAgentRuntime {
         runId.isEmpty ||
         runId.length > 160 ||
         !['AI_TEXT', 'AI_VOICE', 'AI_IMAGE'].contains(source) ||
-        !['awaiting_input', 'completed'].contains(status) ||
+        ![
+          'awaiting_input',
+          'awaiting_recognition',
+          'completed',
+        ].contains(status) ||
         parts.length > 32 ||
         jsonEncode(parts).length > 512 * 1024) {
       throw const LedgerException('识别回执格式无效。', code: 'AGENT_PROTOCOL');
@@ -188,7 +196,14 @@ class LedgerAgentRuntime {
       assistant['parts'] = parts;
       assistant['updatedAt'] = now;
     }
-    session.status = status;
+    final latestUser = session.messages
+        .where((m) => m['role'] == 'user' && m['internal'] != true)
+        .lastOrNull;
+    if (latestUser?['runId'] == runId) {
+      session.status = status == 'awaiting_input'
+          ? 'awaiting_recognition'
+          : status;
+    }
     if (session.title == '新对话') {
       session.title = question.trim().substring(
         0,
@@ -344,6 +359,64 @@ class LedgerAgentRuntime {
     return {...await state(revision), 'count': result['count']};
   }
 
+  static bool isCancellationInput(String input) => RegExp(
+    r'^(?:取消(?:这次|识别|记账|这次识别|这次记账)?|算了|不记了|不用记了|先不记了|不用了|停止)[。！!\s]*$',
+  ).hasMatch(input.trim());
+
+  static bool _awaitingTextInput(AgentSession session) {
+    if (session.status != 'awaiting_input') return false;
+    final latest = session.messages
+        .where(
+          (m) =>
+              m['role'] == 'assistant' &&
+              m['provisional'] != true &&
+              m['actionReceipt'] == null,
+        )
+        .lastOrNull;
+    // Older app versions used awaiting_input for both recognition and ask_user.
+    return !(latest?['parts'] as List? ?? const []).any(
+      (part) => agentMap(part)['type'] == 'recognition_state',
+    );
+  }
+
+  Future<Map<String, dynamic>?> cancelClarification({
+    required int revision,
+    required String question,
+    required String source,
+    required Future<void> Function() guard,
+  }) async {
+    if (!isCancellationInput(question)) return null;
+    _requireIdle();
+    await guard();
+    final session = await active(revision);
+    if (!_awaitingTextInput(session)) return null;
+    final runId = agentId();
+    final now = _clock().millisecondsSinceEpoch;
+    const answer = '已结束这次补问。';
+    session.messages.addAll([
+      {
+        'id': agentId(),
+        'runId': runId,
+        'role': 'user',
+        'content': question.trim(),
+        'source': source,
+        'createdAt': now,
+      },
+      {
+        'id': agentId(),
+        'runId': runId,
+        'role': 'assistant',
+        'content': answer,
+        'createdAt': now,
+      },
+    ]);
+    session.status = 'completed';
+    session.plan.clear();
+    await guard();
+    await _save(session);
+    return {'answer': answer, 'isError': false, ...await state(revision)};
+  }
+
   Future<Map<String, dynamic>> run({
     required String question,
     required LedgerSnapshot ledger,
@@ -475,7 +548,7 @@ class LedgerAgentRuntime {
         }
       }
       session.modelIdentity = model.identity;
-      final continuesTask = session.status == 'awaiting_input';
+      final continuesTask = _awaitingTextInput(session);
       session.status = 'running';
       if (!continuesTask && !internalQuestion) session.plan.clear();
       session.messages.add({
@@ -643,11 +716,11 @@ class LedgerAgentRuntime {
         session.messages.add(assistant);
         reasoningAttached = activeReasoning != null;
         if (reply.calls.isEmpty) {
+          final pendingConfirmation = _hasPendingConfirmation(session, runId);
           final unfinished = session.plan.any(
             (p) => p['status'] != 'completed',
           );
-          if (unfinished &&
-              !session.actions.any((a) => a['status'] == 'pending')) {
+          if (unfinished && !pendingConfirmation) {
             assistant['provisional'] = true;
             emit('text_reset', {'messageId': messageId});
             previewMessageId = null;
@@ -682,8 +755,36 @@ class LedgerAgentRuntime {
             r'\[依据 (Q\d+)\]',
           ).allMatches(reply.text).map((m) => m.group(1)!).toSet();
           final unsupported = citedIds.any((id) => !evidenceIds.contains(id));
+          final claimsWrite = RegExp(
+            r'(?:^|[。！!\n])\s*(?:[-*#>]+\s*)?(?:我\s*)?(?:已经|已为你|已帮你|已|刚刚)\s*(?:记下|记入账本|记账成功|保存到账本|新增账单|删除了|修改了|更新了预算)',
+          ).hasMatch(reply.text);
+          final hasWriteReceipt = session.actions.any(
+            (action) =>
+                action['runId'] == runId && action['status'] == 'applied',
+          );
+          if (claimsWrite && !hasWriteReceipt) {
+            assistant['provisional'] = true;
+            emit('text_reset', {'messageId': messageId});
+            previewMessageId = null;
+            if (++correctiveAttempts > 2) {
+              throw const LedgerException(
+                '本轮没有可核对的保存回执。请查看待确认提案或重试。',
+                code: 'AGENT_WRITE_RECEIPT',
+              );
+            }
+            session.messages.add({
+              'role': 'user',
+              'content': '运行时校验：本轮没有成功写入账本的回执。等待确认的提案请说明待确认，工具失败则按实际结果处理。',
+              'internal': true,
+            });
+            await _save(session);
+            continue;
+          }
           if (unsupported ||
-              ledgerTask && (!tools.hasLedgerEvidence || citedIds.isEmpty)) {
+              ledgerTask &&
+                  (tools.hasLedgerEvidence
+                      ? citedIds.isEmpty
+                      : !pendingConfirmation)) {
             assistant['provisional'] = true;
             emit('text_reset', {'messageId': messageId});
             previewMessageId = null;
@@ -702,7 +803,7 @@ class LedgerAgentRuntime {
             await _save(session);
             continue;
           }
-          session.status = session.actions.any((a) => a['status'] == 'pending')
+          session.status = pendingConfirmation
               ? 'awaiting_confirmation'
               : 'completed';
           if (chart != null) assistant['chartData'] = chart;
@@ -728,10 +829,31 @@ class LedgerAgentRuntime {
         // Tool preambles are transient; the durable result is the final answer.
         emit('text_reset', {'messageId': messageId});
         previewMessageId = null;
+        final hasClarification = reply.calls.any(
+          (call) => agentMap(call['function'])['name'] == 'ask_user',
+        );
         for (final call in reply.calls) {
           await check();
           final function = agentMap(call['function']);
           final name = function['name'] as String;
+          if (waitingQuestion != null ||
+              hasClarification &&
+                  (name.startsWith('propose_') ||
+                      name == 'remember' ||
+                      name == 'forget_memory')) {
+            session.messages.add({
+              'id': agentId(),
+              'runId': runId,
+              'role': 'tool',
+              'tool_call_id': call['id'],
+              'content': jsonEncode({
+                'status': 'deferred',
+                'message': '此调用未执行，请在用户补充后重新判断。',
+              }),
+              'createdAt': _clock().millisecondsSinceEpoch,
+            });
+            continue;
+          }
           final trace = <String, dynamic>{
             'step': step,
             'tool': name,
@@ -834,6 +956,8 @@ class LedgerAgentRuntime {
             'runId': runId,
             'role': 'tool',
             'tool_call_id': call['id'],
+            if (result['status'] == 'awaiting_confirmation')
+              'actionId': result['action_id'],
             'content': jsonEncode(result),
             'createdAt': _clock().millisecondsSinceEpoch,
           });
@@ -1101,6 +1225,20 @@ class LedgerAgentRuntime {
     return (turns: turns, operationId: 'agent:${session.id}:entry:$start');
   }
 
+  static bool _hasPendingConfirmation(AgentSession session, Object? runId) {
+    if (runId == null) return false;
+    final ids = session.messages
+        .where((message) => message['runId'] == runId)
+        .map((message) => message['actionId'])
+        .whereType<String>()
+        .toSet();
+    return session.actions.any(
+      (action) =>
+          action['status'] == 'pending' &&
+          (action['runId'] == runId || ids.contains(action['id'])),
+    );
+  }
+
   static ({String quote, int offset}) _entryAmount(
     List<String> turns,
     String evidence,
@@ -1158,6 +1296,29 @@ class LedgerAgentRuntime {
     required Future<void> Function() guard,
   }) async {
     _requireIdle();
+    final finished = Completer<void>();
+    _finished = finished;
+    try {
+      return await _resolve(
+        revision: revision,
+        actionId: actionId,
+        approve: approve,
+        ledger: ledger,
+        guard: guard,
+      );
+    } finally {
+      _finished = null;
+      finished.complete();
+    }
+  }
+
+  Future<String> _resolve({
+    required int revision,
+    required String actionId,
+    required bool approve,
+    required LedgerRepository ledger,
+    required Future<void> Function() guard,
+  }) async {
     await guard();
     final session = await active(revision);
     final action = session.actions
@@ -1167,10 +1328,40 @@ class LedgerAgentRuntime {
     if (action['status'] != 'pending') {
       throw const LedgerException('提案已经处理，不会重复执行。');
     }
-    if (!approve) {
-      action['status'] = 'rejected';
+
+    Future<String> finish(String status, String receipt) async {
+      action['status'] = status;
+      final latestRun = session.messages
+          .where(
+            (message) =>
+                message['actionReceipt'] == null && message['internal'] != true,
+          )
+          .lastOrNull?['runId'];
+      final currentConfirmationFinished =
+          session.status == 'awaiting_confirmation' &&
+          !_hasPendingConfirmation(session, latestRun);
+      if (currentConfirmationFinished) {
+        session.status = 'completed';
+      }
+      final answer =
+          currentConfirmationFinished &&
+              session.plan.any((step) => step['status'] != 'completed')
+          ? '$receipt 你可以继续处理计划中的剩余步骤。'
+          : receipt;
+      session.messages.add({
+        'id': agentId(),
+        'runId': agentId(),
+        'role': 'assistant',
+        'content': answer,
+        'actionReceipt': actionId,
+        'createdAt': _clock().millisecondsSinceEpoch,
+      });
       await _save(session);
-      return '用户已拒绝提案 ${action['title']}（$actionId），未改变账本。';
+      return answer;
+    }
+
+    if (!approve) {
+      return finish('rejected', '已取消「${action['title']}」。');
     }
     final payload = agentMap(action['payload']);
     final current = await ledger.snapshot();
@@ -1217,14 +1408,15 @@ class LedgerAgentRuntime {
         default:
           throw const LedgerException('不支持此提案。');
       }
-      action['status'] = 'applied';
     } catch (_) {
       action['status'] = 'uncertain';
       await _save(session);
       rethrow;
     }
-    await _save(session);
-    return '应用已执行并记录提案 ${action['title']}（$actionId），状态 applied。请按需要查询最新账本并继续原任务。';
+    final receipt = action['kind'] == 'budget'
+        ? '月预算已改为 ${formatMoney(payload['amount'] as int)} 元。'
+        : '已${action['title']}。';
+    return finish('applied', receipt);
   }
 
   void _requireIdle() {

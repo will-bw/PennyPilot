@@ -88,7 +88,7 @@ class _AssistantRecognitionState extends State<AssistantRecognition> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (c.recognitionQuestions.isNotEmpty) ...[
-            Text('再补充一句', style: Theme.of(context).textTheme.titleSmall),
+            Text('识别待补充', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 8),
             for (final question in c.recognitionQuestions)
               Padding(
@@ -96,10 +96,6 @@ class _AssistantRecognitionState extends State<AssistantRecognition> {
                 child: Text(question),
               ),
             const SizedBox(height: 8),
-            Text(
-              '在下方输入框补充，会结合原文继续整理。',
-              style: TextStyle(color: colors.onSurfaceVariant),
-            ),
           ],
           if (c.drafts.isNotEmpty) ...[
             SectionTitle(

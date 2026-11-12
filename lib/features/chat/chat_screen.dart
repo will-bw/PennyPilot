@@ -42,10 +42,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   late Listenable updates;
   bool syncingDraft = false, followingLatest = true, scrollScheduled = false;
   bool showLatest = false, programmaticScroll = false;
-  bool continueRecognition = true, dictated = false, ownsRecording = false;
+  bool continueRecognition = false, dictated = false, ownsRecording = false;
   int speechGeneration = 0;
   String? sessionId;
-  bool hadRecognition = false;
   String? outgoingRecognitionText;
   Map<String, dynamic>? outgoingRecognitionAttachment;
 
@@ -67,7 +66,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     ]);
     updates.addListener(_controllerChanged);
     sessionId = widget.controller.agentSession['id'] as String?;
-    hadRecognition = widget.controller.canSupplementRecognition;
   }
 
   @override
@@ -75,6 +73,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
       updates.removeListener(_controllerChanged);
+      continueRecognition = false;
       _listen();
       _controllerChanged();
     }
@@ -113,6 +112,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final nextSession = c.agentSession['id'] as String?;
     if (sessionId != nextSession) {
       sessionId = nextSession;
+      continueRecognition = false;
       followingLatest = true;
       showLatest = false;
       if (c.messages.isEmpty) {
@@ -123,10 +123,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         });
       }
     }
-    if (!hadRecognition && c.canSupplementRecognition) {
-      continueRecognition = true;
-    }
-    hadRecognition = c.canSupplementRecognition;
+    if (!c.canSupplementRecognition) continueRecognition = false;
     if (followingLatest) {
       _scheduleScroll();
     }
@@ -754,7 +751,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     icon: const Icon(Icons.undo, size: 18),
                     label: const Text('撤销本次记账'),
                   ),
-                if (index == c.messages.length - 1 && c.retryQuestion != null)
+                if (message.isError &&
+                    c.retryQuestion != null &&
+                    index == c.messages.lastIndexWhere((m) => m.isError))
                   TextButton.icon(
                     onPressed: c.isBusy
                         ? null
@@ -763,7 +762,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             runUi(context, c.retryAsk);
                           },
                     icon: const Icon(Icons.refresh, size: 18),
-                    label: Text(message.isError ? '重试这个问题' : '继续处理'),
+                    label: const Text('重试这个问题'),
                   ),
               ],
             ),
@@ -885,23 +884,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (c.canSupplementRecognition && c.assistantAttachment == null)
-              Row(
+              Wrap(
+                spacing: 8,
                 children: [
-                  Expanded(
-                    child: Text(
-                      supplement ? '补充这次识别' : '正在输入新问题',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: colors.onSurfaceVariant,
-                      ),
-                    ),
+                  TextButton(
+                    onPressed: c.isBusy
+                        ? null
+                        : () {
+                            setState(() => continueRecognition = !supplement);
+                            focus.requestFocus();
+                          },
+                    child: Text(supplement ? '改为新问题' : '补充这次识别'),
                   ),
                   TextButton(
                     onPressed: c.isBusy
                         ? null
-                        : () => setState(
-                            () => continueRecognition = !continueRecognition,
-                          ),
-                    child: Text(supplement ? '改为新问题' : '继续补充'),
+                        : () => runUi(context, c.cancelAssistantRecognition),
+                    child: const Text('取消识别'),
                   ),
                 ],
               ),

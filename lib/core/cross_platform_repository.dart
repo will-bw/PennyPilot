@@ -336,35 +336,54 @@ class CrossPlatformLedgerRepository
           }(),
           _ => _agent.state(state.revision),
         };
-      case 'ask':
       case 'agentResolveAction':
+        final invocation = _agentInvocation;
+        final revision = integer(arguments['revision'], 'revision');
+        final receipt = await _agent.resolve(
+          revision: revision,
+          actionId: arguments['actionId'] as String,
+          approve: arguments['approve'] as bool,
+          ledger: _store,
+          guard: () async {
+            final current = await _store.snapshot();
+            if (_closed) throw const LedgerException('账本已关闭。');
+            if (invocation != _agentInvocation) {
+              throw const LedgerException('已停止本次任务。', code: 'AGENT_CANCELLED');
+            }
+            if (current.revision != revision) {
+              throw const LedgerException('账本已恢复，旧提案失效。', code: 'STALE_LEDGER');
+            }
+          },
+        );
+        return {
+          'answer': receipt,
+          'isError': false,
+          ...await _agent.state(revision),
+        };
+      case 'ask':
         final invocation = ++_agentInvocation;
-        final initial = await _current(arguments);
+        final current = await _current(arguments);
         final generation = _settingsGeneration;
         Future<void> guard() async {
           if (invocation != _agentInvocation) {
             throw const LedgerException('已停止本次任务。', code: 'AGENT_CANCELLED');
           }
-          await _guardAiOperation(initial, generation);
+          await _guardAiOperation(current, generation);
         }
         var question = arguments['question'] as String? ?? '';
         final retry = arguments['retry'] == true;
         if (retry) {
           question =
               '继续完成上一轮任务。原始问题：$question。已执行的账本变更保留，先重新查询当前数据，不得重复新增；补完未完成的分析。';
-        }
-        if (method == 'agentResolveAction') {
-          question = await _agent.resolve(
-            revision: initial.revision,
-            actionId: arguments['actionId'] as String,
-            approve: arguments['approve'] as bool,
-            ledger: _store,
+        } else {
+          final cancelled = await _agent.cancelClarification(
+            revision: current.revision,
+            question: question,
+            source: arguments['source'] as String? ?? 'AI_TEXT',
             guard: guard,
           );
+          if (cancelled != null) return cancelled;
         }
-        final current = method == 'agentResolveAction'
-            ? await snapshot()
-            : initial;
         await guard();
         final catalogModel =
             _modelCatalogAccount == current.auth['activeAccountId']
@@ -418,11 +437,9 @@ class CrossPlatformLedgerRepository
           model: model,
           guard: guard,
           source: arguments['source'] as String? ?? 'AI_TEXT',
-          internalQuestion: method == 'agentResolveAction' || retry,
+          internalQuestion: retry,
           autoRecord:
-              method != 'ask' ||
-                  retry ||
-                  current.settings['activeInputAutoSaveEnabled'] == false
+              retry || current.settings['activeInputAutoSaveEnabled'] == false
               ? null
               : (transaction) async {
                   await guard();
@@ -456,7 +473,7 @@ class CrossPlatformLedgerRepository
           }
         }
         // A user stop is a normal persisted outcome, not a stale-ledger result.
-        await _guardAiOperation(initial, generation);
+        await _guardAiOperation(current, generation);
         return result;
       case 'parseText':
       case 'generateReport':

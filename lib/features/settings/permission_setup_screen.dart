@@ -76,9 +76,9 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
       if (mounted) {
         settingsFeedback(
           context,
-          c.capabilities['notificationServiceConnected'] == true
-              ? '通知监听服务已连接。'
-              : '已请求重新连接。若仍未连接，可在系统中重新开启通知使用权。',
+          notificationReconnectFeedback(
+            c.capabilities['notificationServiceConnected'] == true,
+          ),
         );
       }
     } else {
@@ -169,6 +169,9 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
           c.settings['notificationCaptureEnabled'] == true &&
           c.capabilities['notificationListenerGranted'] == true &&
           !notificationReady;
+      final notificationReconnecting =
+          notificationDisconnected &&
+          c.capabilities['notificationServiceReconnecting'] == true;
       final screenDisconnected =
           c.settings['screenCaptureEnabled'] == true &&
           c.capabilities['accessibilityGranted'] == true &&
@@ -225,14 +228,18 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
                         title: '支付通知',
                         detail:
                             '通过通知使用权读取微信、支付宝、云闪付、美团和抖音的支付通知，在本机识别金额。没有通知或金额被隐藏时可能漏记。',
-                        status: notificationStatus,
+                        status: notificationReconnecting
+                            ? '正在重新连接'
+                            : notificationStatus,
                         ready: notificationReady,
                         action: notificationReady
                             ? '查看通知使用权'
                             : notificationDisconnected
                             ? '重新连接通知服务'
                             : '开启通知采集',
-                        onPressed: disabled ? null : _notifications,
+                        onPressed: disabled || notificationReconnecting
+                            ? null
+                            : _notifications,
                         secondaryAction: notificationDisconnected
                             ? '查看通知使用权'
                             : null,
