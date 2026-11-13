@@ -35,6 +35,7 @@ import com.pennypilot.app.data.recognition.TaskCipher
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -422,6 +423,85 @@ class CaptureProcessorTest {
             preferences.setNotificationCloudParsingEnabled(false)
             preferences.setScreenCaptureEnabled(false)
             shadowOf(context.getSystemService(NotificationManager::class.java)).setNotificationsEnabled(true)
+            database.close()
+        }
+    }
+
+    @Test fun `meituan and wechat notifications count one expense in either arrival order`() = runBlocking {
+        for (shoppingPackage in listOf("com.sankuai.meituan", "com.sankuai.meituan.takeoutnew")) {
+            for (walletFirst in listOf(false, true)) {
+                withAutomaticNotificationCapture { database, processor ->
+                    val now = System.currentTimeMillis()
+                    val shopping = CapturedNotification(shoppingPackage, "shopping", now, "美团支付",
+                        "订单支付成功，商家：小王面馆，实付18.00元")
+                    val wallet = CapturedNotification("com.tencent.mm", "wallet", now + 5_000, "微信支付",
+                        "支付成功，商户：美团，实付18.00元")
+                    val notifications = if (walletFirst) listOf(wallet, shopping) else listOf(shopping, wallet)
+                    notifications.forEach { processor.processNotification(it, LedgerRevision.current) }
+
+                    val rows = database.backupDao().transactions().sortedBy { it.id }
+                    assertEquals(2, rows.size)
+                    assertEquals(TxStatus.CONFIRMED, rows[0].status)
+                    assertEquals(TxStatus.PENDING, rows[1].status)
+                    assertEquals(rows[0].id, rows[1].duplicateOf)
+                    assertEquals(1800L, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+
+                    notifications.forEach { processor.processNotification(it, LedgerRevision.current) }
+                    assertEquals(rows, database.backupDao().transactions().sortedBy { it.id })
+                    assertEquals(0, cloudCalls)
+                }
+            }
+        }
+    }
+
+    @Test fun `explicit wechat channel links notifications with different counterparties`() = runBlocking {
+        for (walletFirst in listOf(false, true)) {
+            withAutomaticNotificationCapture { database, processor ->
+                val now = System.currentTimeMillis()
+                val shopping = CapturedNotification("com.sankuai.meituan", "shopping", now, "美团支付",
+                    "订单支付成功，商家：小王面馆，实付18.00元，支付方式：微信支付")
+                val wallet = CapturedNotification("com.tencent.mm", "wallet", now + 5_000, "微信支付",
+                    "支付成功，收款方：测试收款公司，实付18.00元")
+                val notifications = if (walletFirst) listOf(wallet, shopping) else listOf(shopping, wallet)
+                notifications.forEach { processor.processNotification(it, LedgerRevision.current) }
+
+                val rows = database.backupDao().transactions().sortedBy { it.id }
+                assertEquals(2, rows.size)
+                assertEquals(TxStatus.CONFIRMED, rows[0].status)
+                assertEquals(TxStatus.PENDING, rows[1].status)
+                assertEquals(rows[0].id, rows[1].duplicateOf)
+                assertEquals(1800L, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+            }
+        }
+    }
+
+    @Test fun `unrelated same amount shopping and wallet notifications remain separate expenses`() = runBlocking {
+        withAutomaticNotificationCapture { database, processor ->
+            val now = System.currentTimeMillis()
+            processor.processNotification(CapturedNotification("com.sankuai.meituan", "shopping", now, "美团支付",
+                "订单支付成功，商家：小王面馆，实付18.00元"), LedgerRevision.current)
+            processor.processNotification(CapturedNotification("com.tencent.mm", "wallet", now + 5_000, "微信支付",
+                "支付成功，商户：小林便利店，实付18.00元"), LedgerRevision.current)
+
+            val rows = database.backupDao().transactions()
+            assertEquals(2, rows.size)
+            assertTrue(rows.all { it.status == TxStatus.CONFIRMED && it.duplicateOf == null })
+            assertEquals(3600L, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+        }
+    }
+
+    private suspend fun withAutomaticNotificationCapture(block: suspend (AppDatabase, CaptureProcessor) -> Unit) {
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.categoryDao().insert(CategoryEntity(name = "其他", icon = "", colorIndex = 0,
+                type = TxType.EXPENSE, sortOrder = 0))
+            preferences.setNotificationCaptureEnabled(true)
+            preferences.setNotificationCloudParsingEnabled(false)
+            preferences.setScreenCaptureEnabled(false)
+            preferences.setCaptureAutoRecordEnabled(true)
+            block(database, CaptureProcessor(context, database, preferences, cloud, CaptureServiceMonitor()))
+        } finally {
+            preferences.setCaptureAutoRecordEnabled(false)
             database.close()
         }
     }

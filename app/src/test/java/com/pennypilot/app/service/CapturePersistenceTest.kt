@@ -13,10 +13,14 @@ import com.pennypilot.app.domain.model.TxType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -48,6 +52,111 @@ class CapturePersistenceTest {
     private suspend fun capture(
         evidence: CaptureEvidence = evidence(), transaction: TransactionEntity = tx()
     ): CaptureResult = CapturePersistence.capture(db, LedgerRevision.current, transaction, evidence)
+
+    private fun paymentMetadata(merchant: String, channel: String? = null, scene: String = "merchant_payment") = buildJsonObject {
+        put("paymentStatus", "COMPLETED")
+        put("scene", scene)
+        putJsonObject("receiptDetails") {
+            put("merchantName", merchant)
+            channel?.let { put("paymentChannel", it) }
+        }
+    }.toString()
+
+    @Test fun `platform payee and store notifications cannot count the same expense twice in either order`() = runTest {
+        listOf(false, true).forEachIndexed { index, walletFirst ->
+            val at = time + index * 300_000
+            val shopping = evidence(event = "store-$index", at = at).copy(metadataJson = paymentMetadata("小王面馆"))
+            val wallet = evidence(event = "wallet-$index", packageName = "com.tencent.mm", at = at + 5_000)
+                .copy(metadataJson = paymentMetadata("美团"))
+            val inputs = listOf(shopping to tx(), wallet to tx(merchant = "美团"))
+                .let { if (walletFirst) it.reversed() else it }
+            val results = inputs.map { (proof, row) -> capture(proof, row.copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted }
+            val first = db.transactionDao().getById(results[0].transactionId)!!
+            val second = db.transactionDao().getById(results[1].transactionId)!!
+            assertEquals(TxStatus.CONFIRMED, first.status)
+            assertEquals(TxStatus.PENDING, second.status)
+            assertEquals(first.id, second.duplicateOf)
+        }
+        assertEquals(3600L, db.transactionDao().observeMonthExpense(time - 1, time + 1).first())
+    }
+
+    @Test fun `explicit wechat channel links different payees without merging their order identities`() = runTest {
+        val first = capture(evidence(orderId = "MT202611130001").copy(
+            metadataJson = paymentMetadata("小王面馆", "微信支付")), tx().copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        val walletEvidence = evidence(event = "wallet", packageName = "com.tencent.mm", at = time + 120_000,
+            orderId = "WX202611130001").copy(metadataJson = paymentMetadata("平台收款公司", "微信支付"))
+        val second = capture(walletEvidence, tx(merchant = "平台收款公司").copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        assertEquals(first.transactionId, second.duplicateOf)
+        assertEquals(TxStatus.PENDING, db.transactionDao().getById(second.transactionId)!!.status)
+        assertEquals(CaptureResult.Duplicate(second.transactionId), capture(walletEvidence))
+        assertEquals(2, db.backupDao().transactions().size)
+    }
+
+    @Test fun `cross app suspicion cannot be confirmed by semantic enrichment`() = runTest {
+        val first = capture(evidence().copy(metadataJson = paymentMetadata("小王面馆")),
+            tx().copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        val walletEvidence = evidence(event = "wallet", packageName = "com.tencent.mm")
+            .copy(metadataJson = paymentMetadata("美团"))
+        val wallet = tx(merchant = "美团").copy(status = TxStatus.CONFIRMED)
+        val second = capture(walletEvidence, wallet) as CaptureResult.Inserted
+        assertEquals(first.transactionId, second.duplicateOf)
+        val before = db.transactionDao().getById(second.transactionId)
+        assertEquals(CaptureResult.Duplicate(second.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, wallet.copy(categoryId = 2), walletEvidence, enrichSemantics = true))
+        assertEquals(before, db.transactionDao().getById(second.transactionId))
+    }
+
+    @Test fun `cross app fallback rejects unrelated equal amounts other channels scenes and expired notifications`() = runTest {
+        val cases = listOf(
+            paymentMetadata("小王面馆") to paymentMetadata("其他店铺"),
+            paymentMetadata("小王面馆", "支付宝") to paymentMetadata("美团"),
+            paymentMetadata("小王面馆", "美团支付") to paymentMetadata("美团"),
+            paymentMetadata("小王面馆", scene = "transfer_sent") to paymentMetadata("美团"),
+            paymentMetadata("小王面馆") to paymentMetadata("美团", scene = "transfer_sent"),
+            paymentMetadata("小王面馆") to paymentMetadata("美团附近便利店"),
+            paymentMetadata("小王面馆") to """{"scene":"merchant_payment","paymentStatus":"COMPLETED","receiptDetails":{"productDescription":"美团","remark":"美团"}}"""
+        )
+        cases.forEachIndexed { index, (shopping, wallet) ->
+            val at = time + index * 300_000
+            capture(evidence(event = "store-$index", at = at).copy(metadataJson = shopping))
+            val result = capture(evidence(event = "wallet-$index", packageName = "com.tencent.mm", at = at + 5_000)
+                .copy(metadataJson = wallet), tx(merchant = null).copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+            assertNull("case $index", result.duplicateOf)
+            assertEquals(TxStatus.CONFIRMED, db.transactionDao().getById(result.transactionId)!!.status)
+        }
+        val late = capture(evidence(event = "late", packageName = "com.tencent.mm", at = time + cases.size * 300_000)
+            .copy(metadataJson = paymentMetadata("美团")), tx(merchant = "美团")) as CaptureResult.Inserted
+        assertNull(late.duplicateOf)
+    }
+
+    @Test fun `distinct shopping orders are not chained through a suspected wallet duplicate`() = runTest {
+        val shopping = evidence(orderId = "MT202611130001").copy(metadataJson = paymentMetadata("小王面馆"))
+        val first = capture(shopping) as CaptureResult.Inserted
+        val wallet = capture(evidence(event = "wallet", packageName = "com.tencent.mm", at = time + 1_000)
+            .copy(metadataJson = paymentMetadata("美团")), tx(merchant = "美团")) as CaptureResult.Inserted
+        assertEquals(first.transactionId, wallet.duplicateOf)
+        val next = capture(shopping.copy(eventKey = "new-order", orderId = "MT202611130002", observedAt = time + 2_000),
+            tx().copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        assertNull(next.duplicateOf)
+        assertEquals(TxStatus.CONFIRMED, db.transactionDao().getById(next.transactionId)!!.status)
+    }
+
+    @Test fun `cross app hint requires matching expense notifications within the original time window`() = runTest {
+        capture(evidence().copy(metadataJson = paymentMetadata("小王面馆")))
+        val walletEvidence = evidence(event = "wallet", packageName = "com.tencent.mm", at = time + 1_000)
+            .copy(metadataJson = paymentMetadata("美团"))
+        val cases = listOf(
+            walletEvidence.copy(observedAt = time + 120_001) to tx(merchant = null),
+            walletEvidence to tx(merchant = null).copy(amount = 1900),
+            walletEvidence to tx(merchant = null).copy(amount = -1800, type = TxType.INCOME),
+            walletEvidence to tx(TxSource.ACCESSIBILITY, merchant = null),
+            walletEvidence.copy(metadataJson = """{"scene":"merchant_payment","receiptDetails":{"merchantName":"美团"}}""") to tx(merchant = null)
+        )
+        cases.forEachIndexed { index, (proof, row) ->
+            val result = capture(proof.copy(eventKey = "wallet-$index"), row) as CaptureResult.Inserted
+            assertNull("case $index", result.duplicateOf)
+        }
+    }
 
     @Test fun `same order from another channel fills missing facts without semantic replacement`() = runTest {
         val original = tx(merchant = " ").copy(accountTag = "", note = " ", businessKind = "transfer",
