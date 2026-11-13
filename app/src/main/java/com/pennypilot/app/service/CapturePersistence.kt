@@ -8,6 +8,7 @@ import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.data.recognition.CaptureSemanticResolver
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
+import com.pennypilot.app.domain.model.TxType
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -43,7 +44,7 @@ object CapturePersistence {
     /**
      * 检查证据、保存别名及账目在同一事务执行，两个捕获服务并发时也只写入一次。
      * 自动合并仅接受同事件、同域可靠订单号，或 15 秒内同通知 key/when + 完全相同文本。
-     * 商户同额等弱证据只关联新待确认账目；不修改已有账目和用户确认/忽略结果。
+     * 商户同额、购物平台与支付渠道关联等弱证据只关联新待确认账目；不修改已有账目和用户确认/忽略结果。
      */
     suspend fun capture(
         database: AppDatabase,
@@ -147,12 +148,13 @@ object CapturePersistence {
             }
             return@withTransaction CaptureResult.Duplicate(duplicate.transactionId)
         }
-        val possibleDuplicate = if (incoming.merchantFingerprint != null) {
-            dao.captureEvidenceNear(
-                incoming.observedAt - POSSIBLE_DUPLICATE_WINDOW_MS,
-                incoming.observedAt + POSSIBLE_DUPLICATE_WINDOW_MS, incoming.amount
-            ).firstOrNull { isPossibleDuplicate(it, incoming) }
-        } else null
+        val possibleDuplicate = dao.captureEvidenceNear(
+            incoming.observedAt - POSSIBLE_DUPLICATE_WINDOW_MS,
+            incoming.observedAt + POSSIBLE_DUPLICATE_WINDOW_MS, incoming.amount
+        ).firstOrNull {
+            isPossibleDuplicate(it, incoming) || isPossibleCrossAppPayment(it, incoming) &&
+                dao.getById(it.transactionId)?.duplicateOf == null
+        }
         // 用户可能已先手记/AI 补记，再收到迟到通知；仅用具体商户完全匹配给出弱提示。
         val manuallyRecorded = if (possibleDuplicate == null && incoming.merchantFingerprint != null) {
             dao.nonCapturedTransactionsNear(
@@ -352,6 +354,33 @@ object CapturePersistence {
             // 页面重新进入/进程重建可能换会话身份，只提示核对，不能按文本静默吞单。
             (previous.packageName != incoming.packageName || previous.source != incoming.source ||
                 incoming.source == TxSource.ACCESSIBILITY)
+
+    private fun isPossibleCrossAppPayment(previous: CaptureEvidenceEntity, incoming: CaptureEvidenceEntity): Boolean {
+        if (!sameFinancials(previous, incoming) || incoming.type != TxType.EXPENSE ||
+            previous.source != TxSource.NOTIFICATION || incoming.source != TxSource.NOTIFICATION ||
+            incoming.firstObservedAt - previous.firstObservedAt !in
+                -POSSIBLE_DUPLICATE_WINDOW_MS..POSSIBLE_DUPLICATE_WINDOW_MS) return false
+        val pair = when {
+            CaptureEventIdentity.domainFor(previous.packageName) == "meituan" && incoming.packageName == "com.tencent.mm" -> previous to incoming
+            CaptureEventIdentity.domainFor(incoming.packageName) == "meituan" && previous.packageName == "com.tencent.mm" -> incoming to previous
+            else -> return false
+        }
+        val shopping = metadata(pair.first.metadataJson)
+        val wallet = metadata(pair.second.metadataJson)
+        if (listOf(shopping, wallet).any {
+                detailValue(it, "paymentStatus") != "COMPLETED" || detailValue(it, "scene") != "merchant_payment"
+            }) return false
+        val shoppingDetails = shopping?.get("receiptDetails") as? JsonObject
+        val channel = detailValue(shoppingDetails, "paymentChannel")
+        if (channel != null) return channel in setOf("微信", "微信支付")
+
+        // 微信可能只写平台收款方，美团则写实际店铺。仅将明确的平台身份用于待核对，
+        // 商品和备注中提到“美团”不构成关联，也不能把两端各自的订单号直接当作同一编号。
+        val walletDetails = wallet?.get("receiptDetails") as? JsonObject
+        val parties = listOfNotNull(detailValue(walletDetails, "merchantName"), detailValue(walletDetails, "payeeName")) +
+            CaptureReceiptContext.readContext(wallet).filter { it.label == "交易对方" }.map { it.value }
+        return parties.any { CaptureEventIdentity.normalize(it) in setOf("美团", "美团外卖", "美团支付", "美团闪购", "美团团购") }
+    }
 
     private fun sameFinancials(a: CaptureEvidenceEntity, b: CaptureEvidenceEntity): Boolean =
         a.amount == b.amount && a.type == b.type
