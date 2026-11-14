@@ -6,11 +6,13 @@ import com.pennypilot.app.data.parser.PaymentScreenStructure
 /** Use only the visible, read-only evidence region, excluding system bars and other windows. */
 object PaymentVisualRegion {
     fun bounds(structure: PaymentScreenStructure?, imageWidth: Int, imageHeight: Int,
-        includePanel: Boolean = false, windowRelative: Boolean = false): Rect? {
+        includePanel: Boolean = false, windowRelative: Boolean = false,
+        windowBounds: List<Int> = emptyList(), receiptBounds: List<Int>? = null): Rect? {
         if (imageWidth <= 0 || imageHeight <= 0) return null
         val nodes = structure?.nodes.orEmpty()
         val root = nodes.firstOrNull { it.parentId == null }
-        val origin = root?.bounds?.takeIf { windowRelative && it.size == 4 &&
+        val origin = windowBounds.takeIf { it.size == 4 }?.takeIf { windowRelative &&
+            it[2] - it[0] == imageWidth && it[3] - it[1] == imageHeight } ?: root?.bounds?.takeIf { windowRelative && it.size == 4 &&
             it[2] - it[0] == imageWidth && it[3] - it[1] == imageHeight }
         fun rect(bounds: List<Int>): Rect? {
             if (bounds.size != 4) return null
@@ -22,6 +24,7 @@ object PaymentVisualRegion {
                 left >= right || top >= bottom) return null
             return Rect(left, top, right, bottom)
         }
+        receiptBounds?.let { return rect(it) }
         val evidence = nodes.filter { it.visible && it.labels.isNotEmpty() }
         val regions = evidence.mapNotNull { rect(it.bounds) }
         if (regions.isEmpty()) return null
@@ -46,4 +49,15 @@ object PaymentVisualRegion {
         }
         return panel ?: textRegion
     }
+
+    /** Android 11–13 returns a display image; only the verified application window may be sent. */
+    fun windowBounds(bounds: List<Int>, imageWidth: Int, imageHeight: Int, windowRelative: Boolean): Rect? {
+        if (imageWidth <= 0 || imageHeight <= 0) return null
+        if (windowRelative) return Rect(0, 0, imageWidth, imageHeight)
+        if (bounds.size != 4) return null
+        val rect = Rect(bounds[0], bounds[1], bounds[2], bounds[3])
+        return rect.takeIf { it.left >= 0 && it.top >= 0 && it.right <= imageWidth && it.bottom <= imageHeight &&
+            it.width() > 0 && it.height() > 0 }
+    }
+
 }

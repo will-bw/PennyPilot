@@ -13,6 +13,18 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class PaymentVisualRegionTest {
+    @Test fun `scoped receipt bounds use the application window offset`() {
+        val result = PaymentVisualRegion.bounds(null, 1000, 1800, windowRelative = true,
+            windowBounds = listOf(0, 100, 1000, 1900), receiptBounds = listOf(50, 200, 950, 1200))
+        assertEquals(Rect(50, 100, 950, 1100), result)
+    }
+
+    @Test fun `display screenshot cannot include pixels outside verified window bounds`() {
+        assertEquals(Rect(30, 100, 970, 1900), PaymentVisualRegion.windowBounds(listOf(30, 100, 970, 1900), 1000, 2000, false))
+        assertNull(PaymentVisualRegion.windowBounds(listOf(-1, 100, 970, 1900), 1000, 2000, false))
+        assertNull(PaymentVisualRegion.windowBounds(emptyList(), 1000, 2000, false))
+    }
+
     @Test fun `crop follows visible evidence and excludes hidden unrelated container bounds`() {
         val nodes = listOf(
             PaymentScreenNode(1, null, bounds = listOf(0, 0, 1080, 2400)),

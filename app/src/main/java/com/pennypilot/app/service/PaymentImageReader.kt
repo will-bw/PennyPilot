@@ -1,68 +1,11 @@
 package com.pennypilot.app.service
 
 import android.graphics.Bitmap
-import android.graphics.Rect
 import android.util.Base64
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.sync.Semaphore
 import java.io.ByteArrayOutputStream
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
-/** Local Chinese OCR. Nothing leaves the device through this class. */
+/** Bounded image preparation only. Recognition is performed by the configured vision model. */
 object PaymentImageReader {
-    internal data class OcrLine(val text: String, val bounds: Rect?)
-    private data class OcrResult(val text: String, val lines: List<OcrLine>)
-    private val recognizerSlot = Semaphore(1)
-
-    suspend fun ocrBitmap(bitmap: Bitmap): String = recognize(bitmap).text
-
-    internal suspend fun ocrLines(bitmap: Bitmap): List<OcrLine> = recognize(bitmap).lines
-
-    private suspend fun recognize(bitmap: Bitmap): OcrResult {
-        recognizerSlot.acquire()
-        return suspendCancellableCoroutine { continuation ->
-            if (!continuation.isActive) {
-                recognizerSlot.release()
-                return@suspendCancellableCoroutine
-            }
-            var ownedImage: Bitmap? = null
-            var recognizer: TextRecognizer? = null
-            fun release() {
-                ownedImage?.recycle()
-                try { recognizer?.close() } finally { recognizerSlot.release() }
-            }
-            try {
-                // ML Kit may finish after the waiting coroutine is cancelled. It must not
-                // use the screenshot that the caller recycles on window navigation.
-                val input = checkNotNull(bitmap.copy(Bitmap.Config.ARGB_8888, false)).also { ownedImage = it }
-                val engine = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-                    .also { recognizer = it }
-                engine.process(InputImage.fromBitmap(input, 0)).addOnCompleteListener { task ->
-                    try {
-                        if (continuation.isActive) {
-                            if (task.isSuccessful) {
-                                val result = task.result
-                                continuation.resume(OcrResult(result.text.take(24_000),
-                                    result.textBlocks.flatMap { it.lines }.map { line ->
-                                        OcrLine(line.text, line.boundingBox?.let(::Rect))
-                                    }))
-                            } else if (task.isCanceled) continuation.cancel()
-                            else continuation.resumeWithException(checkNotNull(task.exception))
-                        }
-                    } finally { release() }
-                }
-            } catch (failure: Throwable) {
-                release()
-                throw failure
-            }
-        }
-    }
-
     fun jpegBytes(bitmap: Bitmap): ByteArray {
         val ratio = minOf(1.0, 1800.0 / maxOf(bitmap.width, bitmap.height))
         val scaled = if (ratio < 1) Bitmap.createScaledBitmap(bitmap,

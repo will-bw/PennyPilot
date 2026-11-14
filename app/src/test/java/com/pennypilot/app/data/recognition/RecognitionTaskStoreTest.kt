@@ -87,4 +87,171 @@ class RecognitionTaskStoreTest {
         assertEquals("rich", store.get("a")!!.semanticFingerprint)
     }
 
+    @Test fun `unrecognized receipt ages into review and expires after seven days`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val now = System.currentTimeMillis()
+        store.enqueue(task(now = now), now)
+        val afterAutomaticWindow = now + RecognitionTaskStore.AUTO_RETRY_WINDOW_MS + 1
+        assertTrue(store.pending(afterAutomaticWindow).isEmpty())
+        val failed = store.entries(afterAutomaticWindow).single()
+        assertEquals(RecognitionTaskState.NEEDS_ATTENTION, failed.state)
+        assertEquals(RecognitionFailure.EXPIRED, failed.failure)
+        assertEquals(2, failed.evidenceVersion)
+        assertEquals(now, failed.createdAt)
+        assertEquals(failed, RecognitionTaskStore(file, cipher).entries(afterAutomaticWindow).single())
+        assertTrue(store.entries(now + RecognitionTaskStore.RETENTION_MS + 1).isEmpty())
+        assertFalse(file.exists())
+    }
+
+    @Test fun `failed receipt is retained without resetting through repeated capture or stale retry`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val original = task()
+        store.enqueue(original)
+        store.needsAttention("a", 1, RecognitionFailure.NETWORK)
+        assertEquals(RecognitionTaskStore.EnqueueResult.ALREADY_QUEUED, store.enqueue(original))
+        assertTrue(store.pending().isEmpty())
+        assertEquals(RecognitionFailure.NETWORK, store.get("a")!!.failure)
+        assertNull(store.retry("a", 0))
+        val retried = store.retry("a", 1)!!
+        assertEquals(RecognitionTaskState.QUEUED, retried.state)
+        assertEquals(2, retried.evidenceVersion)
+        assertEquals(original.createdAt, retried.createdAt)
+        assertNull(store.retry("a", 1))
+        store.needsAttention("a", 1, RecognitionFailure.TIMEOUT)
+        assertEquals(retried, store.get("a"))
+    }
+
+    @Test fun `retry does not extend retained sensitive evidence lifetime`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val now = System.currentTimeMillis()
+        store.enqueue(task(now = now), now)
+        store.needsAttention("a", 1, RecognitionFailure.NETWORK)
+        val retried = store.retry("a", 1, now + 6 * 24 * 60 * 60 * 1000L)!!
+        assertEquals(now, retried.createdAt)
+        assertTrue(store.entries(now + RecognitionTaskStore.RETENTION_MS + 1).isEmpty())
+    }
+
+    @Test fun `saved receipt enrichment failure never creates unrecognized entry`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val saved = task().copy(receipt = CaptureSemanticReceipt(), semanticFingerprint = "verified")
+        store.enqueue(saved)
+        store.needsAttention("a", 1, RecognitionFailure.NETWORK)
+        assertNull(store.get("a"))
+        store.enqueue(saved)
+        assertTrue(store.entries(saved.createdAt + RecognitionTaskStore.AUTO_RETRY_WINDOW_MS + 1).isEmpty())
+    }
+
+    @Test fun `fresh capture under new grant replaces all old material and invalidates in flight response`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val old = task().copy(text = "支付成功18元旧商户", structure = "old-node-tree", authorizationId = "0:0:0")
+        store.enqueue(old)
+        store.incrementAttempts(old.id)
+        val fresh = task().copy(text = "支付成功20元新商户", authorizationId = "1:0:0", configurationId = "new-model")
+        assertEquals(RecognitionTaskStore.EnqueueResult.UPDATED, store.enqueue(fresh))
+        val replacement = RecognitionTaskStore(file, cipher).get(old.id)!!
+        assertEquals(fresh.text, replacement.text)
+        assertNull(replacement.structure)
+        assertEquals(fresh.configurationId, replacement.configurationId)
+        assertEquals("1:0:0", replacement.authorizationId)
+        assertEquals(fresh.createdAt, replacement.createdAt)
+        assertEquals(0, replacement.attempts)
+        assertEquals(2, replacement.evidenceVersion)
+        store.remove(old.id, old.evidenceVersion)
+        assertNotNull(store.get(old.id))
+    }
+
+    @Test fun `new image frame supersedes old pixels without resetting attempts or expiry`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val now = System.currentTimeMillis()
+        val original = task(now = now).copy(images = listOf("data:image/jpeg;base64,b2xk"),
+            receiptImageMode = ReceiptImageMode.IMAGE_ONLY)
+        store.enqueue(original, now)
+        store.incrementAttempts(original.id)
+        store.incrementAttempts(original.id)
+        assertEquals(RecognitionTaskStore.EnqueueResult.ALREADY_QUEUED, store.enqueue(original, now + 100))
+        val fresh = original.copy(images = listOf("data:image/jpeg;base64,bmV3"), createdAt = now + 200)
+        assertEquals(RecognitionTaskStore.EnqueueResult.UPDATED, store.enqueue(fresh, now + 200))
+        val replaced = RecognitionTaskStore(file, cipher).entries(now + 200).single()
+        assertEquals(fresh.images, replaced.images)
+        assertEquals(2, replaced.evidenceVersion)
+        assertEquals(2, replaced.attempts)
+        assertEquals(now, replaced.createdAt)
+        assertEquals(now, replaced.queuedAt)
+        store.remove(original.id, original.evidenceVersion)
+        assertEquals(replaced, store.entries(now + 200).single())
+        val expired = store.entries(now + RecognitionTaskStore.AUTO_RETRY_WINDOW_MS + 1).single()
+        assertEquals(RecognitionTaskState.NEEDS_ATTENTION, expired.state)
+        assertEquals(RecognitionFailure.EXPIRED, expired.failure)
+    }
+
+    @Test fun `new frames update paused preview but require explicit retry to resume cloud calls`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val now = System.currentTimeMillis()
+        val original = task(now = now).copy(images = listOf("data:image/jpeg;base64,b2xk"),
+            receiptImageMode = ReceiptImageMode.IMAGE_ONLY)
+        store.enqueue(original, now)
+        repeat(3) { store.incrementAttempts(original.id) }
+        store.needsAttention(original.id, original.evidenceVersion, RecognitionFailure.NETWORK)
+        listOf("bmV3", "bW9yZQ==", "bGFzdA==").forEachIndexed { index, pixels ->
+            assertEquals(RecognitionTaskStore.EnqueueResult.UPDATED,
+                store.enqueue(original.copy(images = listOf("data:image/jpeg;base64,$pixels")), now + index + 1))
+            val paused = store.entries(now + index + 1).single()
+            assertEquals(3, paused.attempts)
+            assertEquals(RecognitionTaskState.NEEDS_ATTENTION, paused.state)
+            assertEquals(RecognitionFailure.NETWORK, paused.failure)
+            assertEquals(now, paused.createdAt)
+            assertEquals(now, paused.queuedAt)
+            assertTrue(store.pending(now + index + 1).isEmpty())
+        }
+        assertNull(store.retry(original.id, original.evidenceVersion, now + 10))
+        val retried = store.retry(original.id, 4, now + 10)!!
+        assertEquals(0, retried.attempts)
+        assertEquals(RecognitionTaskState.QUEUED, retried.state)
+        assertEquals(now + 10, retried.queuedAt)
+        assertEquals(now, retried.createdAt)
+        assertEquals(listOf("data:image/jpeg;base64,bGFzdA=="), retried.images)
+    }
+
+    @Test fun `new image can complete an incomplete frame within the original retry budget`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val now = System.currentTimeMillis()
+        val original = task(now = now).copy(images = listOf("data:image/jpeg;base64,b2xk"),
+            receiptImageMode = ReceiptImageMode.IMAGE_ONLY)
+        store.enqueue(original, now)
+        store.incrementAttempts(original.id)
+        store.needsAttention(original.id, 1, RecognitionFailure.INCOMPLETE)
+        assertEquals(RecognitionTaskStore.EnqueueResult.UPDATED,
+            store.enqueue(original.copy(images = listOf("data:image/jpeg;base64,bmV3")), now + 100))
+        val resumed = store.entries(now + 100).single()
+        assertEquals(RecognitionTaskState.QUEUED, resumed.state)
+        assertNull(resumed.failure)
+        assertEquals(1, resumed.attempts)
+        assertEquals(now, resumed.createdAt)
+        assertEquals(now, resumed.queuedAt)
+        repeat(2) { store.incrementAttempts(original.id, resumed.evidenceVersion) }
+        store.needsAttention(original.id, resumed.evidenceVersion, RecognitionFailure.INCOMPLETE)
+        store.enqueue(original.copy(images = listOf("data:image/jpeg;base64,bGFzdA==")), now + 200)
+        val exhausted = store.entries(now + 200).single()
+        assertEquals(3, exhausted.attempts)
+        assertEquals(RecognitionTaskState.NEEDS_ATTENTION, exhausted.state)
+        assertEquals(RecognitionFailure.INCOMPLETE, exhausted.failure)
+    }
+
+    @Test fun `new image cannot resume incomplete recognition beyond original automatic window`() {
+        val store = RecognitionTaskStore(file, cipher)
+        val now = System.currentTimeMillis()
+        val original = task(now = now).copy(images = listOf("data:image/jpeg;base64,b2xk"),
+            receiptImageMode = ReceiptImageMode.IMAGE_ONLY)
+        store.enqueue(original, now)
+        store.incrementAttempts(original.id)
+        store.needsAttention(original.id, 1, RecognitionFailure.INCOMPLETE)
+        val later = now + RecognitionTaskStore.AUTO_RETRY_WINDOW_MS + 1
+        store.enqueue(original.copy(images = listOf("data:image/jpeg;base64,bmV3")), later)
+        val expired = store.entries(later).single()
+        assertEquals(RecognitionTaskState.NEEDS_ATTENTION, expired.state)
+        assertEquals(1, expired.attempts)
+        assertEquals(now, expired.queuedAt)
+        assertTrue(store.pending(later).isEmpty())
+    }
+
 }

@@ -12,7 +12,7 @@ class PaymentTextParserTest {
 
     @Test
     fun `registry includes marketplace and lite apps`() {
-        assertEquals(7, PaymentAppRegistry.packages.size)
+        assertEquals(23, PaymentAppRegistry.packages.size)
         assertEquals("云闪付", PaymentAppRegistry.displayName("com.unionpay"))
         assertEquals("美团外卖", PaymentAppRegistry.displayName("com.sankuai.meituan.takeoutnew"))
         assertEquals("抖音极速版", PaymentAppRegistry.displayName("com.ss.android.ugc.aweme.lite"))

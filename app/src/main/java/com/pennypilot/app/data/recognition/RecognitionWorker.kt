@@ -48,7 +48,10 @@ class RecognitionWorker(context: Context, params: WorkerParameters) : CoroutineW
         }
         /** Repairs the narrow process-death gap between durable enqueue and WorkManager scheduling. */
         fun recover(context: Context) {
-            try { RecognitionTaskStore(context).pending().forEach { schedule(context, it.id) } }
+            try { RecognitionTaskStore(context).entries().forEach {
+                if (it.state == RecognitionTaskState.QUEUED) schedule(context, it.id)
+                else NotificationHelper.cancelRecognitionPending(context, it.eventKey)
+            } }
             catch (_: Exception) {
                 RecognitionTaskStore(context).clear()
                 runCatching { EntryPointAccessors.fromApplication(context.applicationContext, RecognitionEntryPoint::class.java)
@@ -61,7 +64,11 @@ class RecognitionWorker(context: Context, params: WorkerParameters) : CoroutineW
 /** Offline cleanup does not wait for the network constraint of inference tasks. */
 class RecognitionCleanupWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
-        return try { RecognitionTaskStore(applicationContext).pending(); Result.success() }
+        return try {
+            RecognitionTaskStore(applicationContext).entries().filter { it.state == RecognitionTaskState.NEEDS_ATTENTION }
+                .forEach { NotificationHelper.cancelRecognitionPending(applicationContext, it.eventKey) }
+            Result.success()
+        }
         catch (_: Exception) { RecognitionTaskStore(applicationContext).clear(); Result.failure() }
     }
 }

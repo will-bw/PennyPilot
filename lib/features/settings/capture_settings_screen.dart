@@ -3,6 +3,8 @@ import 'package:pennypilot/core/ledger_controller.dart';
 
 import 'settings_widgets.dart';
 import 'capture_diagnostic_screen.dart';
+import 'capture_pending_screen.dart';
+import 'capture_apps_screen.dart';
 import 'capture_consent.dart';
 import 'capture_background_guidance.dart';
 
@@ -12,7 +14,7 @@ String screenCaptureStatusLabel(String? status) => switch (status) {
   'event_received' => '已收到页面变化',
   'unreadable' => '页面暂时无法读取',
   'protected' => '已跳过输入或受保护页面',
-  'input_page' => '已跳过含输入框的页面',
+  'input_page' => '未找到独立的只读凭证区域',
   'password_page' => '已跳过含密码控件的页面',
   'incomplete_tree' => '页面内容暂未读取完整',
   'traversal_limit' => '页面结构超出读取范围',
@@ -26,8 +28,9 @@ String screenCaptureStatusLabel(String? status) => switch (status) {
   'model_processing' => '模型正在理解支付凭证',
   'model_rejected' => '模型未获得完整交易依据',
   'model_failed' => '模型暂时不可用，等待重试',
+  'model_attention' => '识别未完成，需要处理',
   'visual_unavailable' => '当前页面无法截图识别',
-  'visual_read' => '正在本机核验支付截图',
+  'visual_read' => '正在准备云端支付截图',
   'visual_required' => '此页面需要截图识别',
   'visual_not_receipt' => '截图未取得完整交易依据',
   'visual_requires_flow' => '尚未取得本次红包完成凭证',
@@ -43,8 +46,7 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'event_received' => '正在等待页面内容稳定。',
   'unreadable' => '支付应用未提供可读取的页面文字，或结果页已离开；请核对流水，必要时补记。',
   'protected' => '输入框、密码或不完整页面不会用于记账，避免误读聊天或待支付内容。',
-  'input_page' =>
-    '页面包含可见输入框，为避免误读聊天或待支付内容已跳过。请在本次支付完成页停留约 5 秒后再查看诊断；仍无法识别时可手动或语音补记。',
+  'input_page' => '当前页面包含输入区域，且没有找到可独立读取的支付凭证。请打开支付完成页或单笔账单详情。',
   'password_page' => '页面包含可见密码控件，已停止读取。请完成支付后在本次结果页停留约 5 秒，再回到流水核对。',
   'incomplete_tree' =>
     '本次读取缺少部分页面节点，尚不能判断支付结果。请在本次支付完成页停留约 5 秒，让服务重新读取；仍无记录时可手动或语音补记。',
@@ -56,14 +58,15 @@ String screenCaptureStatusDetail(String? status) => switch (status) {
   'parsed' => '正在将识别出的交易字段保存到待确认列表。',
   'model_queued' => '页面已进入持久识别队列，可离开此页。',
   'model_processing' => '正在使用所选模型理解支付字段，结果仍会经过本地校验。',
+  'model_attention' => '自动重试已暂停，可在“查看未识别凭证”中核对原凭证、重试或手动补录。',
   'model_rejected' => '没有取得可核对的金额、方向和成功状态，未自动入账。可分享截图或导入账单补录。',
   'model_failed' => '请检查 AI 服务配置与网络，待处理任务会按策略重试。',
   'visual_unavailable' => '截图能力未启用、页面受保护或截图失败，可通过主动图片记账或账单导入补录。',
-  'visual_required' => '微信未提供可读取的文字。可以在“识别与自动录入”开启云端支付截图识别或本地支付截图补充，再打开这张成功页。',
+  'visual_required' => '当前凭证没有足够的可读文字。可在“识别与自动录入”开启云端支付截图识别，再打开这张凭证。',
   'visual_not_receipt' => '当前场景缺少明确完成状态、本人资金方向或有效金额，未生成账目。可查看对应支付结果、主动补录或导入账单。',
   'visual_requires_flow' =>
     '仅打开没有交易时间的红包详情不能证明刚发生收发。发红包需核验付款完成，领红包需观察到打开红包并已存入零钱；较早的红包可通过账单导入补录。',
-  'visual_read' => '正在核验当前微信窗口的完成状态、金额和布局。开启云端支付截图识别后，符合条件的凭证截图会交给所选图片模型。',
+  'visual_read' => '已匹配支付结果或单笔详情页面，正在准备截图交给所选图片模型。',
   'visual_waiting' => '为避免连续截图，当前正在等待下一次有界读取；已保存的账目可在待确认列表核对。',
   'saved' => '请回到流水核对；即使关闭记账提醒，也可在待确认列表中查看。',
   'duplicate' => '同一页面不会反复生成账单，请查看已有待确认记录。',
@@ -84,7 +87,6 @@ String? screenReadDiagnosticsSummary(Object? diagnostics) {
     if (visited != null) '检查 $visited 个节点',
     if (text != null) '可读文字 $text 处',
     if (count('visualScreenshotErrorCode') == 6) '系统保护此窗口，无法截图',
-    if (count('visualOcrTimeout') == 1) '本次截图识别超时',
   ];
   for (final field in [
     ('editableNodes', '输入框', '处'),
@@ -105,10 +107,26 @@ String captureAppLabel(String packageName) => switch (packageName) {
   'com.tencent.mm' => '微信',
   'com.eg.android.AlipayGphone' => '支付宝',
   'com.unionpay' => '云闪付',
+  'com.jd.jrapp' => '京东金融',
+  'com.huawei.wallet' => '华为钱包',
+  'com.ccb.longjiLife' => '建行生活',
+  'com.jingdong.app.mall' => '京东',
+  'com.xunmeng.pinduoduo' => '拼多多',
+  'com.alibaba.wireless' => '1688',
+  'com.taobao.idlefish' => '闲鱼',
+  'com.taobao.taobao' => '淘宝',
   'com.sankuai.meituan' => '美团',
+  'com.dianping.v1' => '大众点评',
   'com.sankuai.meituan.takeoutnew' => '美团外卖',
+  'me.ele' => '饿了么',
+  'com.wudaokou.hippo' => '盒马',
+  'com.ss.android.ugc.lifeservices' => '抖省省',
+  'com.smile.gifmaker' => '快手',
+  'com.kuaishou.nebula' => '快手极速版',
   'com.ss.android.ugc.aweme' => '抖音',
+  'com.ss.android.ugc.livelite' => '抖音商城',
   'com.ss.android.ugc.aweme.lite' => '抖音极速版',
+  'com.ss.android.yumme.video' => '抖音精选',
   _ => '支付应用',
 };
 
@@ -144,6 +162,7 @@ List<_ScreenReadHistoryEntry> _screenReadHistory(Object? value) {
     'model_processing',
     'model_rejected',
     'model_failed',
+    'model_attention',
   };
   final history = <_ScreenReadHistoryEntry>[];
   for (final (sequence, entry) in value.indexed) {
@@ -453,13 +472,13 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                     ),
                   ],
                   const SettingsNotice(
-                    '仅识别可读取的支付结果，不会点击或执行转账。聊天中的转账卡片、历史账单和未完成付款不会自动入账；无法读取的页面请手动或语音补记。',
+                    '仅识别可读取的支付结果，不会点击或执行转账。聊天中的转账卡片和未完成付款不会入账。打开单笔历史详情可以补记；只有图片提供交易依据时，结果留待确认。',
                   ),
                 ],
               ),
               SettingsSection(
                 title: '支付通知',
-                description: '识别结果先进入待确认账单，核对后再计入收支。',
+                description: '交易依据完整时按自动记账设置保存，其余结果留待确认。',
                 children: [
                   SwitchListTile(
                     contentPadding: const EdgeInsets.symmetric(
@@ -524,13 +543,27 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
               SettingsSection(
                 title: '支付页面',
                 children: [
+                  SettingsRow(
+                    title: '选择采集应用',
+                    subtitle: '按应用开启或暂停通知与页面采集',
+                    icon: Icons.apps_outlined,
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            CaptureAppsScreen(controller: widget.controller),
+                      ),
+                    ),
+                  ),
                   SwitchListTile(
                     contentPadding: const EdgeInsets.symmetric(
                       horizontal: 16,
                       vertical: 10,
                     ),
                     title: const Text('读取可见支付结果'),
-                    subtitle: const Text('识别没有通知的支付或转账结果。应用内开关与系统无障碍授权需要同时开启。'),
+                    subtitle: const Text(
+                      '识别支付结果、收付款、退款和单笔历史账单详情。应用内开关与系统无障碍授权需要同时开启。',
+                    ),
                     value: screen,
                     onChanged: _busy ? null : _setScreen,
                   ),
@@ -612,6 +645,23 @@ class _CaptureSettingsScreenState extends State<CaptureSettingsScreen>
                     target: 'microphone',
                     detail: '在“语音模型”中配置转写服务并测试录音。云端转写无需安装系统语音识别服务。',
                     button: '查看麦克风权限',
+                  ),
+                ],
+              ),
+              SettingsSection(
+                title: '识别待处理',
+                children: [
+                  SettingsRow(
+                    title: '查看未识别凭证',
+                    subtitle: '查看处理状态与原因，重试识别或移除不需要的凭证',
+                    icon: Icons.receipt_long_outlined,
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            CapturePendingScreen(controller: widget.controller),
+                      ),
+                    ),
                   ),
                 ],
               ),

@@ -100,14 +100,9 @@ class _RecognitionSettingsScreenState extends State<RecognitionSettingsScreen> {
               const SectionTitle('数据与保存方式'),
               for (final option in const [
                 (
-                  'screenVisualCaptureEnabled',
-                  '本地支付截图补充',
-                  '本机读取支付截图。开启云端支付截图识别时，优先由图片模型读取。',
-                ),
-                (
                   'screenCloudVisionEnabled',
                   '云端支付截图识别',
-                  '开启页面采集后，将符合条件的支付结果窗口截图发送给所选图片模型，直接读取姓名、商户和凭证详情。',
+                  '开启页面采集后，将符合条件的付款结果或账单详情截图交给图片模型，直接读取金额、姓名、商品和账户等字段。',
                 ),
                 (
                   'screenCloudParsingEnabled',

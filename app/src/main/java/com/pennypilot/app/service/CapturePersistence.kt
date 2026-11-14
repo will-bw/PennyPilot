@@ -6,6 +6,7 @@ import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.data.recognition.CaptureSemanticResolver
+import com.pennypilot.app.data.parser.PaymentReceiptDetails
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.encodeToString
 
 data class CaptureEvidence(
@@ -325,13 +327,15 @@ object CapturePersistence {
         (details?.get(field) as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf(String::isNotBlank)
 
     private fun mergeReceiptDetails(previous: JsonObject?, incoming: JsonObject?): JsonObject {
-        val fields = listOf("merchantName", "payeeName", "productDescription", "remark", "paymentChannel", "fundingAccount")
         val values = linkedMapOf<String, JsonPrimitive>()
         val sources = linkedMapOf<String, JsonPrimitive>()
-        fields.forEach { field ->
-            val old = detailValue(previous, field)
-            val value = old ?: detailValue(incoming, field) ?: return@forEach
-            values[field] = JsonPrimitive(value)
+        (PaymentReceiptDetails.TEXT_FIELDS + PaymentReceiptDetails.MONEY_FIELDS).forEach { field ->
+            fun valueFrom(details: JsonObject?): JsonPrimitive? = if (field in PaymentReceiptDetails.TEXT_FIELDS)
+                detailValue(details, field)?.let(::JsonPrimitive)
+            else (details?.get(field) as? JsonPrimitive)?.takeIf { !it.isString && (it.longOrNull ?: -1) >= 0 }
+            val old = valueFrom(previous)
+            val value = old ?: valueFrom(incoming) ?: return@forEach
+            values[field] = value
             val source = (if (old != null) previous else incoming)?.get("fieldSources") as? JsonObject
             detailValue(source, field)?.let { sources[field] = JsonPrimitive(it) }
         }

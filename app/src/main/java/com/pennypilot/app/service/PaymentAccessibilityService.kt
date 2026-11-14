@@ -3,6 +3,7 @@ package com.pennypilot.app.service
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.Build
 import android.os.SystemClock
 import android.view.Display
@@ -13,9 +14,7 @@ import com.pennypilot.app.data.db.LedgerRevision
 import com.pennypilot.app.data.parser.PaymentAppRegistry
 import com.pennypilot.app.data.parser.PaymentTextParser
 import com.pennypilot.app.data.parser.NotificationParseResult
-import com.pennypilot.app.data.parser.PaymentReceiptDetails
-import com.pennypilot.app.data.parser.PaymentReceiptDetailsReader
-import com.pennypilot.app.data.parser.WalletReceiptDetailsParser
+import com.pennypilot.app.data.parser.PaymentSceneAdapters
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -31,6 +30,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -40,14 +40,19 @@ import kotlin.coroutines.resume
 import java.util.concurrent.atomic.AtomicLong
 import java.io.FileDescriptor
 import java.io.PrintWriter
+import java.security.MessageDigest
 
 /** 可选的本机支付结果读取；系统授权及应用开关均满足后才读取指定应用。 */
 class PaymentAccessibilityService : AccessibilityService() {
     private companion object {
-        const val OCR_TIMEOUT_MS = 2_500L
         const val MAX_RECEIPT_IMAGE_ATTEMPTS = 3
-        val receiptImageAnchor = Regex(
-            """(?m)^(?:实付金额|实际支付|实际付款|实付款|支付金额|转账金额|退款金额|收款金额|支付时间|付款时间|交易时间|交易单号|微信支付单号|商户订单号|收款方|收款人|商户名称)(?:\s*[:：]|[ \t]*$)""")
+        const val IMAGE_WINDOW_MS = 60_000L
+        const val WECHAT = "com.tencent.mm"
+        const val WECHAT_RESULT_CONTAINER = "com.tencent.mm.framework.app.UIPageFragmentActivity"
+        val walletPreparationActivities = setOf(
+            "com.tencent.mm.plugin.remittance.ui.RemittanceUI",
+            "com.tencent.mm.plugin.wallet.pay.ui.WalletPayUI",
+            "com.tencent.mm.plugin.luckymoney.ui.LuckyMoneyNewPrepareUI")
     }
 
     private data class ReadRequest(val packageName: String, val windowId: Int, val revision: Long,
@@ -60,26 +65,21 @@ class PaymentAccessibilityService : AccessibilityService() {
     private val session = PaymentScreenSession()
     private val checkoutContext get() = entryPoint.captureProcessor().checkoutContext
     private var checkoutExpiry: Job? = null
-    private val redPacketFlow = WechatRedPacketFlow()
-    private val redPacketReceiveFlow = WechatRedPacketFlow()
+    private var walletPreparationAt: Long? = null
+    private var opaqueHandoffWindow: Int? = null
     // 保留最新窗口；同一窗口重绘不取消已有采样，避免动画密集时一直延后。
     private val requests = Channel<ReadRequest>(Channel.CONFLATED)
     private var readJob: Job? = null
     private var preferenceJob: Job? = null
-    private data class VisualAttempt(val firstAt: Long, val lastAt: Long, val count: Int)
-    private val visualAttempts = linkedMapOf<String, VisualAttempt>()
-    private data class VisualResult(val generation: Long, val recognition: PaymentTextParser.ScreenRecognition)
-    private val visualResults = linkedMapOf<String, VisualResult>()
-    private val detailAttempts = linkedMapOf<String, VisualAttempt>()
-    private data class DetailResult(val generation: Long, val snapshotHash: Int, val parsed: NotificationParseResult)
-    private val detailResults = linkedMapOf<String, DetailResult>()
+    private data class ReceiptImage(val data: String, val authorizationId: String)
+    private data class ImageAttempt(val firstAt: Long, val lastAt: Long, val failures: Int = 0)
+    private val imageAttempts = linkedMapOf<String, ImageAttempt>()
+    private val submittedImages = linkedMapOf<String, MutableSet<String>>()
     private val receiptImageAttempts = linkedMapOf<String, Int>()
     private val visualGeneration = AtomicLong()
-    private data class OpaqueReceipt(val parsed: NotificationParseResult, val cloudImage: String? = null)
-    private data class OpaqueAttempt(val firstAt: Long, val lastAt: Long, val attempts: Int,
-        val generation: Long, val cloudVision: Boolean, val parsed: NotificationParseResult? = null)
-    private val opaqueAttempts = linkedMapOf<Int, OpaqueAttempt>()
+    private val visualSampleSequence = AtomicLong()
     @Volatile private var enabled = false
+    @Volatile private var selectedPackages: Set<String> = emptySet()
     @Volatile private var latestWindow: ReadRequest? = null
     private val hiltEntryPoint by lazy {
         EntryPointAccessors.fromApplication(applicationContext, CaptorServiceEntryPoint::class.java)
@@ -91,8 +91,6 @@ class PaymentAccessibilityService : AccessibilityService() {
     internal var elapsedMillis: () -> Long = SystemClock::elapsedRealtime
     internal var unknownScreenHandler: (suspend (String, String, String, Long, Long, String?, List<String>) -> Boolean)? = null
     internal var visualCapture: (suspend (PaymentScreenReader.Snapshot) -> Bitmap?)? = null
-    internal var visualOcr: suspend (Bitmap) -> String = PaymentImageReader::ocrBitmap
-    internal var opaqueVisualOcr: suspend (Bitmap) -> List<PaymentImageReader.OcrLine> = PaymentImageReader::ocrLines
     internal var receiptImageHandler: (suspend (String, String, String, Long, Long, Boolean) -> Boolean)? = null
     private val entryPoint get() = dependencies ?: hiltEntryPoint
 
@@ -101,22 +99,27 @@ class PaymentAccessibilityService : AccessibilityService() {
         entryPoint.monitor().onAccessibilityConnected()
         preferenceJob?.cancel()
         preferenceJob = scope.launch {
-            entryPoint.appPreferences().screenCaptureEnabled.distinctUntilChanged().collect { allow ->
-                enabled = allow
+            val preferences = entryPoint.appPreferences()
+            combine(preferences.screenCaptureEnabled, preferences.captureAppPackages) { enabled, packages -> enabled to packages }
+                .distinctUntilChanged().collect { (allow, packages) ->
+                selectedPackages = packages.intersect(PaymentAppRegistry.packages)
+                serviceInfo?.let { info ->
+                    info.packageNames = selectedPackages.takeIf { it.isNotEmpty() }?.toTypedArray() ?: arrayOf(packageName)
+                    serviceInfo = info
+                }
+                enabled = allow && selectedPackages.isNotEmpty()
                 readJob?.cancel()
                 replaceWindow(null)
                 visualGeneration.incrementAndGet()
                 while (requests.tryReceive().isSuccess) { /* 开关切换前的事件不能在恢复后补读。 */ }
                 synchronized(session) { session.reset() }
                 clearCheckoutContext()
-                synchronized(visualAttempts) { visualAttempts.clear(); visualResults.clear() }
-                synchronized(detailAttempts) { detailAttempts.clear(); detailResults.clear() }
+                synchronized(imageAttempts) { imageAttempts.clear(); submittedImages.clear() }
                 synchronized(receiptImageAttempts) { receiptImageAttempts.clear() }
-                synchronized(opaqueAttempts) { opaqueAttempts.clear() }
-                redPacketFlow.reset()
-                redPacketReceiveFlow.reset()
-                entryPoint.monitor().onScreenStatus(if (allow) "waiting" else "disabled")
-                if (allow) readJob = scope.launch(readDispatcher) {
+                walletPreparationAt = null
+                opaqueHandoffWindow = null
+                entryPoint.monitor().onScreenStatus(if (enabled) "waiting" else "disabled")
+                if (enabled) readJob = scope.launch(readDispatcher) {
                     // 重连/打开开关时页面可能已稳定，不会再发一个内容变化事件。
                     requestCurrentWindow()
                     for (request in requests) {
@@ -133,7 +136,7 @@ class PaymentAccessibilityService : AccessibilityService() {
                             if (update != null) {
                                 newest = update
                                 // A confirmation arriving during the last old-page retry still
-                                // needs its own bounded retries, including the OCR budget refill.
+                                // needs its own bounded retries, including delayed image availability.
                                 attempt = 0
                             }
                             if (!isCurrent(newest) || sampleCurrentWindow(newest, refreshCache = pause > 0)) break
@@ -152,17 +155,6 @@ class PaymentAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            // Only a user-owned open-button event in this exact wallet window can begin a claim.
-            // Never inspect click text from chats, generic pages, input fields or other packages.
-            if (enabled && event.packageName?.toString() == WechatOpaqueTransferReader.PACKAGE &&
-                latestWindow?.className == WechatRedPacketReader.RECEIVE_ACTIVITY &&
-                latestWindow?.windowId == event.windowId && event.text.any { it.toString().trim() in setOf("开", "打开红包", "拆红包") }) {
-                redPacketReceiveFlow.start(elapsedMillis())
-                synchronized(opaqueAttempts) { opaqueAttempts.clear() }
-            }
-            return
-        }
         if (!enabled || event.eventType !in setOf(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, AccessibilityEvent.TYPE_WINDOWS_CHANGED)) return
         val packageName = event.packageName?.toString()
@@ -177,8 +169,10 @@ class PaymentAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) synchronized(checkoutContext) {
             checkoutContext.onWindowChanged(packageName, LedgerRevision.current, elapsedMillis(), nowMillis())
         }
-        if (packageName !in PaymentAppRegistry.packages) {
+        if (packageName !in selectedPackages) {
             if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                walletPreparationAt = null
+                opaqueHandoffWindow = null
                 visualGeneration.incrementAndGet()
                 if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) replaceWindow(null)
             }
@@ -192,31 +186,24 @@ class PaymentAccessibilityService : AccessibilityService() {
             !activeWindowMatches(packageName, event.windowId)) return
         visualGeneration.incrementAndGet()
         val eventClass = event.className?.toString()
-        if (packageName == WechatOpaqueTransferReader.PACKAGE && event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            if (eventClass == WechatRedPacketReader.PREPARE_ACTIVITY && latestWindow?.className != eventClass) {
-                redPacketFlow.start(elapsedMillis())
-                redPacketReceiveFlow.reset()
-                synchronized(opaqueAttempts) { opaqueAttempts.clear() }
-            } else if (eventClass == "com.tencent.mm.ui.chatting.ChattingUI") {
-                redPacketFlow.leaveUnpaid()
-                redPacketReceiveFlow.leaveUnpaid()
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            if (packageName == WECHAT && eventClass in walletPreparationActivities) {
+                walletPreparationAt = elapsedMillis()
+                opaqueHandoffWindow = null
+                synchronized(session) { session.onInputPage(packageName, event.windowId, elapsedMillis()) }
+            } else if (packageName == WECHAT && eventClass == WECHAT_RESULT_CONTAINER &&
+                walletPreparationAt?.let { elapsedMillis() - it in 0..120_000 } == true) {
+                opaqueHandoffWindow = event.windowId
+            } else {
+                walletPreparationAt = null
+                opaqueHandoffWindow = null
             }
-            else if (eventClass == "com.tencent.mm.plugin.remittance.ui.RemittanceUI") redPacketFlow.reset()
         }
         // Content redraws often name a View instead of the Activity. Retain only the Activity
         // established by a window-state event for this exact window, never across navigation.
         val pageClass = if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             previous?.let { it.packageName == packageName && it.windowId == event.windowId } == true)
             previous.className else eventClass
-        if (packageName == WechatOpaqueTransferReader.PACKAGE &&
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            eventClass == "com.tencent.mm.plugin.remittance.ui.RemittanceUI") {
-            // A new outgoing transfer flow can reuse the same result window and amount.
-            synchronized(opaqueAttempts) {
-                synchronized(session) { opaqueAttempts.keys.forEach { session.onInputPage(packageName, it, elapsedMillis()) } }
-                opaqueAttempts.clear()
-            }
-        }
         val revision = LedgerRevision.current
         val epoch = previous?.takeIf { it.packageName == packageName && it.windowId == event.windowId &&
             it.revision == revision && it.className == pageClass }?.epoch ?: windowEpoch.incrementAndGet()
@@ -226,11 +213,15 @@ class PaymentAccessibilityService : AccessibilityService() {
         requests.trySend(request)
     }
 
-    private fun isCurrent(request: ReadRequest) = enabled && request.revision == LedgerRevision.current &&
+    private fun isCurrent(request: ReadRequest) = enabled && request.packageName in selectedPackages && request.revision == LedgerRevision.current &&
         latestWindow?.epoch == request.epoch
 
     private fun replaceWindow(request: ReadRequest?) {
         val superseded = synchronized(readStateLock) {
+            latestWindow?.takeIf { request == null || it.packageName != request.packageName ||
+                it.windowId != request.windowId || it.className != request.className }?.let { previous ->
+                synchronized(session) { session.observe(previous.packageName, previous.windowId, null, elapsedMillis()) }
+            }
             latestWindow = request
             activeRead?.takeUnless { it.epoch == request?.epoch }?.job
         }
@@ -271,7 +262,7 @@ class PaymentAccessibilityService : AccessibilityService() {
             try {
                 val packageName = root.packageName?.toString() ?: return
                 val request = synchronized(readStateLock) {
-                    if (!enabled || latestWindow != null || packageName !in PaymentAppRegistry.packages) return
+                    if (!enabled || latestWindow != null || packageName !in selectedPackages) return
                     ReadRequest(packageName, root.windowId, LedgerRevision.current, windowEpoch.incrementAndGet())
                         .also { latestWindow = it }
                 }
@@ -319,6 +310,8 @@ class PaymentAccessibilityService : AccessibilityService() {
     private suspend fun readScreen(request: ReadRequest, refreshCache: Boolean = false): Boolean {
         if (!isCurrent(request)) return true
         try {
+            val sampleVersion = visualSampleSequence.incrementAndGet()
+            val textAuthorization = entryPoint.appPreferences().captureAuthorizationId(request.packageName, page = true, image = false)
             // Android 13+ 的旧节点缓存可能连续返回同一棵缺失树；补读前重新向目标应用取树。
             // 旧系统仍使用有界补读；不能以缓存清理失败为由放行不完整页面。
             if (refreshCache && Build.VERSION.SDK_INT >= 33) runCatching { clearCache() }
@@ -334,54 +327,23 @@ class PaymentAccessibilityService : AccessibilityService() {
             val actualWindowId: Int
             try {
                 actualWindowId = root.windowId
-                snapshot = PaymentScreenReader.inspect(root, request.packageName)
+                snapshot = PaymentScreenReader.inspect(root, request.packageName, request.className)
             } finally { root.recycle() }
             if (!isCurrent(request)) return true
             val text = snapshot.text
             if (text == null) {
-                if (acceptsOpaque(request, snapshot)) {
-                    val cloudVision = visualModeStillAllowed(true)
-                    CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
-                        request.eventType, request.className, false)
-                    val receipt = readOpaqueTransfer(request, snapshot, actualWindowId, cloudVision) ?: return false
-                    if (!isCurrent(request) || !visualModeStillAllowed(cloudVision)) return true
-                    val parsed = receipt.parsed
-                    entryPoint.monitor().onScreenRead("parsed", snapshot.diagnostics, request.packageName)
-                    val flowKey = when (parsed.scene) {
-                        "red_packet_sent" -> redPacketFlow.keyFor(parsed.amountCents, elapsedMillis()) ?: return false
-                        "red_packet_received" -> redPacketReceiveFlow.keyFor(parsed.amountCents, elapsedMillis()) ?: return false
-                        else -> null
-                    }
-                    val now = nowMillis()
-                    val cloudEnrichment: (suspend (String) -> Boolean)? = if (cloudVision) { key ->
-                        val queued = receipt.cloudImage?.let {
-                            enqueueReceiptImage(request, it, key, now, allowImageOnly = false)
-                        } == true
-                        if (queued) synchronized(opaqueAttempts) {
-                            opaqueAttempts[actualWindowId]?.let { attempt ->
-                                opaqueAttempts[actualWindowId] = attempt.copy(parsed = parsed)
-                            }
-                        }
-                        queued
-                    } else null
-                    return persistScreen(request, actualWindowId, parsed, now, elapsedMillis(), flowKey, cloudEnrichment)
+                val opaque = acceptsOpaque(request, snapshot)
+                CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
+                    request.eventType, request.className, opaque)
+                if (opaque) {
+                    queueOpaqueReceipt(request, snapshot, actualWindowId, sampleVersion)
+                    // A loading wallet can paint the amount without another accessibility event.
+                    return false
                 }
-                // 明确输入页代表离开凭证；节点缺失/树未加载只算暂不可读，不能重置去重身份。
                 if (snapshot.hasInput) synchronized(session) {
                     session.onInputPage(request.packageName, actualWindowId, elapsedMillis())
                 }
-                if (snapshot.hasInput) synchronized(visualAttempts) {
-                    val prefix = "${request.packageName}:$actualWindowId:"
-                    visualAttempts.keys.removeAll { it.startsWith(prefix) }
-                    visualResults.keys.removeAll { it.startsWith(prefix) }
-                    synchronized(detailAttempts) {
-                        detailAttempts.keys.removeAll { it.startsWith(prefix) }
-                        detailResults.keys.removeAll { it.startsWith(prefix) }
-                    }
-                }
                 entryPoint.monitor().onScreenRead(snapshot.status, snapshot.diagnostics, request.packageName)
-                CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
-                    request.eventType, request.className, false)
                 return false
             }
             if (CheckoutContext.isPreview(request.packageName, text)) {
@@ -400,166 +362,64 @@ class PaymentAccessibilityService : AccessibilityService() {
                         }
                     }
                 }
-                // The order is not yet paid. No ledger entry, OCR, or cloud task can come from it.
+                // The order is not yet paid. No ledger entry or cloud task can come from it.
                 entryPoint.monitor().onScreenRead("not_receipt", snapshot.diagnostics, request.packageName)
                 return true
             }
-            val received = if (request.packageName == WechatOpaqueTransferReader.PACKAGE &&
-                request.className == WechatReceivedTransferReader.ACTIVITY)
-                WechatReceivedTransferReader.parseText(text, nowMillis()) else null
-            val detailed = received ?: WalletReceiptDetailsParser.parse(request.packageName, text, nowMillis(), snapshot.structure)
-            var recognition = detailed?.let { PaymentTextParser.ScreenRecognition(it, it.scene!!,
-                modelCandidate = false, evidenceText = text) }
-                ?: PaymentTextParser.analyzeScreen(request.packageName, text, snapshot.structure)
-            val hasReadableReceipt = recognition.parsed != null
-            val cloudVision = (hasReadableReceipt || recognition.visualCandidate) && visualModeStillAllowed(true)
-            CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
-                request.eventType, request.className, recognition.parsed != null || recognition.visualCandidate)
             val now = nowMillis()
             val elapsed = elapsedMillis()
-            var visualTimedOut = false
-            if (cloudVision && recognition.parsed == null && recognition.visualCandidate &&
-                receiptImageAnchor.containsMatchIn(recognition.evidenceText)) {
-                val candidateKey = synchronized(session) {
-                    session.observeCandidate(request.packageName, actualWindowId, recognition.evidenceText, elapsed)
-                }
-                if (candidateKey != null) {
-                    val image = captureCloudReceipt(request, snapshot, actualWindowId)
-                    if (image != null && enqueueReceiptImage(request, image, candidateKey, now, allowImageOnly = true)) {
-                        synchronized(session) { session.markHandled(candidateKey) }
-                        return true
-                    }
-                }
-            } else if (!cloudVision && recognition.parsed == null && recognition.visualCandidate && Build.VERSION.SDK_INT >= 30 &&
-                entryPoint.appPreferences().screenVisualCaptureEnabled.first()) {
-                val identity = "${request.packageName}:${actualWindowId}:${request.epoch}:${text.hashCode()}"
-                val cached = synchronized(visualAttempts) {
-                    visualResults[identity]?.takeIf { it.generation == visualGeneration.get() }?.recognition
-                }
-                if (cached != null) recognition = cached
-                val shouldCapture = synchronized(visualAttempts) {
-                    visualAttempts.entries.removeAll { elapsed - it.value.firstAt > 60_000 }
-                    val previous = visualAttempts[identity]
-                    // Rendering or screenshot delivery can lag the first event. Retry within
-                    // a small budget without letting continuous redraws trigger unlimited OCR.
-                    if (cached != null || previous != null &&
-                        (previous.count >= 3 || elapsed - previous.lastAt < 750)) false else {
-                        visualAttempts[identity] = VisualAttempt(previous?.firstAt ?: elapsed,
-                            elapsed, (previous?.count ?: 0) + 1)
-                        while (visualAttempts.size > 12) visualAttempts.remove(visualAttempts.keys.first())
-                        true
-                    }
-                }
-                if (shouldCapture) {
-                    val generation = visualGeneration.get()
-                    val bitmap = if (visualCapture != null) visualCapture!!.invoke(snapshot) else captureVisual(request, snapshot, generation)
-                    if (bitmap != null) {
-                        try {
-                            val ocr = withTimeoutOrNull(OCR_TIMEOUT_MS) { visualOcr(bitmap) }
-                            if (!matchesSnapshot(request, snapshot, generation)) {
-                                synchronized(visualAttempts) { visualResults.remove(identity) }
-                                return true
-                            }
-                            visualTimedOut = ocr == null
-                            // Do not truncate a long OCR result and lose a failure/pending suffix.
-                            if (ocr != null && text.length + ocr.length + 1 <= 12_000 &&
-                                visualModeStillAllowed(false)) {
-                                val visual = PaymentTextParser.analyzeScreen(request.packageName, "$text\n$ocr",
-                                    evidenceSource = "页面与本地OCR")
-                                if (visual.parsed != null) synchronized(visualAttempts) {
-                                    recognition = visual
-                                    // Keep extracted facts without retaining raw OCR or page text in the cache.
-                                    visualResults[identity] = VisualResult(generation, visual.copy(evidenceText = "",
-                                        modelCandidate = false, visualCandidate = false))
-                                    while (visualResults.size > 12) visualResults.remove(visualResults.keys.first())
-                                }
-                            }
-                            if (visualGeneration.get() != generation) {
-                                synchronized(visualAttempts) { visualResults.remove(identity) }
-                                return true
-                            }
-                        } finally { bitmap.recycle() }
-                    } else if (visualGeneration.get() != generation) synchronized(visualAttempts) {
-                        visualResults.remove(identity)
-                    }
-                }
-            }
-            if (!isCurrent(request)) return true
+            val adapter = PaymentSceneAdapters.match(request.packageName, text, request.className, snapshot.structure)
+            val parsedByAdapter = PaymentSceneAdapters.parse(request.packageName, text, now,
+                snapshot.structure, request.className)
+            val recognition = parsedByAdapter?.let { PaymentTextParser.ScreenRecognition(it, it.scene ?: "receipt",
+                modelCandidate = false, evidenceText = text) }
+                ?: if (PaymentSceneAdapters.isDetailPage(request.packageName, text))
+                    PaymentTextParser.ScreenRecognition(null, "receipt_detail", modelCandidate = false, evidenceText = text)
+                else PaymentTextParser.analyzeScreen(request.packageName, text, snapshot.structure)
             val parsed = recognition.parsed
-            if (parsed != null && !hasReadableReceipt && !visualModeStillAllowed(false)) return false
-            val status = when {
-                parsed != null -> "parsed"
-                visualTimedOut -> "visual_unavailable"
-                else -> "not_receipt"
-            }
-            val readDiagnostics = if (visualTimedOut) snapshot.diagnostics + ("visualOcrTimeout" to 1) else snapshot.diagnostics
-            entryPoint.monitor().onScreenRead(status, readDiagnostics, request.packageName)
+            val imageCandidate = parsed != null || adapter?.allowsCloudImage == true
+            CaptureDiagnosticStore.record(request.packageName, snapshot, actualWindowId,
+                request.eventType, request.className, imageCandidate)
+            entryPoint.monitor().onScreenRead(if (parsed != null) "parsed" else "not_receipt",
+                snapshot.diagnostics, request.packageName)
             if (parsed == null) {
-                if (recognition.modelCandidate) {
-                    val candidateKey = synchronized(session) {
+                if (imageCandidate && cloudVisionAllowed()) {
+                    val key = synchronized(session) {
+                        session.observeCandidate(request.packageName, actualWindowId, text, elapsed, sampleVersion)
+                    } ?: return true
+                    if (queueImageCandidate(request, snapshot, actualWindowId, key, now)) {
+                        synchronized(session) { session.markHandled(key) }
+                        return false
+                    }
+                } else if (recognition.modelCandidate) {
+                    val key = synchronized(session) {
                         session.observeCandidate(request.packageName, actualWindowId, recognition.evidenceText, elapsed)
                     }
-                    val handled = if (candidateKey == null) false else unknownScreenHandler?.invoke(
-                        request.packageName, recognition.evidenceText, candidateKey, now, request.revision,
+                    val handled = if (key == null) false else unknownScreenHandler?.invoke(
+                        request.packageName, recognition.evidenceText, key, now, request.revision,
                         snapshot.structure?.toJson(), emptyList()) ?: entryPoint.captureProcessor().processUnrecognizedScreen(
-                        request.packageName, recognition.evidenceText, candidateKey, now, request.revision,
-                        snapshot.structure?.toJson())
-                    if (candidateKey != null && handled) {
-                        synchronized(session) { session.markHandled(candidateKey) }
-                    }
-                } else if (!recognition.visualCandidate ||
-                    !PaymentTextParser.canUseFallback(recognition.evidenceText, requireAmount = false)) {
+                        request.packageName, recognition.evidenceText, key, now, request.revision,
+                        snapshot.structure?.toJson(), expectedAuthorizationId = textAuthorization)
+                    if (key != null && handled) synchronized(session) { session.markHandled(key) }
+                } else if (!imageCandidate) {
                     synchronized(session) { session.observe(request.packageName, actualWindowId, null, elapsed) }
-                }
-                // A standalone completed result with temporarily unavailable OCR is still the
-                // same receipt. Cooldown or a slow read must not create a false navigation gap.
+                } else entryPoint.monitor().onScreenStatus("visual_required", request.packageName)
                 return false
             }
-            if (request.packageName == WechatOpaqueTransferReader.PACKAGE && request.className == WechatRedPacketReader.DETAIL_ACTIVITY) {
-                // The same history guard applies when a future WeChat version exposes nodes.
-                val key = when (parsed.scene) {
-                    "red_packet_sent" -> redPacketFlow.keyFor(parsed.amountCents, elapsed)
-                    "red_packet_received" -> redPacketReceiveFlow.confirm(parsed.amountCents, elapsed)
-                    else -> null
-                }
-                if (key == null) {
-                    entryPoint.monitor().onScreenStatus("visual_requires_flow", request.packageName)
-                    return false
-                }
-                return persistScreen(request, actualWindowId, parsed, now, elapsed, key)
-            }
-            val flowKey = if (parsed.scene == "red_packet_sent" && request.packageName == WechatOpaqueTransferReader.PACKAGE) {
-                redPacketFlow.keyFor(parsed.amountCents, elapsed)
-                    ?: if (redPacketFlow.isPreparing(elapsed)) redPacketFlow.confirm(parsed.amountCents, elapsed) else null
-            } else if (parsed.scene == "red_packet_received" && request.packageName == WechatOpaqueTransferReader.PACKAGE) {
-                redPacketReceiveFlow.keyFor(parsed.amountCents, elapsed)
-                    ?: if (redPacketReceiveFlow.isPreparing(elapsed)) redPacketReceiveFlow.confirm(parsed.amountCents, elapsed) else null
-            } else null
-            // Resolve consent before publishing saved; disabled visual reading must not delay
-            // scheduling the next node sample after a receipt has already been persisted.
-            val enrichDetails = hasReadableReceipt && needsVisualDetails(parsed) &&
-                !cloudVision && visualModeStillAllowed(false)
-            if (!isCurrent(request)) return true
             val withCheckout = synchronized(checkoutContext) {
                 checkoutContext.enrich(request.packageName, snapshot.structure, parsed, request.revision, elapsed)
             }
-            val cloudEnrichment: (suspend (String) -> Boolean)? =
-                if (cloudVision && hasReadableReceipt && needsVisualDetails(withCheckout)) { key ->
-                    captureCloudReceipt(request, snapshot, actualWindowId)?.let {
-                        enqueueReceiptImage(request, it, key, now, allowImageOnly = false)
-                    } == true
-                } else null
-            val saved = persistScreen(request, actualWindowId, withCheckout, now, elapsed, flowKey, cloudEnrichment)
-            // Save verified node evidence first: a slow/failed OCR or navigation must not lose it.
-            // The amount-recovery path already used its image and must not request a second one.
-            if (saved && enrichDetails) {
-                val enriched = enrichVisualDetails(request, snapshot, actualWindowId, withCheckout)
-                if (enriched != withCheckout && isCurrent(request) &&
-                    visualModeStillAllowed(false)) {
-                    persistScreen(request, actualWindowId, enriched, now, elapsed, flowKey)
-                }
-            }
-            // Keep sampling readable results so late order IDs can enrich existing evidence.
+            val cloudEnrichment: (suspend (String) -> Boolean)? = if (cloudVisionAllowed() &&
+                (Build.VERSION.SDK_INT >= 34 || displayWindowUnoccluded(request, snapshot.windowBounds))) { key ->
+                captureCloudReceipt(request, snapshot, actualWindowId)?.let {
+                    enqueueReceiptImage(request, it, key, now, allowImageOnly = false)
+                } == true
+            } else null
+            if (!isCurrent(request)) return true
+            // Persist node facts first. Image enrichment retains the same event and cannot delay a valid local entry.
+            persistScreen(request, actualWindowId, withCheckout, now, elapsed,
+                expectedAuthorizationId = textAuthorization, cloudEnrichment = cloudEnrichment)
+            // Late order IDs and receipt fields can still enrich the saved evidence.
             return false
         } catch (e: CancellationException) { throw e
         } catch (_: Exception) {
@@ -569,22 +429,14 @@ class PaymentAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun needsVisualDetails(parsed: NotificationParseResult): Boolean =
-        (parsed.merchant == null && parsed.details.merchantName == null && parsed.details.payeeName == null) ||
-            parsed.scene == "merchant_payment" ||
-            (parsed.scene in setOf("transfer_sent", "transfer_received") &&
-                (parsed.details.fundingAccount.isNullOrBlank() || parsed.details.remark.isNullOrBlank()))
-
-    private suspend fun visualModeStillAllowed(cloud: Boolean): Boolean {
-        val prefs = entryPoint.appPreferences()
-        val cloudEnabled = Build.VERSION.SDK_INT >= 34 && prefs.screenCloudVisionEnabled.first()
-        return if (cloud) cloudEnabled else !cloudEnabled && prefs.screenVisualCaptureEnabled.first()
-    }
+    private suspend fun cloudVisionAllowed(): Boolean =
+        Build.VERSION.SDK_INT >= 30 && entryPoint.appPreferences().screenCloudVisionEnabled.first()
 
     private suspend fun captureCloudReceipt(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot,
-        windowId: Int): String? {
-        if (Build.VERSION.SDK_INT < 34 || windowId < 0 ||
-            (snapshot.diagnostics["foreignNodes"] ?: 0) > 0 || !visualModeStillAllowed(true)) return null
+        windowId: Int): ReceiptImage? {
+        if (windowId < 0 || (snapshot.diagnostics["foreignNodes"] ?: 0) > 0 || !cloudVisionAllowed()) return null
+        if (Build.VERSION.SDK_INT < 34 && !displayWindowUnoccluded(request, snapshot.windowBounds)) return null
+        val authorization = entryPoint.appPreferences().captureAuthorizationId(request.packageName, page = true, image = true)
         val generation = visualGeneration.get()
         val bitmap = visualCapture?.invoke(snapshot) ?: if (visualCapture == null)
             captureVisual(request, snapshot, generation, windowId, includePanel = true) else null
@@ -592,118 +444,72 @@ class PaymentAccessibilityService : AccessibilityService() {
         return try {
             if (!matchesSnapshot(request, snapshot, generation, windowId)) return null
             val image = PaymentImageReader.dataUrl(bitmap)
-            image.takeIf { matchesSnapshot(request, snapshot, generation, windowId) && visualModeStillAllowed(true) }
+            ReceiptImage(image, authorization).takeIf { matchesSnapshot(request, snapshot, generation, windowId) && cloudVisionAllowed() &&
+                authorization == entryPoint.appPreferences().captureAuthorizationId(request.packageName, page = true, image = true) &&
+                (Build.VERSION.SDK_INT >= 34 || displayWindowUnoccluded(request, snapshot.windowBounds)) }
         } catch (_: IllegalArgumentException) {
             entryPoint.monitor().onScreenRead("visual_unavailable", snapshot.diagnostics, request.packageName)
             null
         } finally { bitmap.recycle() }
     }
 
-    private suspend fun enqueueReceiptImage(request: ReadRequest, image: String, key: String,
-        observedAt: Long, allowImageOnly: Boolean): Boolean {
-        if (!isCurrent(request) || !visualModeStillAllowed(true)) return false
-        return receiptImageHandler?.invoke(request.packageName, image, key, observedAt, request.revision, allowImageOnly)
-            ?: entryPoint.captureProcessor().processReceiptImage(
-                request.packageName, image, key, observedAt, request.revision, allowImageOnly)
+    private fun reserveImageAttempt(key: String): Boolean = synchronized(imageAttempts) {
+        val now = elapsedMillis()
+        val previous = imageAttempts[key]
+        if (submittedImages[key].orEmpty().size >= MAX_RECEIPT_IMAGE_ATTEMPTS || previous != null &&
+            (previous.failures >= MAX_RECEIPT_IMAGE_ATTEMPTS || now - previous.firstAt !in 0..IMAGE_WINDOW_MS ||
+                now - previous.lastAt < 750)) false
+        else {
+            imageAttempts[key] = ImageAttempt(previous?.firstAt ?: now, now, previous?.failures ?: 0)
+            while (imageAttempts.size > 16) {
+                val oldest = imageAttempts.keys.first()
+                imageAttempts.remove(oldest)
+                submittedImages.remove(oldest)
+            }
+            true
+        }
     }
 
-    private suspend fun enrichVisualDetails(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot,
-        windowId: Int, original: NotificationParseResult): NotificationParseResult {
-        val diagnostics = mutableMapOf<String, Int>()
-        val savedStatus = entryPoint.monitor().health.value.screenCaptureStatus
-        fun reason(name: String): NotificationParseResult {
-            diagnostics[name] = 1
-            entryPoint.monitor().onScreenRead(savedStatus, snapshot.diagnostics + diagnostics, request.packageName)
-            return original
-        }
-        // Expanded details are captured from this application window only, never the display.
-        if (Build.VERSION.SDK_INT < 34 || windowId < 0) return reason("detailWindowUnavailable")
-        if ((snapshot.diagnostics["foreignNodes"] ?: 0) > 0) return reason("detailForeignNodes")
-        val generation = visualGeneration.get()
-        if (!matchesSnapshot(request, snapshot, generation, windowId)) return reason("detailSnapshotChanged")
-        val identity = "${request.packageName}:$windowId:${request.epoch}:${original.amountCents}:${original.direction}:" +
-            "${original.orderId}:${original.occurredAt}"
-        val elapsed = elapsedMillis()
-        synchronized(detailAttempts) {
-            val expired = detailAttempts.filterValues { elapsed - it.firstAt > 60_000 }.keys
-            expired.forEach { detailAttempts.remove(it); detailResults.remove(it) }
-            detailResults[identity]?.takeIf { it.generation == generation && it.snapshotHash == snapshot.structure.hashCode() }
-        }?.let { return it.parsed }
-        val blocked = synchronized(detailAttempts) {
-            val previous = detailAttempts[identity]
-            when {
-                previous != null && previous.count >= 3 -> "detailBudgetExhausted"
-                previous != null && elapsed - previous.lastAt < 750 -> "detailRetryWaiting"
-                else -> {
-                    detailAttempts[identity] = VisualAttempt(previous?.firstAt ?: elapsed, elapsed, (previous?.count ?: 0) + 1)
-                    while (detailAttempts.size > 12) {
-                        val oldest = detailAttempts.keys.first()
-                        detailAttempts.remove(oldest)
-                        detailResults.remove(oldest)
-                    }
-                    null
-                }
-            }
-        }
-        if (blocked != null) return reason(blocked)
-        try {
-            val bitmap = if (visualCapture != null) visualCapture!!.invoke(snapshot) else
-                captureVisual(request, snapshot, generation, windowId, includePanel = true, diagnostics = diagnostics)
-            if (bitmap == null) return reason("detailScreenshotUnavailable")
-            val ocr = try { withTimeoutOrNull(OCR_TIMEOUT_MS) { visualOcr(bitmap) } } finally { bitmap.recycle() }
-                ?: return reason("detailOcrTimeout")
-            if (!visualModeStillAllowed(false)) return reason("detailConsentRevoked")
-            if (!matchesSnapshot(request, snapshot, generation, windowId)) return reason("detailSnapshotChanged")
-            if (ocr.isBlank()) return reason("detailOcrEmpty")
-            val text = snapshot.text ?: return reason("detailSnapshotChanged")
-            if (text.length + ocr.length + 1 > 12_000) return reason("detailTextLimit")
-            if (!PaymentTextParser.isConsistentFallback(ocr, original)) return reason("detailFactsConflict")
-            val combined = "$text\n$ocr"
-            val candidate = WalletReceiptDetailsParser.parse(request.packageName, combined, nowMillis(), snapshot.structure)
-                ?: PaymentTextParser.analyzeScreen(request.packageName, combined, snapshot.structure,
-                    evidenceSource = "页面与本地OCR").parsed
-                ?: return reason("detailUnverified")
-            if (candidate.amountCents != original.amountCents || candidate.direction != original.direction ||
-                (original.orderId != null && candidate.orderId != original.orderId) ||
-                (original.occurredAt != null && candidate.occurredAt != original.occurredAt) ||
-                (original.orderIdKind != null && candidate.orderIdKind != original.orderIdKind))
-                return reason("detailFactsConflict")
-            val supplemental = PaymentTextParser.withReceiptDetails(request.packageName, combined, candidate,
-                snapshot.structure, "页面与本地OCR").details
-            // Inspect OCR roles separately: conflicting duplicate labels can disappear from a
-            // combined parse. A store name and its collecting company are complementary roles.
-            val ocrRead = PaymentReceiptDetailsReader.read(request.packageName, ocr, null, "本地OCR")
-            if (ocrRead.ambiguousFields.isNotEmpty()) return reason("detailFieldsConflict")
-            val ocrDetails = ocrRead.details
-            val conflicts = listOf(original.details.merchantName to ocrDetails.merchantName.takeUnless { ocrRead.merchantFromStore },
-                original.details.payeeName to ocrDetails.payeeName,
-                original.details.paymentChannel to ocrDetails.paymentChannel,
-                original.details.fundingAccount to ocrDetails.fundingAccount)
-                .any { (known, next) -> known != null && next != null && known != next }
-            if (conflicts) return reason("detailFieldsConflict")
-            if (original.merchant != null && candidate.merchant != null && original.merchant != candidate.merchant &&
-                !(original.details.merchantName == null && original.details.payeeName == original.merchant &&
-                    supplemental.merchantName != null)) return reason("detailFieldsConflict")
-            // Financial facts, identity, time and their provenance remain owned by the node receipt.
-            val enriched = original.copy(merchant = original.merchant ?: candidate.merchant,
-                details = original.details.mergeMissing(supplemental))
-            if (enriched == original) return reason("detailNoAdditionalFields")
-            synchronized(detailAttempts) {
-                detailResults[identity] = DetailResult(generation, snapshot.structure.hashCode(), enriched)
-            }
-            diagnostics["detailEnriched"] = 1
-            entryPoint.monitor().onScreenRead(savedStatus, snapshot.diagnostics + diagnostics, request.packageName)
-            return enriched
-        } catch (e: CancellationException) { throw e
-        } catch (_: Exception) {
-            return reason("detailOcrFailure")
-        }
+    private fun failedImageAttempt(key: String) = synchronized(imageAttempts) {
+        imageAttempts[key]?.let { imageAttempts[key] = it.copy(failures = it.failures + 1) }
+    }
+
+    private suspend fun submitCandidateImage(request: ReadRequest, image: ReceiptImage, key: String, observedAt: Long): Boolean {
+        val fingerprint = image.authorizationId + ":" + MessageDigest.getInstance("SHA-256")
+            .digest(image.data.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        // Redraws of the same loading frame are processed locally and cannot consume another model request.
+        if (synchronized(imageAttempts) { fingerprint in submittedImages[key].orEmpty() }) return true
+        val queued = enqueueReceiptImage(request, image, key, observedAt, allowImageOnly = true)
+        if (queued) {
+            synchronized(imageAttempts) { submittedImages.getOrPut(key) { linkedSetOf() }.add(fingerprint) }
+            entryPoint.monitor().onScreenStatus("model_queued", request.packageName)
+        } else failedImageAttempt(key)
+        return queued
+    }
+
+    private suspend fun queueImageCandidate(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot,
+        windowId: Int, key: String, observedAt: Long): Boolean {
+        if (!cloudVisionAllowed() || Build.VERSION.SDK_INT < 34 && !displayWindowUnoccluded(request, snapshot.windowBounds)) return false
+        if (!reserveImageAttempt(key)) return false
+        val image = captureCloudReceipt(request, snapshot, windowId)
+        if (image == null) { failedImageAttempt(key); return false }
+        return submitCandidateImage(request, image, key, observedAt)
+    }
+
+    private suspend fun enqueueReceiptImage(request: ReadRequest, image: ReceiptImage, key: String,
+        observedAt: Long, allowImageOnly: Boolean): Boolean {
+        if (!isCurrent(request) || !cloudVisionAllowed() || image.authorizationId !=
+            entryPoint.appPreferences().captureAuthorizationId(request.packageName, page = true, image = true)) return false
+        return receiptImageHandler?.invoke(request.packageName, image.data, key, observedAt, request.revision, allowImageOnly)
+            ?: entryPoint.captureProcessor().processReceiptImage(
+                request.packageName, image.data, key, observedAt, request.revision, allowImageOnly,
+                expectedAuthorizationId = image.authorizationId)
     }
 
     private suspend fun persistScreen(request: ReadRequest, windowId: Int, parsed: NotificationParseResult,
-        now: Long, elapsed: Long, flowKey: String? = null,
+        now: Long, elapsed: Long, expectedAuthorizationId: String,
         cloudEnrichment: (suspend (String) -> Boolean)? = null): Boolean {
-        val key = flowKey ?: synchronized(session) { session.observe(request.packageName, windowId, parsed, elapsed) }
+        val key = synchronized(session) { session.observe(request.packageName, windowId, parsed, elapsed) }
         if (key == null && cloudEnrichment == null) {
             entryPoint.monitor().onScreenStatus("duplicate", request.packageName)
             return true
@@ -712,7 +518,7 @@ class PaymentAccessibilityService : AccessibilityService() {
             val evidence = synchronized(session) { session.evidence(key) } ?: parsed
             CaptureLatencyTrace.record(this, key, CaptureLatencyTrace.Source.ACCESSIBILITY, CaptureLatencyTrace.Stage.RECEIVED, now)
             if (!entryPoint.captureProcessor().processScreen(request.packageName, evidence, key, now, request.revision,
-                    queueSemanticModel = cloudEnrichment == null)) {
+                    queueSemanticModel = cloudEnrichment == null, expectedAuthorizationId = expectedAuthorizationId)) {
                 entryPoint.monitor().onScreenStatus("error", request.packageName)
                 return false
             }
@@ -732,133 +538,44 @@ class PaymentAccessibilityService : AccessibilityService() {
         return true
     }
 
-    private suspend fun readOpaqueTransfer(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot,
-        windowId: Int, cloudVision: Boolean): OpaqueReceipt? {
-        val monitor = entryPoint.monitor()
-        var diagnostics = snapshot.diagnostics
-        fun status(value: String) = monitor.onScreenRead(value, diagnostics, request.packageName)
-        if (!visualModeStillAllowed(cloudVision)) {
-            status("visual_required")
-            return null
+    private suspend fun queueOpaqueReceipt(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot,
+        windowId: Int, sampleVersion: Long): Boolean {
+        if (!cloudVisionAllowed()) {
+            entryPoint.monitor().onScreenRead("visual_required", snapshot.diagnostics, request.packageName)
+            return false
         }
-        if (request.className == WechatRedPacketReader.DETAIL_ACTIVITY &&
-            !redPacketFlow.hasPaid(elapsedMillis()) && !redPacketReceiveFlow.hasPaid(elapsedMillis()) &&
-            !redPacketReceiveFlow.isPreparing(elapsedMillis())) {
-            status("visual_requires_flow")
-            return null
-        }
-        // Window-specific capture excludes other apps and overlays. Older Android versions retain
-        // the normal node-based path; no broad full-display fallback for an unobservable page.
-        if (Build.VERSION.SDK_INT < 34 || windowId < 0) {
-            status("visual_unavailable")
-            return null
-        }
-        val now = elapsedMillis()
+        val key = synchronized(session) {
+            session.observeCandidate(request.packageName, windowId, "opaque:${request.className}", elapsedMillis(), sampleVersion)
+        } ?: return true
+        val authorization = entryPoint.appPreferences().captureAuthorizationId(request.packageName, page = true, image = true)
         val generation = visualGeneration.get()
-        val previous = synchronized(opaqueAttempts) { opaqueAttempts[windowId]?.takeIf { it.cloudVision == cloudVision } }
-        if (previous != null && now - previous.firstAt < 10_000) {
-            previous.parsed?.takeIf { previous.generation == generation }?.let { return OpaqueReceipt(it) }
-            if (now - previous.lastAt < 750 || previous.attempts >= 3) {
-                status("visual_waiting")
-                return null
-            }
+        if (!matchesOpaqueSnapshot(request, snapshot, generation)) return false
+        if (Build.VERSION.SDK_INT < 34 && !displayWindowUnoccluded(request, snapshot.windowBounds)) return false
+        if (!reserveImageAttempt(key)) return false
+        val diagnostics = mutableMapOf<String, Int>()
+        val bitmap = visualCapture?.invoke(snapshot) ?: if (visualCapture == null)
+            captureBitmap(windowId.takeIf { Build.VERSION.SDK_INT >= 34 }, diagnostics) else null
+        if (bitmap == null) {
+            failedImageAttempt(key)
+            entryPoint.monitor().onScreenRead("visual_unavailable", snapshot.diagnostics + diagnostics, request.packageName)
+            return false
         }
-        synchronized(opaqueAttempts) {
-            opaqueAttempts[windowId] = OpaqueAttempt(
-                previous?.firstAt?.takeIf { now - it < 10_000 } ?: now, now,
-                if (previous != null && now - previous.firstAt < 10_000) previous.attempts + 1 else 1, generation, cloudVision)
-            while (opaqueAttempts.size > 8) opaqueAttempts.remove(opaqueAttempts.keys.first())
-        }
-        if (!matchesOpaqueSnapshot(request, snapshot, generation)) return null
-        status("visual_read")
-        val screenshotDiagnostics = mutableMapOf<String, Int>()
-        val bitmap = if (visualCapture != null) visualCapture!!.invoke(snapshot) else captureBitmap(windowId, screenshotDiagnostics)
-        diagnostics = diagnostics + screenshotDiagnostics
-        if (bitmap == null) { status("visual_unavailable"); return null }
-        try {
-            val lines = withTimeoutOrNull(OCR_TIMEOUT_MS) { opaqueVisualOcr(bitmap) }
-            if (lines == null) {
-                diagnostics = diagnostics + ("visualOcrTimeout" to 1)
-                status("visual_unavailable")
-                return null
-            }
-            diagnostics = diagnostics + WechatOpaqueTransferReader.diagnostics(lines, bitmap.width, bitmap.height)
-            if (request.className == WechatReceivedTransferReader.ACTIVITY) {
-                diagnostics = diagnostics + WechatReceivedTransferReader.diagnostics(lines)
-            }
-            if (!matchesOpaqueSnapshot(request, snapshot, generation) ||
-                !visualModeStillAllowed(cloudVision)) {
-                synchronized(opaqueAttempts) { opaqueAttempts.remove(windowId) }
-                return null
-            }
-            val receivedDiagnostics = mutableMapOf<String, Int>()
-            val parsed = if (request.className == WechatReceivedTransferReader.ACTIVITY)
-                WechatReceivedTransferReader.parse(lines, bitmap.width, bitmap.height, nowMillis(), diagnostics = receivedDiagnostics)
-                else if (request.className == WechatRedPacketReader.DETAIL_ACTIVITY) {
-                    WechatRedPacketReader.parseSentDetail(lines, bitmap.width, bitmap.height)?.takeIf {
-                        redPacketFlow.keyFor(it.amountCents, elapsedMillis()) != null
-                    } ?: WechatRedPacketReader.parseReceivedDetail(lines, bitmap.width, bitmap.height)?.takeIf {
-                        redPacketReceiveFlow.confirm(it.amountCents, elapsedMillis()) != null
-                    }
-                }
-                else WechatOpaqueTransferReader.parse(lines, bitmap.width, bitmap.height)
-                    ?: (if (redPacketFlow.isPreparing(elapsedMillis()))
-                        WechatRedPacketReader.parsePaymentResult(lines, bitmap.width, bitmap.height)?.takeIf {
-                            redPacketFlow.confirm(it.amountCents, elapsedMillis()) != null
-                        } else null)
-                    ?: if (request.className == WechatOpaqueTransferReader.ACTIVITY &&
-                        isCurrent(request) && visualGeneration.get() == generation) {
-                        WechatOpaqueMerchantReceiptReader.parse(lines, bitmap.width, bitmap.height, nowMillis())?.let { candidate ->
-                            candidate.merchantOrderId?.let { order ->
-                                checkoutContext.enrichOpaqueMerchant(request.packageName, candidate.receipt,
-                                    order, candidate.merchant, request.revision, elapsedMillis())
-                            } ?: candidate.receipt.takeIf { candidate.independentlyVerified }
-                        }
-                    } else null
-            diagnostics = diagnostics + receivedDiagnostics
-            if (parsed == null) {
-                // A readable input/history/failed image is a real non-receipt boundary. An empty
-                // OCR result can be a transient loading frame and must not reset transaction identity.
-                if (lines.isNotEmpty()) synchronized(session) {
-                    session.observe(request.packageName, windowId, null, elapsedMillis())
-                }
-                status("visual_not_receipt")
-                return null
-            }
-            // Opaque WeChat windows need template verification to prove they contain a receipt.
-            // In cloud mode only the verified financial facts survive the local read.
-            val facts = if (cloudVision) parsed.copy(
-                merchant = null,
-                details = PaymentReceiptDetails(paymentChannel = parsed.details.paymentChannel),
-                fieldEvidence = parsed.fieldEvidence.filterKeys {
-                    it in setOf("amount", "direction", "paymentStatus", "orderId", "occurredAt", "transferTime")
-                }) else parsed
-            val image = if (cloudVision) encodeOpaqueReceiptImage(bitmap, parsed.scene, request.className) else null
-            if (!matchesOpaqueSnapshot(request, snapshot, generation) || !visualModeStillAllowed(cloudVision)) return null
-            if (!cloudVision) synchronized(opaqueAttempts) { opaqueAttempts[windowId]?.let {
-                opaqueAttempts[windowId] = it.copy(parsed = facts)
-            } }
-            return OpaqueReceipt(facts, image)
+        val image = try {
+            if (!matchesOpaqueSnapshot(request, snapshot, generation) || !cloudVisionAllowed() ||
+                Build.VERSION.SDK_INT < 34 && !displayWindowUnoccluded(request, snapshot.windowBounds)) return false
+            // Opaque dedicated wallet windows have no text coordinates. Crop to their window bounds
+            // on Android 11–13; Android 14+ supplies that window directly, excluding other windows.
+            val region = PaymentVisualRegion.windowBounds(snapshot.windowBounds, bitmap.width, bitmap.height,
+                Build.VERSION.SDK_INT >= 34) ?: return false
+            val receipt = Bitmap.createBitmap(bitmap, region.left, region.top, region.width(), region.height())
+            try { PaymentImageReader.dataUrl(receipt) }
+            finally { if (receipt !== bitmap) receipt.recycle() }
         } finally { bitmap.recycle() }
-    }
-
-    private fun encodeOpaqueReceiptImage(bitmap: Bitmap, scene: String?, activity: String?): String? {
-        // These edges correspond to the receipt content checked by the opaque templates.
-        // Group red-packet details may show other recipients below the user's own result.
-        val bottom = when (scene) {
-            "transfer_sent" -> .45
-            "red_packet_received" -> .55
-            "red_packet_sent" -> if (activity == WechatRedPacketReader.DETAIL_ACTIVITY) .35 else .61
-            "transfer_received", "merchant_payment" -> .97
-            else -> return null
-        }
-        val top = (bitmap.height * .045).toInt()
-        val height = (bitmap.height * bottom).toInt() - top
-        if (height <= 0) return null
-        val receipt = Bitmap.createBitmap(bitmap, 0, top, bitmap.width, height)
-        return try { PaymentImageReader.dataUrl(receipt) }
-        catch (_: IllegalArgumentException) { null }
-        finally { if (receipt !== bitmap) receipt.recycle() }
+        if (!matchesOpaqueSnapshot(request, snapshot, generation) ||
+            authorization != entryPoint.appPreferences().captureAuthorizationId(request.packageName, page = true, image = true)) return false
+        val queued = submitCandidateImage(request, ReceiptImage(image, authorization), key, nowMillis())
+        if (queued) synchronized(session) { session.markHandled(key) }
+        return queued
     }
 
     @Suppress("DEPRECATION")
@@ -866,17 +583,19 @@ class PaymentAccessibilityService : AccessibilityService() {
         if (!isCurrent(request) || visualGeneration.get() != generation || latestWindow?.className != request.className) return false
         val root = activeRoot(request.packageName, request.windowId) ?: return false
         return try {
-            root.windowId == request.windowId &&
-                PaymentScreenReader.inspect(root, request.packageName).let {
-                    it.diagnostics == snapshot.diagnostics &&
-                        acceptsOpaque(request, it)
-                }
+            root.windowId == request.windowId && PaymentScreenReader.inspect(root, request.packageName, request.className).let {
+                it.diagnostics == snapshot.diagnostics && it.windowBounds == snapshot.windowBounds && acceptsOpaque(request, it)
+            }
         } finally { root.recycle() }
     }
 
-    private fun acceptsOpaque(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot): Boolean =
-        WechatOpaqueTransferReader.accepts(request.packageName, request.className, snapshot) ||
-            WechatRedPacketReader.accepts(request.packageName, request.className, snapshot)
+    private fun acceptsOpaque(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot): Boolean {
+        if (!snapshot.isBoundedOpaqueTree) return false
+        val dedicated = PaymentSceneAdapters.match(request.packageName, "", request.className)
+        if (dedicated?.allowsCloudImage == true) return true
+        return request.packageName == WECHAT && request.className == WECHAT_RESULT_CONTAINER &&
+            opaqueHandoffWindow == request.windowId && walletPreparationAt?.let { elapsedMillis() - it in 0..120_000 } == true
+    }
 
     @Suppress("DEPRECATION")
     private fun matchesSnapshot(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot, generation: Long,
@@ -886,7 +605,7 @@ class PaymentAccessibilityService : AccessibilityService() {
         val root = activeRoot(request.packageName, windowId ?: request.windowId) ?: return false
         return try {
             (windowId == null || root.windowId == windowId) &&
-                PaymentScreenReader.inspect(root, request.packageName).let {
+                PaymentScreenReader.inspect(root, request.packageName, request.className).let {
                     it.text != null && !it.hasInput && it.text == snapshot.text && it.structure == snapshot.structure
                 }
         } finally { root.recycle() }
@@ -897,21 +616,46 @@ class PaymentAccessibilityService : AccessibilityService() {
         windowId: Int? = null, includePanel: Boolean = false,
         diagnostics: MutableMap<String, Int> = mutableMapOf()): Bitmap? {
         if (!matchesSnapshot(request, snapshot, generation, windowId)) return null
-        val targetWindow = windowId ?: request.windowId.takeIf { it >= 0 && Build.VERSION.SDK_INT >= 34 }
+        val targetWindow = (windowId ?: request.windowId.takeIf { it >= 0 }).takeIf { Build.VERSION.SDK_INT >= 34 }
+        if (targetWindow == null && !displayWindowUnoccluded(request, snapshot.windowBounds)) return null
         val whole = captureBitmap(targetWindow, diagnostics) ?: run {
             entryPoint.monitor().onScreenRead("visual_unavailable", snapshot.diagnostics + diagnostics, request.packageName)
             return null
         }
         return try {
-            if (!matchesSnapshot(request, snapshot, generation, windowId)) return null
-            val region = PaymentVisualRegion.bounds(snapshot.structure, whole.width, whole.height,
-                includePanel = includePanel, windowRelative = targetWindow != null) ?: run {
+            if (!matchesSnapshot(request, snapshot, generation, windowId) ||
+                targetWindow == null && !displayWindowUnoccluded(request, snapshot.windowBounds)) return null
+            val walletImage = PaymentSceneAdapters.match(request.packageName, snapshot.text.orEmpty(), request.className,
+                snapshot.structure)?.kind == PaymentSceneAdapters.Kind.OPAQUE_RECEIPT
+            val region = (if (walletImage) PaymentVisualRegion.windowBounds(snapshot.windowBounds, whole.width, whole.height,
+                targetWindow != null) else PaymentVisualRegion.bounds(snapshot.structure, whole.width, whole.height,
+                includePanel = includePanel, windowRelative = targetWindow != null, windowBounds = snapshot.windowBounds,
+                receiptBounds = snapshot.receiptBounds)) ?: run {
                 diagnostics["visualRegionUnavailable"] = 1
                 return null
             }
             Bitmap.createBitmap(whole, region.left, region.top, region.width(), region.height())
                 .let { if (it === whole) it.copy(Bitmap.Config.ARGB_8888, false) else it }
         } finally { whole.recycle() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun displayWindowUnoccluded(request: ReadRequest, bounds: List<Int>): Boolean {
+        if (bounds.size != 4) return false
+        val area = Rect(bounds[0], bounds[1], bounds[2], bounds[3])
+        if (area.isEmpty) return false
+        val visibleWindows = windows
+        return try {
+            val target = visibleWindows.singleOrNull { it.id == request.windowId && it.isActive &&
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION } ?: return false
+            visibleWindows.none { other ->
+                if (other.id == target.id || other.layer <= target.layer) false else {
+                    val overlay = Rect().also(other::getBoundsInScreen)
+                    // An unknown overlay extent cannot prove that the receipt pixels are unoccluded.
+                    overlay.isEmpty || Rect.intersects(area, overlay)
+                }
+            }
+        } finally { visibleWindows.forEach { it.recycle() } }
     }
 
     @androidx.annotation.RequiresApi(30)
@@ -935,7 +679,7 @@ class PaymentAccessibilityService : AccessibilityService() {
                             }.getOrNull()
                         } finally { buffer.close() }
                         if (bitmap == null) diagnostics["visualBitmapUnavailable"] = 1
-                        // A window change can cancel between callback delivery and resuming OCR.
+                        // A window change can cancel between callback delivery and resuming image processing.
                         continuation.resume(bitmap, onCancellation = { _, undelivered, _ -> undelivered?.recycle() })
                     }
                     override fun onFailure(errorCode: Int) {
@@ -952,7 +696,7 @@ class PaymentAccessibilityService : AccessibilityService() {
         return whole
     }
 
-    // ADB diagnostics expose states/counters only, never screen/OCR text, images, amounts or names.
+    // ADB diagnostics expose states/counters only, never screen text, images, amounts or names.
     override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>?) {
         val health = entryPoint.monitor().health.value
         writer.println("screenCaptureStatus=${health.screenCaptureStatus}")

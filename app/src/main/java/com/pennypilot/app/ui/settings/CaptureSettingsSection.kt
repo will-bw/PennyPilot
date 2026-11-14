@@ -130,7 +130,7 @@ internal fun CaptureSettingsSection(viewModel: SettingsViewModel, onOpenBackgrou
                 color = if (screenEnabled && (!accessibilityGranted || !health.isAccessibilityBound)) MaterialTheme.pendingAmberColor
                     else MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text("读取支持应用的可见文字，在本机判断是否为支付结果；只保存识别出的交易字段，不保存或上传整页，不读取密码或输入内容。截图补充需单独开启，图片云端识别还需另行授权。系统或应用可能限制读取，仍可能需要手动记账。",
+            Text("读取支持应用的可见文字，识别支付结果与单笔账单详情；只保存识别出的交易字段，页面文字只保留交易字段，不读取密码或输入内容。截图由云端模型识别，需单独开启授权。系统或应用可能限制读取，仍可能需要手动记账。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (screenEnabled || accessibilityGranted) {
                 OutlinedButton(onClick = { enableAfterDisclosure = false; showDisclosure = true }, enabled = !saving,
@@ -189,8 +189,8 @@ internal fun CaptureSettingsSection(viewModel: SettingsViewModel, onOpenBackgrou
             onDismissRequest = { showDisclosure = false },
             title = { Text("支付页面捕获使用说明") },
             text = {
-                Text("开启后，PennyPilot 会通过系统无障碍服务，读取微信、支付宝、云闪付、美团、抖音的屏幕可见文字，在本机判断是否为支付结果，按你的设置自动记账或生成待确认账目。\n\n" +
-                    "只保存识别出的交易字段，不保存或上传整页。不读取密码或输入内容，也不会代你点击、付款或操作其他应用。截图补充需单独开启，图片云端识别还需另行授权。\n\n" +
+                Text("开启后，PennyPilot 会通过系统无障碍服务，读取微信、支付宝、云闪付、美团、抖音的屏幕可见文字，识别支付结果与单笔账单详情，按你的设置自动记账或生成待确认账目。\n\n" +
+                    "只保存识别出的交易字段，页面文字只保留交易字段。不读取密码或输入内容，也不会代你点击、付款或操作其他应用。截图由云端模型识别，需单独开启授权。\n\n" +
                     "请在系统设置中自行确认授权。部分页面可能无法读取，不能保证覆盖每笔支付。你可随时在本页暂停，或在系统设置中撤销授权。",
                     modifier = Modifier.verticalScroll(rememberScrollState()))
             },

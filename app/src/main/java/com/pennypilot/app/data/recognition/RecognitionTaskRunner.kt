@@ -24,12 +24,9 @@ class RecognitionTaskRunner(
             store.clear(); report("加密识别缓存不可用，请重新识别本次支付"); return true
         } ?: return true
         if (superseded(task)) return true
-        if (task.attempts >= 3) {
-            onState(task, "model_exhausted")
-            store.remove(id, task.evidenceVersion); report("支付识别重试未完成，请手动补录或导入账单核对"); return true
-        }
         return try {
-            store.incrementAttempts(id, task.evidenceVersion)
+            if (task.state == RecognitionTaskState.QUEUED && task.attempts < MAX_ATTEMPTS)
+                store.incrementAttempts(id, task.evidenceVersion)
             val role = if (task.images.isEmpty()) ModelRole.TEXT else ModelRole.VISION
             suspend fun current() = isAllowed(task) && task.configurationId == client.operationIdentity(role)
             val allowedBeforeContext = current()
@@ -38,6 +35,8 @@ class RecognitionTaskRunner(
                 onState(task, "model_discarded")
                 store.remove(id, task.evidenceVersion); report("识别权限、账本或 AI 配置已改变，旧任务已停止"); return true
             }
+            if (task.state != RecognitionTaskState.QUEUED) return true
+            if (task.attempts >= MAX_ATTEMPTS) return pause(task, RecognitionFailure.NETWORK)
             val semantics = semanticContext(task).bounded()
             val verified = if (task.semanticFingerprint != null || task.receiptImageMode != null) verifiedPayment(task) else null
             val operation = client.forRole(role)
@@ -67,9 +66,14 @@ class RecognitionTaskRunner(
             }
             if (parsed == null) {
                 onState(task, "model_rejected")
-                store.remove(id, task.evidenceVersion); report("支付凭证存在缺失或冲突，未生成账目；请补充凭证"); return true
+                // A positive receipt with contradictory fields can be reviewed. A model's
+                // explicit non-receipt rejection is discarded rather than archived as finance data.
+                if (proposal.valid) return pause(task, RecognitionFailure.INCOMPLETE)
+                store.remove(id, task.evidenceVersion); report("未识别到已完成的支付凭证，未生成账目"); return true
             }
-            val saved = commit(task, proposal, parsed) { store.get(id)?.evidenceVersion == task.evidenceVersion }
+            val saved = commit(task, proposal, parsed) { store.get(id)?.let {
+                it.evidenceVersion == task.evidenceVersion && it.state == RecognitionTaskState.QUEUED
+            } == true }
             if (superseded(task)) return true
             val finished = saved || !isAllowed(task)
             if (superseded(task)) return true
@@ -77,16 +81,37 @@ class RecognitionTaskRunner(
                 store.remove(id, task.evidenceVersion)
                 onState(task, if (saved) "model_completed" else "model_discarded")
             }
-            finished
+            if (!finished && task.attempts + 1 >= MAX_ATTEMPTS) pause(task, RecognitionFailure.SAVE_FAILED) else finished
         } catch (_: TimeoutCancellationException) {
             if (superseded(task)) return true
+            if (task.attempts + 1 >= MAX_ATTEMPTS) return pause(task, RecognitionFailure.TIMEOUT)
             onState(task, "model_failed")
             report("支付识别超时，已保留任务等待重试"); false
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) {
             if (superseded(task)) return true
+            if (task.attempts + 1 >= MAX_ATTEMPTS) return pause(task, RecognitionFailure.NETWORK)
             onState(task, "model_failed"); report("支付识别暂时失败，已保留任务等待重试"); false
         }
+    }
+
+    private suspend fun pause(task: RecognitionTask, failure: RecognitionFailure): Boolean {
+        val allowed = isAllowed(task)
+        if (superseded(task)) return true
+        if (!allowed) {
+            store.remove(task.id, task.evidenceVersion)
+            onState(task, "model_discarded")
+            report("识别权限、账本或 AI 配置已改变，旧任务已停止")
+            return true
+        }
+        val alreadySaved = !task.isUnrecognized || verifiedPayment(task) != null
+        if (superseded(task)) return true
+        if (alreadySaved) store.remove(task.id, task.evidenceVersion)
+        else store.needsAttention(task.id, task.evidenceVersion, failure)
+        onState(task, "model_exhausted")
+        report(if (!alreadySaved) "支付识别未完成，可在未识别凭证中查看、重试或补录"
+            else "账目已保存，部分信息未能补全；可打开账目核对")
+        return true
     }
 
     // A newer snapshot already has its own appended WorkRequest. Retrying this predecessor
@@ -96,4 +121,6 @@ class RecognitionTaskRunner(
         if (replaced) onState(task, "model_superseded")
         return replaced
     }
+
+    private companion object { const val MAX_ATTEMPTS = RecognitionTaskStore.MAX_AUTOMATIC_ATTEMPTS }
 }

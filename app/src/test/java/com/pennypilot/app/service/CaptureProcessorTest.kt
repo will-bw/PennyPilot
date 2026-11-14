@@ -19,6 +19,7 @@ import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.llm.ChatResponseWithTools
 import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
+import com.pennypilot.app.data.llm.ModelRole
 import com.pennypilot.app.data.llm.ToolDefinition
 import com.pennypilot.app.data.parser.NotificationParseResult
 import com.pennypilot.app.data.parser.PaymentScreenNode
@@ -36,7 +37,10 @@ import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -60,7 +64,12 @@ class CaptureProcessorTest {
     private var cloudCalls = 0
     private var cloudResponse: String? = null
     private var sentMessages: List<Message> = emptyList()
+    private var beforeIdentity: (suspend () -> Unit)? = null
     private val cloud = object : LLMClient {
+        override suspend fun operationIdentity(role: ModelRole): String {
+            beforeIdentity?.invoke()
+            return javaClass.name
+        }
         override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String {
             cloudCalls++
             sentMessages = messages
@@ -68,6 +77,60 @@ class CaptureProcessorTest {
             error("本地凭证不得调用云端")
         }
         override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("not used")
+    }
+
+    @Test fun `notification keeps original cloud grant while model identity lookup suspends`() =
+        assertTextGrantPinned("notification")
+
+    @Test fun `recognized page keeps original cloud grant while model identity lookup suspends`() =
+        assertTextGrantPinned("screen")
+
+    @Test fun `unrecognized page keeps original cloud grant while model identity lookup suspends`() =
+        assertTextGrantPinned("unrecognized")
+
+    private fun assertTextGrantPinned(source: String) = runBlocking {
+        withVisionCapture { database, processor, store ->
+            preferences.setNotificationCaptureEnabled(true)
+            preferences.setNotificationCloudParsingEnabled(true)
+            preferences.setScreenCloudParsingEnabled(true)
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            beforeIdentity = { entered.complete(Unit); release.await() }
+            try {
+                val now = System.currentTimeMillis()
+                val processing = async {
+                    when (source) {
+                        "notification" -> {
+                            processor.processNotification(CapturedNotification("com.tencent.mm", "grant-notification", now,
+                                "微信支付", "支付成功，实付18元"), LedgerRevision.current)
+                            true
+                        }
+                        "screen" -> processor.processScreen("com.tencent.mm", NotificationParseResult(1800, "测试商户", "EXPENSE"),
+                            "grant-screen", now, LedgerRevision.current)
+                        else -> processor.processUnrecognizedScreen("com.tencent.mm", "支付成功\n实付18元",
+                            "grant-unknown", now, LedgerRevision.current)
+                    }
+                }
+                withTimeout(5_000) { entered.await() }
+                if (source == "notification") {
+                    preferences.setNotificationCloudParsingEnabled(false)
+                    preferences.setNotificationCloudParsingEnabled(true)
+                } else {
+                    preferences.setScreenCloudParsingEnabled(false)
+                    preferences.setScreenCloudParsingEnabled(true)
+                }
+                release.complete(Unit)
+                assertEquals(source != "unrecognized", processing.await())
+                assertTrue("old evidence must not acquire the new grant", store.entries().isEmpty())
+                assertEquals(if (source == "unrecognized") 0 else 1, database.backupDao().transactions().size)
+                assertEquals(0, cloudCalls)
+            } finally {
+                release.complete(Unit)
+                beforeIdentity = null
+                preferences.setNotificationCloudParsingEnabled(false)
+                preferences.setScreenCloudParsingEnabled(false)
+            }
+        }
     }
 
     @Test fun `direct receipt image names the counterparty without uploading local text`() = runBlocking {
@@ -101,11 +164,11 @@ class CaptureProcessorTest {
         }
     }
 
-    @Test fun `image only needs a recent reliable receipt and remains pending with order deduplication`() = runBlocking {
+    @Test fun `image only rejects conflicting facts and retains order deduplication`() = runBlocking {
         withVisionCapture { database, processor, store ->
             val now = System.currentTimeMillis()
             val revision = LedgerRevision.current
-            cloudResponse = visualReply(1700, party = "收款方：测试同学")
+            cloudResponse = visualReply(1800, party = "收款方：测试同学")
             assertTrue(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "image-missing-order", now, revision, allowImageOnly = true))
             assertTrue(processor.processRecognitionTask(store.pending().single().id))
             assertTrue(database.backupDao().transactions().isEmpty())
@@ -125,6 +188,21 @@ class CaptureProcessorTest {
             val local = NotificationParseResult(1700, "测试同学", "EXPENSE", orderId = orderId, businessKind = "expense")
             assertTrue(processor.processScreen("com.tencent.mm", local, "later-verified-page", now, revision))
             assertEquals(pending.id, database.backupDao().transactions().single().id)
+        }
+    }
+
+    @Test fun `completed image without exposed order or time is saved for review`() = runBlocking {
+        withVisionCapture { database, processor, store ->
+            val now = System.currentTimeMillis()
+            cloudResponse = visualReply(1700, party = "收款方：测试同学")
+            assertTrue(processor.processReceiptImage("com.tencent.mm", TEST_IMAGE, "image-no-id", now,
+                LedgerRevision.current, allowImageOnly = true))
+            assertTrue(processor.processRecognitionTask(store.pending().single().id))
+            val pending = database.backupDao().transactions().single()
+            assertEquals(TxStatus.PENDING, pending.status)
+            assertEquals(1700L, pending.amount)
+            assertEquals("测试同学", pending.merchant)
+            assertNull(database.transactionDao().captureEvidenceByKey("image-no-id")?.orderId)
         }
     }
 
@@ -629,7 +707,8 @@ class CaptureProcessorTest {
             val parsed = PaymentProposalValidator.validate("com.tencent.mm", text, proposal)!!
             preferences.setScreenCloudParsingEnabled(true)
             val task = RecognitionTask("model-test", "model-enrichment", "com.tencent.mm", text, now,
-                LedgerRevision.current, cloud.operationIdentity(), "ACCESSIBILITY")
+                LedgerRevision.current, cloud.operationIdentity(), "ACCESSIBILITY",
+                authorizationId = preferences.captureAuthorizationId("com.tencent.mm", page = true, image = false))
             assertTrue(processor.completeRecognition(task, proposal, parsed) { true })
             val saved = database.transactionDao().getByCaptureEvent("model-enrichment")!!
             assertEquals(3, database.backupDao().transactions().size)

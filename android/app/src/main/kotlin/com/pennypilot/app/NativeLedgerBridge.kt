@@ -27,6 +27,12 @@ import com.pennypilot.app.data.db.entity.CategoryEntity
 import com.pennypilot.app.data.db.entity.MonthlyReportEntity
 import com.pennypilot.app.data.db.entity.ParseRuleEntity
 import com.pennypilot.app.data.db.entity.TransactionEntity
+import com.pennypilot.app.data.recognition.CaptureRecovery
+import com.pennypilot.app.data.recognition.RecognitionTask
+import com.pennypilot.app.data.recognition.RecognitionTaskStore
+import com.pennypilot.app.data.recognition.RecognitionTaskState
+import com.pennypilot.app.data.recognition.RecognitionWorker
+import com.pennypilot.app.data.parser.PaymentAppRegistry
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.AgentMessageCodec
 import com.pennypilot.app.data.llm.UserFacingLlmException
@@ -309,6 +315,26 @@ class NativeLedgerBridge @Inject constructor(
         "armCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.arm()
         "readCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.read()
         "clearCaptureDiagnostic" -> com.pennypilot.app.service.CaptureDiagnosticStore.clear()
+        "capturePendingList" -> pendingCaptureList()
+        "capturePendingDetail" -> pendingCaptureTask(args).let { task ->
+            mapOf("text" to task.text, "images" to task.images)
+        }
+        "capturePendingRetry" -> {
+            val task = pendingCaptureTask(args)
+            val retried = withContext(Dispatchers.IO) {
+                RecognitionTaskStore(context).retry(task.id, task.evidenceVersion)
+            }
+            requireNotNull(retried) { "凭证正在识别或已更新，请刷新列表。" }
+            RecognitionWorker.schedule(context, retried.id, enqueueSuccessor = true)
+            emit("changed"); null
+        }
+        "capturePendingDelete" -> {
+            val task = pendingCaptureTask(args)
+            CaptureRecovery(database, RecognitionTaskStore(context)).discard(task, checkRevision(args))
+            removePendingCapture(task)
+            emit("changed"); null
+        }
+        "capturePendingComplete" -> completePendingCapture(args)
         "recognitionChat" -> recognitionChat(args)
         "agentModelTurn" -> agentModelTurn(args)
         "cancelAgentModelTurn" -> { agentModelJobs.remove(args.string("requestId"))?.cancel(); null }
@@ -367,6 +393,7 @@ class NativeLedgerBridge @Inject constructor(
                 "onboardingDone" to preferences.onboardingDone.first(),
                 "notificationCaptureEnabled" to preferences.notificationCaptureEnabled.first(),
                 "screenCaptureEnabled" to preferences.screenCaptureEnabled.first(),
+                "captureAppPackages" to preferences.captureAppPackages.first().sorted(),
                 "notificationCloudParsingEnabled" to preferences.notificationCloudParsingEnabled.first(),
                 "screenCloudParsingEnabled" to preferences.screenCloudParsingEnabled.first(),
                 "screenVisualCaptureEnabled" to preferences.screenVisualCaptureEnabled.first(),
@@ -419,8 +446,10 @@ class NativeLedgerBridge @Inject constructor(
         val health = monitor.health.value
         return mapOf(
             "platform" to "android", "notificationListenerGranted" to listenerGranted,
-            "automaticCaptureSupported" to true, "chatGptSupported" to true, "localReceiptImageSupported" to true,
-            "screenCloudVisionSupported" to (Build.VERSION.SDK_INT >= 34),
+            "automaticCaptureSupported" to true, "chatGptSupported" to true, "localReceiptImageSupported" to false,
+            "screenCloudVisionSupported" to (Build.VERSION.SDK_INT >= 30),
+            "captureApps" to PaymentAppRegistry.apps.map { mapOf("packageName" to it.packageName,
+                "name" to it.name, "limitedByPlatform" to it.limitedByPlatform, "family" to it.family.name) },
             "accessibilityGranted" to accessibilityGranted,
             "remindersEnabled" to runCatching { NotificationHelper.captureNotificationsEnabled(context) }.getOrDefault(false),
             "captureHeadsUpEnabled" to runCatching { NotificationHelper.captureHeadsUpEnabled(context) }.getOrDefault(false),
@@ -445,6 +474,68 @@ class NativeLedgerBridge @Inject constructor(
             "todayCaptureCount" to health.todayCaptureCount, "duplicateCount" to health.duplicateCount,
             "lastCaptureAt" to health.lastNotificationTime, "lastError" to health.lastError
         )
+    }
+
+    private suspend fun pendingCaptureList(): Map<String, Any?> {
+        val store = RecognitionTaskStore(context)
+        val tasks = withContext(Dispatchers.IO) { store.entries() }
+        val visible = mutableListOf<Map<String, Any?>>()
+        for (task in tasks) {
+            if (!task.isUnrecognized) continue
+            if (database.transactionDao().tombstone(task.eventKey) != null || !captureProcessor.recognitionTaskAllowed(task)) {
+                removePendingCapture(task)
+                continue
+            }
+            // An image may have been queued before a later node read saved this same event.
+            // Keep its optional enhancement running, but do not show a missing transaction.
+            if (database.transactionDao().captureEvidenceByKey(task.eventKey) != null) {
+                if (task.state == RecognitionTaskState.NEEDS_ATTENTION) removePendingCapture(task)
+                continue
+            }
+            visible += mapOf("id" to task.id, "version" to task.evidenceVersion,
+                "packageName" to task.packageName, "appName" to PaymentAppRegistry.displayName(task.packageName),
+                "observedAt" to task.observedAt,
+                "expiresAt" to task.createdAt + RecognitionTaskStore.RETENTION_MS,
+                "state" to task.state.name, "reason" to task.failure?.name,
+                "hasImage" to task.images.isNotEmpty(), "attempts" to task.attempts)
+        }
+        return mapOf("items" to visible.sortedByDescending { it["observedAt"] as Long }, "retentionDays" to 7)
+    }
+
+    private suspend fun pendingCaptureTask(args: Map<String, Any?>): RecognitionTask {
+        checkRevision(args)
+        val task = withContext(Dispatchers.IO) { RecognitionTaskStore(context).get(args.string("taskId")) }
+        requireNotNull(task) { "凭证已处理或超过保留期限，请刷新列表。" }
+        require(task.evidenceVersion.toLong() == args.long("version") && task.isUnrecognized) { "凭证已更新，请刷新列表。" }
+        if (database.transactionDao().tombstone(task.eventKey) != null) {
+            removePendingCapture(task)
+            throw IllegalArgumentException("这张凭证已处理，请回到流水核对。")
+        }
+        if (!captureProcessor.recognitionTaskAllowed(task)) {
+            removePendingCapture(task)
+            throw IllegalArgumentException("识别权限、账本或 AI 配置已改变，旧凭证已清除；请重新采集。")
+        }
+        require(database.transactionDao().captureEvidenceByKey(task.eventKey) == null) { "这张凭证已经入账，请回到流水核对。" }
+        return task
+    }
+
+    private suspend fun removePendingCapture(task: RecognitionTask) {
+        withContext(Dispatchers.IO) { RecognitionTaskStore(context).remove(task.id, task.evidenceVersion) }
+        NotificationHelper.cancelRecognitionPending(context, task.eventKey)
+    }
+
+    private suspend fun completePendingCapture(args: Map<String, Any?>): Map<String, Long> {
+        val task = pendingCaptureTask(args)
+        require(task.state == RecognitionTaskState.NEEDS_ATTENTION) { "凭证正在识别，请等待结果后再补录。" }
+        val transaction = args["transaction"] as? Map<*, *> ?: throw IllegalArgumentException("请填写账目。")
+        val fields = transaction.entries.associate { it.key.toString() to it.value }
+        require((fields.optionalLong("id") ?: 0) == 0L) { "补录不能覆盖已有账目。" }
+        val id = CaptureRecovery(database, RecognitionTaskStore(context)).complete(task, checkRevision(args)) { operationKey ->
+            saveTransaction(fields + mapOf("source" to "MANUAL", "operationKey" to operationKey))
+        }
+        removePendingCapture(task)
+        emit("changed")
+        return mapOf("id" to id)
     }
 
     private fun checkRevision(args: Map<String, Any?>): Long {
@@ -703,6 +794,11 @@ class NativeLedgerBridge @Inject constructor(
         // Validate everything before any writes. Omitted keys preserve existing secrets.
         listOf("onboardingDone", "notificationCaptureEnabled", "screenCaptureEnabled", "notificationCloudParsingEnabled", "screenCloudParsingEnabled", "screenVisualCaptureEnabled", "screenCloudVisionEnabled", "captureAutoRecordEnabled", "activeInputAutoSaveEnabled", "cloudImageParsingEnabled", "chatGptThinkingEnabled", "deepSeekThinkingEnabled", "qwenThinkingEnabled")
             .filter(args::containsKey).forEach { args.boolean(it) }
+        val captureApps = if (args.containsKey("captureAppPackages")) {
+            val values = args["captureAppPackages"] as? List<*>
+            require(values != null && values.all { it is String && it in PaymentAppRegistry.packages }) { "请选择支持的采集应用。" }
+            values.map { it as String }.toSet()
+        } else null
         mapOf(
             "chatGptReasoningEffort" to setOf("minimal", "low", "medium", "high", "xhigh", "max"),
             "deepSeekReasoningEffort" to setOf("low", "high", "max"),
@@ -766,6 +862,7 @@ class NativeLedgerBridge @Inject constructor(
             if (enabled) scope.launch { notificationConnection.restoreIfNeeded() }
         }
         if (args.containsKey("screenCaptureEnabled")) preferences.setScreenCaptureEnabled(args.boolean("screenCaptureEnabled"))
+        captureApps?.let { preferences.setCaptureAppPackages(it) }
         if (args.containsKey("notificationCloudParsingEnabled")) preferences.setNotificationCloudParsingEnabled(args.boolean("notificationCloudParsingEnabled"))
         if (args.containsKey("screenCloudParsingEnabled")) preferences.setScreenCloudParsingEnabled(args.boolean("screenCloudParsingEnabled"))
         if (args.containsKey("screenVisualCaptureEnabled")) preferences.setScreenVisualCaptureEnabled(args.boolean("screenVisualCaptureEnabled"))

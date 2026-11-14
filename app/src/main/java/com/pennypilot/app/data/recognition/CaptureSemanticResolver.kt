@@ -36,11 +36,14 @@ data class CaptureSemanticReceipt(
     val scene: String? = null
 ) {
     fun bounded(): CaptureSemanticReceipt {
-        val fields = setOf("merchantName", "payeeName", "productDescription", "remark", "paymentChannel", "fundingAccount")
+        val fields = PaymentReceiptDetails.TEXT_FIELDS + PaymentReceiptDetails.MONEY_FIELDS
         return copy(
             details = details.filterKeys(fields::contains).mapNotNull { (key, value) ->
                 val limit = if (key in setOf("productDescription", "remark")) 300 else 120
-                semanticText(value).trim().take(limit).takeIf(String::isNotBlank)?.let { key to it }
+                val bounded = if (key in PaymentReceiptDetails.MONEY_FIELDS)
+                    value.toLongOrNull()?.takeIf { it >= 0 }?.toString()
+                else semanticText(value).trim().take(limit).takeIf(String::isNotBlank)
+                bounded?.let { key to it }
             }.toMap(),
             context = PaymentReceiptDetails.normalizeContext(context.take(16).map { field ->
                 // Include the label so a separately captured order identifier is redacted too.
@@ -204,7 +207,9 @@ object CaptureSemanticResolver {
         }
         val historyAccount = history.mapNotNull { it.accountTag?.takeIf(String::isNotBlank) }
             .distinct().singleOrNull()?.takeIf { history.size >= 2 }
-        val receiptAccount = parsed.details.fundingAccount?.takeIf(String::isNotBlank)
+        val receiptAccount = (if (parsed.direction == "EXPENSE") parsed.details.transferFromAccount
+            else parsed.details.transferToAccount)?.takeIf(String::isNotBlank)
+            ?: parsed.details.fundingAccount?.takeIf(String::isNotBlank)
         val account = receiptAccount ?: parsed.paymentMethod?.takeIf(String::isNotBlank)
             ?: preference?.accountTag?.takeIf(String::isNotBlank)?.take(100)
             ?: applicableProposal?.accountTag?.takeIf(String::isNotBlank)?.take(100)

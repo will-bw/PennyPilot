@@ -4,9 +4,13 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.core.Preferences
+import com.pennypilot.app.data.parser.PaymentAppRegistry
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -33,6 +37,20 @@ class AppPreferences @Inject constructor(
     private val notificationCaptureKey = booleanPreferencesKey("notification_capture_enabled")
     private val notificationRecoveryAfterKey = longPreferencesKey("notification_capture_recover_after")
     private val screenCaptureKey = booleanPreferencesKey("screen_capture_enabled")
+    private val captureAppsKey = stringSetPreferencesKey("capture_app_packages")
+    val captureAppPackages: Flow<Set<String>> = context.dataStore.data.map {
+        (it[captureAppsKey] ?: PaymentAppRegistry.packages).intersect(PaymentAppRegistry.packages)
+    }
+    suspend fun setCaptureAppPackages(packages: Set<String>) {
+        require(PaymentAppRegistry.packages.containsAll(packages)) { "包含未适配的采集应用" }
+        context.dataStore.edit { values ->
+            ((values[captureAppsKey] ?: PaymentAppRegistry.packages) - packages).forEach { packageName ->
+                val key = appAuthorizationKey(packageName)
+                values[key] = (values[key] ?: 0L) + 1
+            }
+            values[captureAppsKey] = packages
+        }
+    }
 
     private val screenCloudParsingKey = booleanPreferencesKey("screen_cloud_parsing_enabled")
     private val captureAutoRecordKey = booleanPreferencesKey("capture_auto_record_enabled")
@@ -42,13 +60,13 @@ class AppPreferences @Inject constructor(
     val screenVisualCaptureEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenVisualCaptureKey] ?: false }
     suspend fun setScreenVisualCaptureEnabled(enabled: Boolean) { context.dataStore.edit { it[screenVisualCaptureKey] = enabled } }
     val screenCloudVisionEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenCloudVisionKey] ?: false }
-    suspend fun setScreenCloudVisionEnabled(enabled: Boolean) { context.dataStore.edit { it[screenCloudVisionKey] = enabled } }
+    suspend fun setScreenCloudVisionEnabled(enabled: Boolean) = setCaptureConsent(screenCloudVisionKey, enabled)
     private val cloudImageParsingKey = booleanPreferencesKey("cloud_image_parsing_enabled")
     val screenCloudParsingEnabled: Flow<Boolean> = context.dataStore.data.map { it[screenCloudParsingKey] ?: false }
     val captureAutoRecordEnabled: Flow<Boolean> = context.dataStore.data.map { it[captureAutoRecordKey] ?: true }
     val activeInputAutoSaveEnabled: Flow<Boolean> = context.dataStore.data.map { it[activeInputAutoSaveKey] ?: true }
     val cloudImageParsingEnabled: Flow<Boolean> = context.dataStore.data.map { it[cloudImageParsingKey] ?: false }
-    suspend fun setScreenCloudParsingEnabled(enabled: Boolean) { context.dataStore.edit { it[screenCloudParsingKey] = enabled } }
+    suspend fun setScreenCloudParsingEnabled(enabled: Boolean) = setCaptureConsent(screenCloudParsingKey, enabled)
     suspend fun setCaptureAutoRecordEnabled(enabled: Boolean) { context.dataStore.edit { it[captureAutoRecordKey] = enabled } }
     suspend fun setActiveInputAutoSaveEnabled(enabled: Boolean) { context.dataStore.edit { it[activeInputAutoSaveKey] = enabled } }
     suspend fun setCloudImageParsingEnabled(enabled: Boolean) { context.dataStore.edit { it[cloudImageParsingKey] = enabled } }
@@ -68,12 +86,36 @@ class AppPreferences @Inject constructor(
             if (enabled && it[notificationCaptureKey] == false) {
                 it[notificationRecoveryAfterKey] = System.currentTimeMillis()
             }
+            if (!enabled && (it[notificationCaptureKey] ?: true)) {
+                val key = authorizationKey(notificationCaptureKey)
+                it[key] = (it[key] ?: 0L) + 1
+            }
             it[notificationCaptureKey] = enabled
         }
     }
 
-    suspend fun setScreenCaptureEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[screenCaptureKey] = enabled }
+    suspend fun setScreenCaptureEnabled(enabled: Boolean) = setCaptureConsent(screenCaptureKey, enabled)
+
+    /** Re-enabling a grant cannot revive material captured before it was withdrawn. */
+    suspend fun captureAuthorizationId(packageName: String, page: Boolean, image: Boolean): String {
+        val values = context.dataStore.data.first()
+        val capture = if (page) screenCaptureKey else notificationCaptureKey
+        val cloud = if (!page) notificationCloudParsingKey else if (image) screenCloudVisionKey else screenCloudParsingKey
+        return listOf(values[appAuthorizationKey(packageName)] ?: 0L,
+            values[authorizationKey(capture)] ?: 0L, values[authorizationKey(cloud)] ?: 0L).joinToString(":")
+    }
+
+    private fun authorizationKey(key: Preferences.Key<Boolean>) = longPreferencesKey("${key.name}_generation")
+    private fun appAuthorizationKey(packageName: String) = longPreferencesKey("capture_app_generation_$packageName")
+
+    private suspend fun setCaptureConsent(key: Preferences.Key<Boolean>, enabled: Boolean) {
+        context.dataStore.edit { values ->
+            if (!enabled && values[key] == true) {
+                val generation = authorizationKey(key)
+                values[generation] = (values[generation] ?: 0L) + 1
+            }
+            values[key] = enabled
+        }
     }
 
     val notificationPermissionRequested: Flow<Boolean> = context.dataStore.data
@@ -92,9 +134,7 @@ class AppPreferences @Inject constructor(
     val notificationCloudParsingEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[notificationCloudParsingKey] ?: false }
 
-    suspend fun setNotificationCloudParsingEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[notificationCloudParsingKey] = enabled }
-    }
+    suspend fun setNotificationCloudParsingEnabled(enabled: Boolean) = setCaptureConsent(notificationCloudParsingKey, enabled)
 
     suspend fun setLastBackupAt(timestamp: Long) {
         context.dataStore.edit { it[lastBackupAtKey] = timestamp }
