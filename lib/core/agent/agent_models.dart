@@ -117,6 +117,7 @@ class AgentSession {
     this.summary = '',
     this.contextStart = 0,
     this.status = 'idle',
+    this.activeRunId,
     this.modelIdentity = '',
     this.estimatedTokens = 0,
     this.inputTokens = 0,
@@ -141,6 +142,7 @@ class AgentSession {
   final int revision, createdAt;
   int updatedAt, contextStart, estimatedTokens, inputTokens, outputTokens;
   String title, summary, status, modelIdentity;
+  String? activeRunId;
   final List<Map<String, dynamic>> messages, actions, trace, plan;
 
   Map<String, dynamic> toMap() => {
@@ -152,6 +154,7 @@ class AgentSession {
     'summary': summary,
     'contextStart': contextStart,
     'status': status,
+    if (activeRunId != null) 'activeRunId': activeRunId,
     'modelIdentity': modelIdentity,
     'estimatedTokens': estimatedTokens,
     'inputTokens': inputTokens,
@@ -171,6 +174,7 @@ class AgentSession {
     summary: map['summary'] as String? ?? '',
     contextStart: map['contextStart'] as int? ?? 0,
     status: map['status'] as String? ?? 'idle',
+    activeRunId: map['activeRunId'] as String?,
     modelIdentity: map['modelIdentity'] as String? ?? '',
     estimatedTokens: map['estimatedTokens'] as int? ?? 0,
     inputTokens: map['inputTokens'] as int? ?? 0,

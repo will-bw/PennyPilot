@@ -1,0 +1,4 @@
+<resources>
+    <string name="agent_foreground_channel">AI 助手任务</string>
+    <string name="agent_foreground_title">AI 助手正在处理</string>
+</resources>

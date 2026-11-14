@@ -119,6 +119,7 @@ class CrossPlatformLedgerRepository
   int _revision = 0;
   int _settingsGeneration = 0;
   int _agentInvocation = 0;
+  bool _askInProgress = false;
   String? _authIdentity;
   bool _closed = false;
   final Set<String> _reports = {};
@@ -133,7 +134,7 @@ class CrossPlatformLedgerRepository
   @override
   Future<Map<String, dynamic>> agentState() async {
     final current = await _store.snapshot();
-    return _agent.state(current.revision);
+    return _agent.state(current.revision, ledger: current);
   }
 
   void _emit(String type, [Map<String, dynamic> data = const {}]) {
@@ -279,6 +280,11 @@ class CrossPlatformLedgerRepository
           }
         }
         return null;
+      case 'agentLivePreview':
+        return _agent.livePreview;
+      case 'agentFlushPreview':
+        await _agent.flushPreview();
+        return null;
       case 'agentAppendInput':
         final state = await _current(arguments);
         final generation = _settingsGeneration;
@@ -321,6 +327,7 @@ class CrossPlatformLedgerRepository
           'agentSelectSession' => _agent.select(
             state.revision,
             arguments['id'] as String,
+            ledger: state,
           ),
           'agentDeleteSession' => _agent.deleteSession(
             state.revision,
@@ -334,7 +341,7 @@ class CrossPlatformLedgerRepository
             await _agent.configure(agentMap(arguments['config']));
             return _agent.state(state.revision);
           }(),
-          _ => _agent.state(state.revision),
+          _ => _agent.state(state.revision, ledger: state),
         };
       case 'agentResolveAction':
         final invocation = _agentInvocation;
@@ -361,120 +368,140 @@ class CrossPlatformLedgerRepository
           ...await _agent.state(revision),
         };
       case 'ask':
+        if (_askInProgress || _agent.running) {
+          throw const LedgerException('请先停止或等待当前任务完成。');
+        }
+        _askInProgress = true;
         final invocation = ++_agentInvocation;
-        final current = await _current(arguments);
-        final generation = _settingsGeneration;
-        Future<void> guard() async {
-          if (invocation != _agentInvocation) {
-            throw const LedgerException('已停止本次任务。', code: 'AGENT_CANCELLED');
+        final foregroundId = _android ? agentId() : null;
+        try {
+          if (foregroundId != null) {
+            await _setAgentForeground(foregroundId, enabled: true);
           }
-          await _guardAiOperation(current, generation);
-        }
-        var question = arguments['question'] as String? ?? '';
-        final retry = arguments['retry'] == true;
-        if (retry) {
-          question =
-              '继续完成上一轮任务。原始问题：$question。已执行的账本变更保留，先重新查询当前数据，不得重复新增；补完未完成的分析。';
-        } else {
-          final cancelled = await _agent.cancelClarification(
-            revision: current.revision,
-            question: question,
-            source: arguments['source'] as String? ?? 'AI_TEXT',
-            guard: guard,
+          final current = await _current(arguments);
+          final generation = _settingsGeneration;
+          Future<void> guard() async {
+            if (invocation != _agentInvocation) {
+              throw const LedgerException('已停止本次任务。', code: 'AGENT_CANCELLED');
+            }
+            await _guardAiOperation(current, generation);
+          }
+
+          var question = arguments['question'] as String? ?? '';
+          final retry = arguments['retry'] == true;
+          if (retry) {
+            question =
+                '继续完成上一轮任务。原始问题：$question。已执行的账本变更保留，先重新查询当前数据，不得重复新增；补完未完成的分析。';
+          } else {
+            final cancelled = await _agent.cancelClarification(
+              revision: current.revision,
+              question: question,
+              source: arguments['source'] as String? ?? 'AI_TEXT',
+              guard: guard,
+            );
+            if (cancelled != null) return cancelled;
+          }
+          await guard();
+          final catalogModel =
+              _modelCatalogAccount == current.auth['activeAccountId']
+              ? _modelCatalog
+                    .where((m) => m.slug == current.settings['chatGptModel'])
+                    .firstOrNull
+              : null;
+          final reasoning = resolveReasoningOptions(
+            current.settings,
+            catalogModel: catalogModel,
           );
-          if (cancelled != null) return cancelled;
-        }
-        await guard();
-        final catalogModel =
-            _modelCatalogAccount == current.auth['activeAccountId']
-            ? _modelCatalog
-                  .where((m) => m.slug == current.settings['chatGptModel'])
-                  .firstOrNull
-            : null;
-        final reasoning = resolveReasoningOptions(
-          current.settings,
-          catalogModel: catalogModel,
-        );
-        final model = await _ai.openAgentModel(
-          current,
-          guard: guard,
-          catalogModel: catalogModel,
-          nativeReasoningTurn:
-              _android && current.settings['activeProvider'] == 'chatgpt'
-              ? (messages, tools, onTextDelta, onReasoningDelta) async {
-                  final requestId = agentId();
-                  _nativeTurns[requestId] = onTextDelta;
-                  _nativeReasoningTurns[requestId] = onReasoningDelta;
-                  try {
-                    final raw = agentMap(
-                      await _store.invoke('agentModelTurn', {
+          Future<AgentModel> openModel() => _ai.openAgentModel(
+            current,
+            guard: guard,
+            catalogModel: catalogModel,
+            nativeReasoningTurn:
+                _android && current.settings['activeProvider'] == 'chatgpt'
+                ? (messages, tools, onTextDelta, onReasoningDelta) async {
+                    final requestId = agentId();
+                    _nativeTurns[requestId] = onTextDelta;
+                    _nativeReasoningTurns[requestId] = onReasoningDelta;
+                    try {
+                      final raw = agentMap(
+                        await _store.invoke('agentModelTurn', {
+                          'revision': current.revision,
+                          'requestId': requestId,
+                          'messagesJson': jsonEncode(messages),
+                          'toolsJson': jsonEncode(tools),
+                          'expectedAccountId': current.auth['activeAccountId'],
+                          'expectedModel': current.settings['chatGptModel'],
+                          if (reasoning.responseEffort != null)
+                            'reasoningEffort': reasoning.responseEffort,
+                          'requestReasoningSummary': reasoning.requestSummary,
+                        }),
+                      );
+                      return AgentReply(
+                        message: agentMap(
+                          jsonDecode(raw['messageJson'] as String),
+                        ),
+                      );
+                    } finally {
+                      _nativeTurns.remove(requestId);
+                      _nativeReasoningTurns.remove(requestId);
+                    }
+                  }
+                : null,
+          );
+          final result = await _agent.run(
+            question: question,
+            ledger: current,
+            openModel: openModel,
+            guard: guard,
+            source: arguments['source'] as String? ?? 'AI_TEXT',
+            internalQuestion: retry,
+            autoRecord:
+                retry || current.settings['activeInputAutoSaveEnabled'] == false
+                ? null
+                : (transaction) async {
+                    await guard();
+                    final latest = await snapshot();
+                    if (latest.settings['activeInputAutoSaveEnabled'] ==
+                        false) {
+                      return null;
+                    }
+                    await guard();
+                    final saved = stringMap(
+                      await _store.invoke('saveTransaction', {
+                        ...transaction,
                         'revision': current.revision,
-                        'requestId': requestId,
-                        'messagesJson': jsonEncode(messages),
-                        'toolsJson': jsonEncode(tools),
-                        'expectedAccountId': current.auth['activeAccountId'],
-                        'expectedModel': current.settings['chatGptModel'],
-                        if (reasoning.responseEffort != null)
-                          'reasoningEffort': reasoning.responseEffort,
-                        'requestReasoningSummary': reasoning.requestSummary,
                       }),
                     );
-                    return AgentReply(
-                      message: agentMap(
-                        jsonDecode(raw['messageJson'] as String),
-                      ),
+                    return (
+                      id: integer(saved['id'], 'id'),
+                      ledger: await snapshot(),
                     );
-                  } finally {
-                    _nativeTurns.remove(requestId);
-                    _nativeReasoningTurns.remove(requestId);
-                  }
-                }
-              : null,
-        );
-        final result = await _agent.run(
-          question: question,
-          ledger: current,
-          model: model,
-          guard: guard,
-          source: arguments['source'] as String? ?? 'AI_TEXT',
-          internalQuestion: retry,
-          autoRecord:
-              retry || current.settings['activeInputAutoSaveEnabled'] == false
-              ? null
-              : (transaction) async {
-                  await guard();
-                  final latest = await snapshot();
-                  if (latest.settings['activeInputAutoSaveEnabled'] == false) {
-                    return null;
-                  }
-                  await guard();
-                  final saved = stringMap(
-                    await _store.invoke('saveTransaction', {
-                      ...transaction,
-                      'revision': current.revision,
-                    }),
-                  );
-                  return (
-                    id: integer(saved['id'], 'id'),
-                    ledger: await snapshot(),
-                  );
-                },
-        );
-        // Deadlines can end the runtime while its native HTTP request is still
-        // pending. Stop that transport before accepting another run.
-        final pendingTurns = _nativeTurns.keys.toList();
-        _nativeTurns.clear();
-        _nativeReasoningTurns.clear();
-        if (_android) {
-          for (final requestId in pendingTurns) {
-            await _store.invoke('cancelAgentModelTurn', {
-              'requestId': requestId,
-            });
+                  },
+          );
+          // Deadlines can end the runtime while its native HTTP request is still
+          // pending. Stop that transport before accepting another run.
+          final pendingTurns = _nativeTurns.keys.toList();
+          _nativeTurns.clear();
+          _nativeReasoningTurns.clear();
+          if (_android) {
+            for (final requestId in pendingTurns) {
+              await _store.invoke('cancelAgentModelTurn', {
+                'requestId': requestId,
+              });
+            }
+          }
+          // A user stop is a normal persisted outcome, not a stale-ledger result.
+          await _guardAiOperation(current, generation);
+          return result;
+        } finally {
+          try {
+            if (foregroundId != null) {
+              await _setAgentForeground(foregroundId, enabled: false);
+            }
+          } finally {
+            _askInProgress = false;
           }
         }
-        // A user stop is a normal persisted outcome, not a stale-ledger result.
-        await _guardAiOperation(current, generation);
-        return result;
       case 'parseText':
       case 'generateReport':
         final state = await _current(arguments);
@@ -660,6 +687,17 @@ class CrossPlatformLedgerRepository
         );
       default:
         return _store.invoke(method, arguments);
+    }
+  }
+
+  Future<void> _setAgentForeground(String id, {required bool enabled}) async {
+    try {
+      await _store.invoke(
+        enabled ? 'startAgentForeground' : 'stopAgentForeground',
+        {'runId': id},
+      );
+    } on LedgerException catch (error) {
+      debugPrint('AI 助手后台服务不可用（${error.code}）');
     }
   }
 

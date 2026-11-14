@@ -112,6 +112,7 @@ class NativeLedgerBridge @Inject constructor(
     private var launchJob: Job? = null
     private val reportJobs = mutableMapOf<String, Job>()
     private val agentModelJobs = mutableMapOf<String, Job>()
+    private var foregroundAgentRun: String? = null
 
     @OptIn(FlowPreview::class)
     fun attach(activity: MainActivity, messenger: BinaryMessenger) {
@@ -148,6 +149,8 @@ class NativeLedgerBridge @Inject constructor(
         speech?.destroy()
         speech = null
         scope.cancel()
+        foregroundAgentRun?.let { AgentForegroundService.stop(it) }
+        foregroundAgentRun = null
         methods?.setMethodCallHandler(null)
         events?.setStreamHandler(null)
         methods = null
@@ -189,7 +192,7 @@ class NativeLedgerBridge @Inject constructor(
             } catch (e: CancellationException) { throw e
             } catch (_: Exception) { null }
             if (revision != LedgerRevision.current) return@launch
-            if (validId != null || route == "coloros_guide") {
+            if (validId != null || route == "coloros_guide" || route == "assistant") {
                 launch = mapOf("transactionId" to validId, "route" to route)
                 if (sink != null) {
                     emit("launch", launch.orEmpty())
@@ -336,6 +339,20 @@ class NativeLedgerBridge @Inject constructor(
         }
         "capturePendingComplete" -> completePendingCapture(args)
         "recognitionChat" -> recognitionChat(args)
+        "startAgentForeground" -> {
+            val runId = args.string("runId")
+            AgentForegroundService.start(context, runId).also { started ->
+                if (started) foregroundAgentRun = runId
+            }
+        }
+        "stopAgentForeground" -> {
+            val runId = args.string("runId")
+            if (foregroundAgentRun == runId) {
+                AgentForegroundService.stop(runId)
+                foregroundAgentRun = null
+            }
+            null
+        }
         "agentModelTurn" -> agentModelTurn(args)
         "cancelAgentModelTurn" -> { agentModelJobs.remove(args.string("requestId"))?.cancel(); null }
         "parseText" -> parse(args)

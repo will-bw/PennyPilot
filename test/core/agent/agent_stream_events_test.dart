@@ -103,6 +103,139 @@ void main() {
     },
   );
 
+  test('restart restores the saved prefix on the interrupted run', () async {
+    final started = Completer<void>(), finish = Completer<AgentReply>();
+    final task = runtime.run(
+      question: '你好',
+      ledger: ledger,
+      guard: () async {},
+      model: AgentModel(
+        identity: 'test:restart',
+        complete: (_, _) => finish.future,
+        reasoningStream: (_, _, delta, reasoning) {
+          reasoning('先核对上下文');
+          delta('已收到');
+          started.complete();
+          return finish.future;
+        },
+      ),
+    );
+    await started.future;
+    final live = runtime.livePreview!;
+    expect(live['text'], '已收到');
+    expect(live['sequence'], events.last['previewSequence']);
+    await runtime.flushPreview();
+    final previewKey = 'preview:0:${live['sessionId']}';
+    expect(await store.read(previewKey), live);
+    final checkpoint = (await store.read('session:0:${live['sessionId']}'))!;
+    expect(checkpoint['activeRunId'], live['runId']);
+    expect(jsonEncode(checkpoint), isNot(contains('已收到')));
+
+    // Copy only committed state to simulate the next process.
+    final disk = MemoryAgentStore();
+    await disk.write('active:0', {'id': live['sessionId']});
+    await disk.write('session:0:${live['sessionId']}', checkpoint);
+    await disk.write(previewKey, live);
+    final restored = await LedgerAgentRuntime(store: disk).active(0);
+    expect(restored.status, 'interrupted');
+    expect(restored.messages.last['runId'], live['runId']);
+    final parts = restored.messages.last['parts'] as List;
+    expect(parts.first, {'type': 'interrupted_text', 'text': '已收到'});
+    expect(parts.last['type'], 'reasoning');
+    expect(parts.last['text'], '先核对上下文');
+    expect(await disk.read(previewKey), isNull);
+    expect(
+      jsonEncode(AgentContext.project(restored, 'system', [])),
+      allOf(isNot(contains('已收到')), isNot(contains('先核对上下文'))),
+    );
+
+    finish.complete(_answer('完整回答'));
+    final completed = await task;
+    expect((completed['session'] as Map)['status'], 'completed');
+    expect(runtime.livePreview, isNull);
+    expect(await store.read(previewKey), isNull);
+  });
+
+  test('the user input is committed before model setup starts', () async {
+    var opens = 0;
+    final result = await runtime.run(
+      question: '保存这个问题',
+      ledger: ledger,
+      guard: () async {},
+      openModel: () async {
+        opens++;
+        final active = await store.read('active:0');
+        final row = await store.read('session:0:${active!['id']}');
+        expect(row!['status'], 'running');
+        expect((row['messages'] as List).single['content'], '保存这个问题');
+        throw StateError('offline');
+      },
+    );
+    expect(opens, 1);
+    final session = result['session'] as Map;
+    expect(session['status'], 'failed');
+    expect(session['activeRunId'], isNull);
+    expect((session['messages'] as List).first['content'], '保存这个问题');
+  });
+
+  test(
+    'a completed tool call discards its transient text before the next turn',
+    () async {
+      final firstStarted = Completer<void>(), secondStarted = Completer<void>();
+      final first = Completer<AgentReply>(), second = Completer<AgentReply>();
+      var turns = 0;
+      final task = runtime.run(
+        question: '你好',
+        ledger: ledger,
+        guard: () async {},
+        model: AgentModel(
+          identity: 'test:tool-preview',
+          complete: (_, _) async => _answer('fallback'),
+          stream: (_, _, delta) {
+            if (++turns == 1) {
+              delta('工具前的预览');
+              firstStarted.complete();
+              return first.future;
+            }
+            delta('新的回答');
+            secondStarted.complete();
+            return second.future;
+          },
+        ),
+      );
+      await firstStarted.future;
+      final original = runtime.livePreview!;
+      final previewKey = 'preview:0:${original['sessionId']}';
+      await runtime.flushPreview();
+      first.complete(
+        AgentReply(
+          message: {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [
+              {
+                'id': 'read-budget',
+                'type': 'function',
+                'function': {
+                  'name': 'get_budget',
+                  'arguments': '{"month":"2026-11"}',
+                },
+              },
+            ],
+          },
+        ),
+      );
+      await secondStarted.future;
+      expect(await store.read(previewKey), isNull);
+      expect(runtime.livePreview!['runId'], original['runId']);
+      expect(runtime.livePreview!['messageId'], isNot(original['messageId']));
+      expect(runtime.livePreview!['text'], '新的回答');
+      second.complete(_answer('新的回答'));
+      await task;
+      expect(await store.read(previewKey), isNull);
+    },
+  );
+
   test(
     'cancel persists the partial answer and suppresses late preview callbacks',
     () async {

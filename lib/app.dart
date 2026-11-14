@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'core/ledger_controller.dart';
@@ -25,6 +27,7 @@ class _PennyPilotAppState extends State<PennyPilotApp>
       widget.controller ?? LedgerController();
   final navigatorKey = GlobalKey<NavigatorState>();
   int? lastRevision;
+  bool _inBackground = false;
   @override
   void initState() {
     super.initState();
@@ -49,7 +52,16 @@ class _PennyPilotAppState extends State<PennyPilotApp>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) controller.refresh();
+    if (state == AppLifecycleState.resumed) {
+      _inBackground = false;
+      unawaited(controller.refresh());
+      unawaited(controller.restoreAgentPreview());
+    } else if (!_inBackground &&
+        (state == AppLifecycleState.hidden ||
+            state == AppLifecycleState.paused)) {
+      _inBackground = true;
+      unawaited(controller.flushAgentPreview());
+    }
   }
 
   @override

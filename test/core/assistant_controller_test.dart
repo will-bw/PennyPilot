@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/material.dart' show AppLifecycleState, SizedBox;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pennypilot/app.dart';
 import 'package:pennypilot/core/ledger_controller.dart';
 import 'package:pennypilot/core/ledger_repository.dart'
     show AgentSessionRepository;
@@ -11,15 +13,24 @@ import '../ui/test_ledger_repository.dart';
 
 class _StreamingRepository extends TestLedgerRepository {
   Completer<Object?>? answer;
+  Completer<Object?>? livePreview;
   bool cancelWithError = false;
+  int askCount = 0;
   @override
   Future<Object?> invoke(String method, Map<String, dynamic> arguments) {
+    if (method == 'agentFlushPreview' || method == 'agentLivePreview') {
+      calls.add((method: method, arguments: arguments));
+      return method == 'agentLivePreview'
+          ? livePreview!.future
+          : Future.value(null);
+    }
     if (method == 'cancelAgent' && cancelWithError) {
       calls.add((method: method, arguments: arguments));
       answer!.completeError(const LedgerException('任务已停止', code: 'CANCELLED'));
       return Future.value(null);
     }
     if (method != 'ask') return super.invoke(method, arguments);
+    askCount++;
     calls.add((method: method, arguments: arguments));
     answer = Completer<Object?>();
     return answer!.future;
@@ -93,6 +104,53 @@ void main() {
     expect(history.retryQuestion, '查昨天的支出');
   });
 
+  testWidgets('app background and resume keep the same assistant run', (
+    tester,
+  ) async {
+    await tester.pumpWidget(PennyPilotApp(controller: controller));
+    await tester.pumpAndSettle();
+    late Future<ChatMessage> task;
+    await tester.runAsync(() async {
+      task = controller.ask('你好');
+      await Future<void>.delayed(Duration.zero);
+    });
+    await tester.pump();
+    expect(repository.askCount, 1);
+    repository.emit('run_started', {'userMessageId': 'u'});
+    repository.emit('text_start', {'messageId': 'a', 'previewSequence': 1});
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    repository.livePreview = Completer<Object?>()
+      ..complete({
+        'revision': 0,
+        'sessionId': 's',
+        'runId': 'r',
+        'messageId': 'a',
+        'text': '后台生成的文字',
+        'sequence': 2,
+      });
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump(const Duration(milliseconds: 80));
+    await tester.pump(const Duration(milliseconds: 80));
+
+    expect(controller.messages.last.text, '后台生成的文字');
+    expect(controller.messages.last.runId, 'r');
+    expect(repository.askCount, 1);
+    expect(repository.calls.map((c) => c.method).where((m) => m != 'ask'), [
+      'agentFlushPreview',
+      'agentLivePreview',
+    ]);
+    await tester.runAsync(() async {
+      repository.answer!.complete({'answer': '完整回复。', 'isError': false});
+      await task;
+    });
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.takeException(), isNull);
+  });
+
   test(
     'real deltas appear before completion and settle into one answer',
     () async {
@@ -111,6 +169,91 @@ void main() {
       expect(controller.messages.last.isStreaming, false);
       repository.emit('text_delta', {'messageId': 'a', 'delta': '迟到的内容'});
       expect(controller.messages.last.text, '**你好**');
+    },
+  );
+
+  test(
+    'foreground restore fills one live answer without resubmitting',
+    () async {
+      final task = controller.ask('你好');
+      await Future<void>.delayed(Duration.zero);
+      repository.emit('run_started', {'userMessageId': 'u'});
+      repository.emit('text_start', {'messageId': 'a', 'previewSequence': 1});
+      await controller.flushAgentPreview();
+
+      repository.livePreview = Completer<Object?>();
+      final restored = controller.restoreAgentPreview();
+      repository.livePreview!.complete({
+        'revision': 0,
+        'sessionId': 's',
+        'runId': 'r',
+        'messageId': 'a',
+        'text': '已生成的文字',
+        'sequence': 3,
+      });
+      await restored;
+      repository.emit('text_delta', {
+        'messageId': 'a',
+        'delta': '的文字',
+        'previewSequence': 3,
+      });
+      repository.emit('text_delta', {
+        'messageId': 'a',
+        'delta': '接着显示。',
+        'previewSequence': 4,
+      });
+      expect(controller.messages, hasLength(2));
+      expect(controller.messages.last.text, '已生成的文字接着显示。');
+      expect(controller.messages.last.isStreaming, true);
+      expect(repository.calls.map((c) => c.method), [
+        'ask',
+        'agentFlushPreview',
+        'agentLivePreview',
+      ]);
+
+      repository.answer!.complete({'answer': '完整回复。', 'isError': false});
+      await task;
+      expect(controller.messages, hasLength(2));
+      expect(controller.messages.last.text, '完整回复。');
+    },
+  );
+
+  test(
+    'late foreground snapshots cannot restore rejected or finished text',
+    () async {
+      final task = controller.ask('你好');
+      await Future<void>.delayed(Duration.zero);
+      repository.emit('run_started', {'userMessageId': 'u'});
+      repository.emit('text_start', {'messageId': 'a', 'previewSequence': 1});
+      repository.emit('text_delta', {
+        'messageId': 'a',
+        'delta': '核对未通过的文字',
+        'previewSequence': 2,
+      });
+      final old = {
+        'revision': 0,
+        'sessionId': 's',
+        'runId': 'r',
+        'messageId': 'a',
+        'text': '核对未通过的文字',
+        'sequence': 2,
+      };
+      repository.livePreview = Completer<Object?>();
+      final rejected = controller.restoreAgentPreview();
+      repository.emit('text_reset', {'messageId': 'a', 'previewSequence': 3});
+      repository.livePreview!.complete(old);
+      await rejected;
+      expect(controller.messages.last.text, isEmpty);
+
+      repository.livePreview = Completer<Object?>();
+      final finished = controller.restoreAgentPreview();
+      repository.answer!.complete({'answer': '最终回复。', 'isError': false});
+      await task;
+      repository.livePreview!.complete(old);
+      await finished;
+      expect(controller.messages, hasLength(2));
+      expect(controller.messages.last.text, '最终回复。');
+      expect(controller.messages.last.isStreaming, false);
     },
   );
 

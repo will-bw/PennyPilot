@@ -641,16 +641,23 @@ void main() {
     () async {
       final session = await runtime.active(0);
       session.status = 'running';
+      session.activeRunId = 'interrupted-retry';
       session.messages.add({'role': 'user', 'content': '查询'});
-      session.messages.add(call('unfinished', 'get_budget', {}).message);
+      session.messages.add({
+        ...call('unfinished', 'get_budget', {}).message,
+        'runId': 'interrupted-retry',
+      });
       session.actions.add({'id': 'unknown', 'status': 'applying'});
       await store.write('session:0:${session.id}', session.toMap());
       final restored = await LedgerAgentRuntime(store: store).active(0);
       expect(restored.status, 'interrupted');
       expect(
-        restored.messages.where((m) => m['tool_call_id'] == 'unfinished'),
-        hasLength(1),
+        restored.messages.singleWhere(
+          (m) => m['tool_call_id'] == 'unfinished',
+        )['runId'],
+        'interrupted-retry',
       );
+      expect(restored.messages.last['runId'], 'interrupted-retry');
       expect(restored.actions.single['status'], 'uncertain');
     },
   );
