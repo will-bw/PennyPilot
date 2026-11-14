@@ -112,6 +112,7 @@ class LedgerTransaction {
     this.duplicateOf,
     this.businessKind,
     this.metadataJson,
+    this.operationKey,
     this.editVersion = 0,
   });
 
@@ -128,7 +129,7 @@ class LedgerTransaction {
   final TxSource source;
   final TxStatus status;
   final int? duplicateOf;
-  final String? businessKind, metadataJson;
+  final String? businessKind, metadataJson, operationKey;
   String get effectiveKind =>
       (businessKind == null || businessKind == 'standard')
       ? (type == TxType.expense ? 'expense' : 'income')
@@ -185,6 +186,7 @@ class LedgerTransaction {
     source: TxSource.fromWire(map['source'] ?? (draft ? 'AI_TEXT' : 'MANUAL')),
     businessKind: map['businessKind'] as String?,
     metadataJson: map['metadataJson'] as String?,
+    operationKey: map['operationKey'] as String?,
     editVersion: integer(map['editVersion'], 'editVersion', fallback: 0),
     status: TxStatus.fromWire(map['status'] ?? 'CONFIRMED'),
     duplicateOf: map['duplicateOf'] == null
@@ -235,6 +237,7 @@ class LedgerTransaction {
     duplicateOf: duplicateOf,
     businessKind: businessKind ?? this.businessKind,
     metadataJson: metadataJson ?? this.metadataJson,
+    operationKey: operationKey,
     editVersion: editVersion,
   );
 }

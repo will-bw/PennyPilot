@@ -49,6 +49,7 @@ class PaymentAccessibilityService : AccessibilityService() {
         const val IMAGE_WINDOW_MS = 60_000L
         const val WECHAT = "com.tencent.mm"
         const val WECHAT_RESULT_CONTAINER = "com.tencent.mm.framework.app.UIPageFragmentActivity"
+        const val WECHAT_REMITTANCE_DETAIL = "com.tencent.mm.plugin.remittance.ui.RemittanceDetailUI"
         val walletPreparationActivities = setOf(
             "com.tencent.mm.plugin.remittance.ui.RemittanceUI",
             "com.tencent.mm.plugin.wallet.pay.ui.WalletPayUI",
@@ -373,7 +374,9 @@ class PaymentAccessibilityService : AccessibilityService() {
                 snapshot.structure, request.className)
             val recognition = parsedByAdapter?.let { PaymentTextParser.ScreenRecognition(it, it.scene ?: "receipt",
                 modelCandidate = false, evidenceText = text) }
-                ?: if (PaymentSceneAdapters.isDetailPage(request.packageName, text))
+                ?: if (adapter?.kind == PaymentSceneAdapters.Kind.PARTIAL_RESULT)
+                    PaymentTextParser.ScreenRecognition(null, "transfer_sent", modelCandidate = false, evidenceText = text)
+                else if (PaymentSceneAdapters.isDetailPage(request.packageName, text))
                     PaymentTextParser.ScreenRecognition(null, "receipt_detail", modelCandidate = false, evidenceText = text)
                 else PaymentTextParser.analyzeScreen(request.packageName, text, snapshot.structure)
             val parsed = recognition.parsed
@@ -593,9 +596,12 @@ class PaymentAccessibilityService : AccessibilityService() {
         if (!snapshot.isBoundedOpaqueTree) return false
         val dedicated = PaymentSceneAdapters.match(request.packageName, "", request.className)
         if (dedicated?.allowsCloudImage == true) return true
-        return request.packageName == WECHAT && request.className == WECHAT_RESULT_CONTAINER &&
-            opaqueHandoffWindow == request.windowId && walletPreparationAt?.let { elapsedMillis() - it in 0..120_000 } == true
+        return isWechatResultHandoff(request)
     }
+
+    private fun isWechatResultHandoff(request: ReadRequest): Boolean =
+        request.packageName == WECHAT && request.className == WECHAT_RESULT_CONTAINER &&
+            opaqueHandoffWindow == request.windowId && walletPreparationAt?.let { elapsedMillis() - it in 0..120_000 } == true
 
     @Suppress("DEPRECATION")
     private fun matchesSnapshot(request: ReadRequest, snapshot: PaymentScreenReader.Snapshot, generation: Long,
@@ -625,9 +631,17 @@ class PaymentAccessibilityService : AccessibilityService() {
         return try {
             if (!matchesSnapshot(request, snapshot, generation, windowId) ||
                 targetWindow == null && !displayWindowUnoccluded(request, snapshot.windowBounds)) return null
-            val walletImage = PaymentSceneAdapters.match(request.packageName, snapshot.text.orEmpty(), request.className,
-                snapshot.structure)?.kind == PaymentSceneAdapters.Kind.OPAQUE_RECEIPT
-            val region = (if (walletImage) PaymentVisualRegion.windowBounds(snapshot.windowBounds, whole.width, whole.height,
+            val text = snapshot.text.orEmpty()
+            val pageKind = PaymentSceneAdapters.match(request.packageName, text, request.className, snapshot.structure)?.kind
+            // The result layout may draw the amount outside the exposed text bounds.
+            // Only the observed wallet flow or a dedicated remittance receipt qualifies the full window.
+            val partialTransfer = pageKind == PaymentSceneAdapters.Kind.PARTIAL_RESULT &&
+                request.packageName == WECHAT &&
+                (request.className == WECHAT_REMITTANCE_DETAIL || isWechatResultHandoff(request)) &&
+                listOf("editableNodes", "passwordNodes", "hiddenInputNodes", "foreignNodes", "unknownOwnerNodes")
+                    .all { snapshot.diagnostics[it] == 0 }
+            val region = (if (pageKind == PaymentSceneAdapters.Kind.OPAQUE_RECEIPT || partialTransfer)
+                PaymentVisualRegion.windowBounds(snapshot.windowBounds, whole.width, whole.height,
                 targetWindow != null) else PaymentVisualRegion.bounds(snapshot.structure, whole.width, whole.height,
                 includePanel = includePanel, windowRelative = targetWindow != null, windowBounds = snapshot.windowBounds,
                 receiptBounds = snapshot.receiptBounds)) ?: run {

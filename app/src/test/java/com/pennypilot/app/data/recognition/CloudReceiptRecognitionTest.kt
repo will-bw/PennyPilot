@@ -87,6 +87,41 @@ class CloudReceiptRecognitionTest {
         assertEquals("小明", parsed.merchant)
         assertEquals("INCOME", parsed.direction)
     }
+
+    @Test fun `image only wechat transfer keeps completed debit while recipient is waiting`() = runTest {
+        val parsed = read(outgoingWechatTransfer())!!
+        assertEquals("transfer_sent", parsed.scene)
+        assertEquals(1800L, parsed.amountCents)
+        assertEquals("EXPENSE", parsed.direction)
+        assertEquals("小明", parsed.merchant)
+        assertEquals("小明", parsed.details.payeeName)
+        assertTrue(parsed.fieldEvidence.getValue("amount").startsWith("云端视觉"))
+    }
+
+    @Test fun `image only wechat transfer rejects incomplete or contradictory facts`() = runTest {
+        val paid = outgoingWechatTransfer()
+        val waiting = paid.receiptLines.drop(1)
+        for ((case, response) in listOf(
+            "wrong direction" to paid.copy(direction = "INCOME"),
+            "wrong amount" to paid.copy(amountCents = 1900),
+            "recipient status cited as payment completion" to paid.copy(statusEvidence = waiting.first()),
+            "recipient status alone" to paid.copy(receiptLines = waiting, statusEvidence = waiting.first(),
+                directionEvidence = waiting.first()),
+            "failed transfer" to paid.copy(receiptLines = paid.receiptLines + "转账失败"),
+            "conflicting amounts" to paid.copy(receiptLines = paid.receiptLines + "转账金额：19.00元")
+        )) assertNull(case, read(response))
+    }
+
+    private fun outgoingWechatTransfer(): PaymentProposal {
+        val amount = "转账金额：18.00元"
+        return proposal(listOf("支付成功", "待小明确认收款", amount)).copy(
+            amountCents = 1800,
+            amountEvidence = amount,
+            merchant = null,
+            merchantEvidence = null
+        )
+    }
+
     @Test fun `late detail headings without dates cannot produce an observed-time cloud receipt`() = runTest {
         val prefix = listOf("支付宝", "返回", "更多", "账单管理", "商户名称：样例书店", "交易信息")
         for (header in listOf(prefix, prefix.map { if (it == "返回") "支付成功" else it })) {

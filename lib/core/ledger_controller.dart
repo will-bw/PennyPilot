@@ -149,6 +149,7 @@ class LedgerController extends ChangeNotifier {
   Map<String, dynamic> agentConfig = {}, agentProgress = {};
   bool _agentLoaded = false;
   String? _activeAssistantRun, _liveMessageId;
+  int _livePreviewSequence = -1;
   String _assistantDraft = '';
   String get assistantDraft => _assistantDraft;
   Map<String, dynamic>? _assistantAttachment;
@@ -191,6 +192,63 @@ class LedgerController extends ChangeNotifier {
     });
   }
 
+  Future<void> flushAgentPreview() async {
+    if (_disposed || !isAsking || _activeAssistantRun == null) return;
+    try {
+      await _repository.invoke('agentFlushPreview', const {});
+    } on Exception catch (error) {
+      if (error is! LedgerException || error.code != 'TEST_UNSUPPORTED') {
+        debugPrint('助手回复暂存失败：${error.runtimeType}');
+      }
+    }
+  }
+
+  Future<void> restoreAgentPreview() async {
+    final runId = _activeAssistantRun;
+    final sessionId = agentProgress['sessionId'];
+    if (_disposed || !isAsking || runId == null || sessionId == null) return;
+    final generation = _generation;
+    try {
+      final raw = await _repository.invoke('agentLivePreview', const {});
+      if (_disposed ||
+          !isAsking ||
+          generation != _generation ||
+          runId != _activeAssistantRun ||
+          sessionId != agentProgress['sessionId'] ||
+          raw == null) {
+        return;
+      }
+      final preview = stringMap(raw);
+      final sequence = preview['sequence'];
+      final messageId = preview['messageId'];
+      final text = preview['text'];
+      if (preview['revision'] != revision ||
+          preview['sessionId'] != sessionId ||
+          preview['runId'] != runId ||
+          sequence is! int ||
+          sequence < _livePreviewSequence ||
+          messageId is! String ||
+          text is! String) {
+        return;
+      }
+      final index = _messages.lastIndexWhere(
+        (m) => m.role == 'assistant' && m.runId == runId && m.isStreaming,
+      );
+      if (index < 0) return;
+      _liveMessageId = messageId;
+      _livePreviewSequence = sequence;
+      _messages[index] = _messages[index].copyWith(
+        text: text,
+        status: 'streaming',
+      );
+      _notifyChat();
+    } on Exception catch (error) {
+      if (error is! LedgerException || error.code != 'TEST_UNSUPPORTED') {
+        debugPrint('助手回复补载失败：${error.runtimeType}');
+      }
+    }
+  }
+
   void _onAgentProgress(Map<String, dynamic> event) {
     if (!isAsking) return;
     final phase = event['phase'];
@@ -199,6 +257,19 @@ class LedgerController extends ChangeNotifier {
         _activeAssistantRun != null &&
         runId != _activeAssistantRun) {
       return;
+    }
+    if (const {
+      'text_start',
+      'text_delta',
+      'text_complete',
+      'text_reset',
+      'run_finished',
+    }.contains(phase)) {
+      final sequence = event['previewSequence'] as int?;
+      if (sequence != null) {
+        if (sequence <= _livePreviewSequence) return;
+        _livePreviewSequence = sequence;
+      }
     }
     if (phase == 'run_started') {
       _activeAssistantRun = runId;
@@ -472,6 +543,7 @@ class LedgerController extends ChangeNotifier {
     _activeAssistantRun = null;
     _runningReasoningOptions = null;
     _liveMessageId = null;
+    _livePreviewSequence = -1;
     _assistantDraft = '';
     _assistantAttachment = null;
     _recognitionRunId = null;
@@ -1880,6 +1952,7 @@ class LedgerController extends ChangeNotifier {
     _runningReasoningOptions = _configuredReasoningOptions;
     _activeAssistantRun = null;
     _liveMessageId = null;
+    _livePreviewSequence = -1;
     _notify();
     try {
       final result = stringMap(

@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 import '../ledger_repository.dart';
 import '../models.dart';
 import '../recognition/recognition_protocol.dart';
@@ -9,6 +11,8 @@ import 'agent_models.dart';
 import 'agent_prompt.dart';
 import 'agent_store.dart';
 import 'ledger_agent_tools.dart';
+
+part 'agent_write_recovery.dart';
 
 typedef AgentAutoRecord =
     Future<({int id, LedgerSnapshot ledger})?> Function(
@@ -28,14 +32,86 @@ class LedgerAgentRuntime {
   final Duration maxDuration;
   AgentCancellation? _cancellation;
   Completer<void>? _finished;
+  _AgentPreview? _preview;
+  Timer? _previewTimer;
+  Future<void> _previewWrite = Future.value();
+  Future<void> _activeRead = Future.value();
   bool get running => _finished != null;
+  Map<String, dynamic>? get livePreview => _preview?.toMap();
+
+  Future<void> flushPreview() {
+    _previewTimer?.cancel();
+    _previewTimer = null;
+    final preview = _preview;
+    if (preview == null || preview.version == preview.savedVersion) {
+      return _previewWrite;
+    }
+    final value = preview.toMap();
+    final version = preview.version;
+    preview.savedVersion = version;
+    return _previewWrite = _previewWrite.then((_) async {
+      try {
+        await store.write(preview.key, value);
+      } catch (error) {
+        if (preview.savedVersion == version) {
+          preview.savedVersion = -1;
+        }
+        debugPrint('保存 Agent 回复预览失败（${error.runtimeType}）');
+      }
+    });
+  }
+
+  void _schedulePreviewWrite() {
+    _previewTimer ??= Timer(const Duration(milliseconds: 500), () {
+      unawaited(flushPreview());
+    });
+  }
+
+  Future<void> _clearPreview() async {
+    _previewTimer?.cancel();
+    _previewTimer = null;
+    final preview = _preview;
+    _preview = null;
+    if (preview == null) return;
+    await _previewWrite;
+    await _removePreview(preview.key);
+  }
+
+  Future<void> _removePreview(String key) async {
+    try {
+      await store.remove(key);
+    } catch (error) {
+      debugPrint('清理 Agent 回复预览失败（${error.runtimeType}）');
+    }
+  }
+
   void cancel() => _cancellation?.cancel();
   Future<void> shutdown() async {
     cancel();
     await _finished?.future;
   }
 
-  Future<AgentSession> active(int revision) async {
+  Future<AgentSession> active(int revision, {LedgerSnapshot? ledger}) =>
+      _active(revision, ledger: ledger);
+
+  Future<AgentSession> _active(
+    int revision, {
+    LedgerSnapshot? ledger,
+    bool preparingRun = false,
+  }) {
+    // Recovery can write the same checkpoint that a newly accepted run will use.
+    final read = _activeRead.then(
+      (_) => _readActive(revision, ledger: ledger, preparingRun: preparingRun),
+    );
+    _activeRead = read.then<void>((_) {}, onError: (Object _) {});
+    return read;
+  }
+
+  Future<AgentSession> _readActive(
+    int revision, {
+    LedgerSnapshot? ledger,
+    required bool preparingRun,
+  }) async {
     final selected = await store.read('active:$revision');
     final saved = selected == null
         ? null
@@ -43,36 +119,71 @@ class LedgerAgentRuntime {
     final session = saved == null
         ? AgentSession.create(revision, _clock())
         : AgentSession.fromMap(saved);
-    if (session.status == 'running' && _cancellation == null) {
+    final canRecover = preparingRun || !running;
+    final reconciled =
+        canRecover &&
+        ledger != null &&
+        _reconcileAgentWriteReceipts(session, ledger);
+    var changed = reconciled;
+    final previewKey = _AgentPreview.storageKey(revision, session.id);
+    if (session.status == 'running' && canRecover) {
+      final runId =
+          session.activeRunId ??
+          session.messages.lastOrNull?['runId'] as String?;
+      final preview = await store.read(previewKey);
+      final parts = <Map<String, dynamic>>[];
+      if (preview != null &&
+          preview['runId'] == runId &&
+          !session.messages.any((m) => m['id'] == preview['messageId'])) {
+        final text = preview['text'] as String;
+        if (text.isNotEmpty) {
+          parts.add({'type': 'interrupted_text', 'text': text});
+        }
+        if (preview['reasoning'] case final Map<String, dynamic> reasoning) {
+          parts.add({
+            ...reasoning,
+            if (reasoning['status'] == 'streaming') 'status': 'error',
+          });
+        }
+      }
       _repairPendingCalls(session, '应用上次运行中断。此工具没有可确认的执行结果，请重新查询；不要假定成功。');
       session.status = 'interrupted';
+      session.activeRunId = null;
       session.messages.add({
         'role': 'assistant',
-        'content': '上次任务因应用关闭而中断。已保留执行记录，可以继续提问。',
+        'runId': ?runId,
+        'content': '上次任务已中断。已保留执行记录，可以重试这个问题。',
         'isError': true,
+        if (parts.isNotEmpty) 'parts': parts,
       });
-      await _save(session);
-    } else if (!running &&
+      changed = true;
+    } else if (canRecover &&
         session.actions.any((action) => action['status'] == 'applying')) {
       _repairPendingCalls(session, '上次提案执行中断，请核对账本的实际结果。');
-      await _save(session);
+      changed = true;
     }
     if (saved == null) {
       await _save(session);
       await store.write('active:$revision', {'id': session.id});
-    } else if (session.messages.any(
-      (message) =>
-          message['id'] == null ||
-          message['runId'] == null ||
-          _needsReasoningPart(message),
-    )) {
+    } else if (canRecover &&
+        (changed ||
+            session.messages.any(
+              (message) =>
+                  message['id'] == null ||
+                  message['runId'] == null ||
+                  _needsReasoningPart(message),
+            ))) {
       await _save(session);
     }
+    if (canRecover && saved != null) await _removePreview(previewKey);
     return session;
   }
 
-  Future<Map<String, dynamic>> state(int revision) async {
-    final session = await active(revision);
+  Future<Map<String, dynamic>> state(
+    int revision, {
+    LedgerSnapshot? ledger,
+  }) async {
+    final session = await active(revision, ledger: ledger);
     final sessions =
         (await store.scan(
             'session:$revision:',
@@ -105,18 +216,23 @@ class LedgerAgentRuntime {
     return state(revision);
   }
 
-  Future<Map<String, dynamic>> select(int revision, String id) async {
+  Future<Map<String, dynamic>> select(
+    int revision,
+    String id, {
+    LedgerSnapshot? ledger,
+  }) async {
     _requireIdle();
     if (await store.read('session:$revision:$id') == null) {
       throw const LedgerException('对话已不存在。');
     }
     await store.write('active:$revision', {'id': id});
-    return state(revision);
+    return state(revision, ledger: ledger);
   }
 
   Future<Map<String, dynamic>> deleteSession(int revision, String id) async {
     _requireIdle();
     await store.remove('session:$revision:$id');
+    await _removePreview(_AgentPreview.storageKey(revision, id));
     return state(revision);
   }
 
@@ -420,20 +536,24 @@ class LedgerAgentRuntime {
   Future<Map<String, dynamic>> run({
     required String question,
     required LedgerSnapshot ledger,
-    required AgentModel model,
+    AgentModel? model,
+    Future<AgentModel> Function()? openModel,
     required Future<void> Function() guard,
     AgentAutoRecord? autoRecord,
     String source = 'AI_TEXT',
     bool internalQuestion = false,
   }) async {
     _requireIdle();
+    assert((model == null) != (openModel == null));
     if (question.trim().isEmpty ||
         question.length > 16000 ||
         !['AI_TEXT', 'AI_VOICE', 'AI_IMAGE'].contains(source)) {
       throw const LedgerException('请输入1～16000字的任务。');
     }
     final cancellation = AgentCancellation();
-    void cancelTransport() => model.cancel?.call();
+    late final AgentModel selectedModel;
+    void Function()? abortModel;
+    void cancelTransport() => abortModel?.call();
     cancellation.listen(cancelTransport);
     _cancellation = cancellation;
     _finished = Completer<void>();
@@ -465,15 +585,27 @@ class LedgerAgentRuntime {
     Map<String, dynamic>? activeReasoning;
     var reasoningAttached = false;
     var currentStep = 0;
+    var sequence = 0;
     void emit(String phase, [Map<String, dynamic> fields = const {}]) {
       if (session == null) return;
+      sequence++;
+      if (phase == 'text_start' || phase == 'text_delta') {
+        _preview?.textSequence = sequence;
+      }
       onProgress?.call({
         'sessionId': session.id,
         'revision': ledger.revision,
         'runId': runId,
         'phase': phase,
+        'previewSequence': sequence,
         ...fields,
       });
+    }
+
+    Future<void> resetPreview(String messageId) async {
+      previewMessageId = null;
+      await _clearPreview();
+      emit('text_reset', {'messageId': messageId});
     }
 
     void startReasoning(String messageId, {String? kind}) {
@@ -486,15 +618,15 @@ class LedgerAgentRuntime {
         'text': '',
         'kind':
             kind ??
-            model.reasoningConfig['kind'] ??
-            (model.reasoningConfig['provider'] == 'chatgpt'
+            selectedModel.reasoningConfig['kind'] ??
+            (selectedModel.reasoningConfig['provider'] == 'chatgpt'
                 ? 'summary'
                 : 'reasoning_content'),
         'status': 'streaming',
         'startedAt': _clock().millisecondsSinceEpoch,
-        'provider': model.reasoningConfig['provider'] ?? '',
-        'model': model.reasoningConfig['model'] ?? '',
-        'effort': ?model.reasoningConfig['effort'],
+        'provider': selectedModel.reasoningConfig['provider'] ?? '',
+        'model': selectedModel.reasoningConfig['model'] ?? '',
+        'effort': ?selectedModel.reasoningConfig['effort'],
       };
       emit('reasoning_start', {
         'messageId': messageId,
@@ -508,6 +640,7 @@ class LedgerAgentRuntime {
       if (part == null) return;
       part['status'] = status;
       part['endedAt'] ??= _clock().millisecondsSinceEpoch;
+      if (part['text'] != '') _preview?.updateReasoning(part);
       emit('reasoning_complete', {
         'messageId': part['messageId'],
         'step': currentStep,
@@ -518,10 +651,40 @@ class LedgerAgentRuntime {
     final autoSavedIds = <int>{};
     try {
       await check();
-      session = await active(ledger.revision);
+      session = await _active(
+        ledger.revision,
+        ledger: ledger,
+        preparingRun: true,
+      );
       _repairPendingCalls(session, '上一轮已结束，工具没有可确认的完成结果。');
+      final continuesTask = _awaitingTextInput(session);
+      session.status = 'running';
+      session.activeRunId = runId;
+      if (!continuesTask && !internalQuestion) session.plan.clear();
+      final userMessage = {
+        'id': userMessageId,
+        'runId': runId,
+        'role': 'user',
+        'content': question.trim(),
+        'source': source,
+        if (internalQuestion) 'internal': true,
+        'createdAt': started.millisecondsSinceEpoch,
+        if (continuesTask) 'continuesTask': true,
+      };
+      session.messages.add(userMessage);
+      if (session.title == '新对话') {
+        session.title = question.trim().substring(
+          0,
+          question.trim().length.clamp(0, 36),
+        );
+      }
+      await _save(session);
+      selectedModel = model ?? await _cancellable(openModel!(), cancellation);
+      abortModel = selectedModel.cancel;
+      await check();
       if (session.modelIdentity.isNotEmpty &&
-          !_sameWireModel(session.modelIdentity, model.identity)) {
+          !_sameWireModel(session.modelIdentity, selectedModel.identity)) {
+        session.messages.removeLast();
         final history = _handoffHistory(session);
         // Provider tool transcripts and opaque reasoning cannot be replayed
         // under another protocol/model. Preserve ordinary conversation as data;
@@ -546,32 +709,13 @@ class LedgerAgentRuntime {
             'createdAt': started.millisecondsSinceEpoch,
           });
         }
+        session.messages.add(userMessage);
       }
-      session.modelIdentity = model.identity;
-      final continuesTask = _awaitingTextInput(session);
-      session.status = 'running';
-      if (!continuesTask && !internalQuestion) session.plan.clear();
-      session.messages.add({
-        'id': userMessageId,
-        'runId': runId,
-        'role': 'user',
-        'content': question.trim(),
-        'source': source,
-        if (internalQuestion) 'internal': true,
-        'createdAt': started.millisecondsSinceEpoch,
-        if (continuesTask) 'continuesTask': true,
-      });
+      session.modelIdentity = selectedModel.identity;
       final entryContext = _entryContext(session);
-      if (session.title == '新对话') {
-        session.title = question.trim().substring(
-          0,
-          question.trim().length.clamp(0, 36),
-        );
-      }
-      await _save(session);
       emit('run_started', {
         'userMessageId': userMessageId,
-        'reasoning': model.reasoningConfig,
+        'reasoning': selectedModel.reasoningConfig,
         if (internalQuestion) 'internal': true,
       });
       final settings = await config();
@@ -605,9 +749,9 @@ class LedgerAgentRuntime {
         autoRecordEnabled: autoRecord != null,
       );
       final cancellableModel = AgentModel(
-        identity: model.identity,
+        identity: selectedModel.identity,
         complete: (messages, tools) =>
-            _cancellable(model.complete(messages, tools), cancellation),
+            _cancellable(selectedModel.complete(messages, tools), cancellation),
       );
       Map<String, dynamic>? chart;
       String? waitingQuestion;
@@ -638,20 +782,28 @@ class LedgerAgentRuntime {
         final messageId = agentId();
         previewMessageId = messageId;
         previewText = StringBuffer();
+        _preview = _AgentPreview(
+          ledger.revision,
+          session.id,
+          runId,
+          messageId,
+          previewText,
+        );
         activeReasoning = null;
         reasoningAttached = false;
         emit('text_start', {'messageId': messageId, 'step': step});
-        if (model.reasoningConfig['enabled'] == true &&
-            (model.reasoningConfig['provider'] != 'chatgpt' ||
-                model.reasoningConfig['supportsSummary'] != false)) {
+        if (selectedModel.reasoningConfig['enabled'] == true &&
+            (selectedModel.reasoningConfig['provider'] != 'chatgpt' ||
+                selectedModel.reasoningConfig['supportsSummary'] != false)) {
           startReasoning(messageId);
         }
         final reply = await _cancellable(
-          model.turn(
+          selectedModel.turn(
             AgentContext.project(session, system, memories),
             LedgerAgentTools.definitions,
             onTextDelta: (delta) {
-              if (!identical(_cancellation, cancellation) ||
+              if (_preview?.messageId != messageId ||
+                  !identical(_cancellation, cancellation) ||
                   cancellation.isCancelled) {
                 return;
               }
@@ -665,9 +817,11 @@ class LedgerAgentRuntime {
                 'step': step,
                 'delta': delta,
               });
+              _schedulePreviewWrite();
             },
             onReasoningDelta: (delta) {
-              if (!identical(_cancellation, cancellation) ||
+              if (_preview?.messageId != messageId ||
+                  !identical(_cancellation, cancellation) ||
                   cancellation.isCancelled ||
                   delta.isEmpty) {
                 return;
@@ -675,6 +829,8 @@ class LedgerAgentRuntime {
               startReasoning(messageId);
               final part = activeReasoning!;
               part['text'] = '${part['text']}$delta';
+              _preview?.updateReasoning(part);
+              _schedulePreviewWrite();
               emit('reasoning_delta', {
                 'messageId': messageId,
                 'step': step,
@@ -722,9 +878,8 @@ class LedgerAgentRuntime {
           );
           if (unfinished && !pendingConfirmation) {
             assistant['provisional'] = true;
-            emit('text_reset', {'messageId': messageId});
-            previewMessageId = null;
             if (++correctiveAttempts > 2) {
+              previewMessageId = null;
               throw const LedgerException(
                 '任务计划仍有未完成步骤，已保留进度，请继续任务。',
                 code: 'AGENT_INCOMPLETE',
@@ -737,6 +892,7 @@ class LedgerAgentRuntime {
               'internal': true,
             });
             await _save(session);
+            await resetPreview(messageId);
             continue;
           }
           // Require real observations for ledger work; a system instruction alone
@@ -764,9 +920,8 @@ class LedgerAgentRuntime {
           );
           if (claimsWrite && !hasWriteReceipt) {
             assistant['provisional'] = true;
-            emit('text_reset', {'messageId': messageId});
-            previewMessageId = null;
             if (++correctiveAttempts > 2) {
+              previewMessageId = null;
               throw const LedgerException(
                 '本轮没有可核对的保存回执。请查看待确认提案或重试。',
                 code: 'AGENT_WRITE_RECEIPT',
@@ -778,6 +933,7 @@ class LedgerAgentRuntime {
               'internal': true,
             });
             await _save(session);
+            await resetPreview(messageId);
             continue;
           }
           if (unsupported ||
@@ -786,9 +942,8 @@ class LedgerAgentRuntime {
                       ? citedIds.isEmpty
                       : !pendingConfirmation)) {
             assistant['provisional'] = true;
-            emit('text_reset', {'messageId': messageId});
-            previewMessageId = null;
             if (++correctiveAttempts > 2) {
+              previewMessageId = null;
               throw const LedgerException(
                 '模型未提供可核实的账本依据，本次回答未采纳。请重试或换用支持工具调用的模型。',
                 code: 'AGENT_EVIDENCE',
@@ -801,13 +956,16 @@ class LedgerAgentRuntime {
               'internal': true,
             });
             await _save(session);
+            await resetPreview(messageId);
             continue;
           }
           session.status = pendingConfirmation
               ? 'awaiting_confirmation'
               : 'completed';
+          session.activeRunId = null;
           if (chart != null) assistant['chartData'] = chart;
           await _save(session);
+          await _clearPreview();
           emit('text_complete', {
             'messageId': messageId,
             'text': reply.text,
@@ -827,8 +985,7 @@ class LedgerAgentRuntime {
           session,
         ); // assistant and all call ids are durable before execution
         // Tool preambles are transient; the durable result is the final answer.
-        emit('text_reset', {'messageId': messageId});
-        previewMessageId = null;
+        await resetPreview(messageId);
         final hasClarification = reply.calls.any(
           (call) => agentMap(call['function'])['name'] == 'ask_user',
         );
@@ -889,6 +1046,7 @@ class LedgerAgentRuntime {
             result = recorded ?? await tools.execute(name, args);
             for (final action in session.actions.skip(priorActions)) {
               action['runId'] = runId;
+              action['toolCallId'] = call['id'];
             }
             if (recorded == null &&
                 autoRecord != null &&
@@ -950,6 +1108,7 @@ class LedgerAgentRuntime {
           trace['finishedAt'] = _clock().millisecondsSinceEpoch;
           for (final action in session.actions.skip(priorActions)) {
             action['runId'] = runId;
+            action['toolCallId'] = call['id'];
           }
           session.messages.add({
             'id': agentId(),
@@ -977,6 +1136,7 @@ class LedgerAgentRuntime {
         }
         if (waitingQuestion != null) {
           session.status = 'awaiting_input';
+          session.activeRunId = null;
           final waitingId = agentId();
           session.messages.add({
             'id': waitingId,
@@ -1023,8 +1183,8 @@ class LedgerAgentRuntime {
         if (previewMessageId != null && previewText.isNotEmpty)
           {'type': 'interrupted_text', 'text': previewText.toString()},
       ];
-      if (previewMessageId != null) {
-        emit('text_reset', {'messageId': previewMessageId});
+      if (_preview case final preview?) {
+        emit('text_reset', {'messageId': preview.messageId});
       }
       _repairPendingCalls(session, '本次工具执行被停止或未能确认完成，请重新查询。');
       final message = failure is LedgerException
@@ -1034,6 +1194,7 @@ class LedgerAgentRuntime {
           failure is LedgerException && failure.code == 'AGENT_CANCELLED'
           ? 'cancelled'
           : 'failed';
+      session.activeRunId = null;
       final errorMessageId = agentId();
       session.messages.add({
         'id': errorMessageId,
@@ -1045,6 +1206,7 @@ class LedgerAgentRuntime {
         'createdAt': _clock().millisecondsSinceEpoch,
       });
       await _save(session);
+      await _clearPreview();
       emit('text_complete', {
         'messageId': errorMessageId,
         'text': message,
@@ -1060,6 +1222,10 @@ class LedgerAgentRuntime {
         ...await state(ledger.revision),
       };
     } finally {
+      _previewTimer?.cancel();
+      _previewTimer = null;
+      _preview = null;
+      await _previewWrite;
       cancellation.unlisten(cancelTransport);
       cancelTransport();
       _cancellation = null;
@@ -1539,17 +1705,18 @@ class LedgerAgentRuntime {
         .where((m) => m['role'] == 'tool')
         .map((m) => m['tool_call_id'])
         .toSet();
-    final missing = <String>[];
+    final missing = <String, String?>{};
     for (final m in session.messages) {
       for (final call in m['tool_calls'] as List? ?? []) {
         final id = (call as Map)['id'] as String;
-        if (!answered.contains(id)) missing.add(id);
+        if (!answered.contains(id)) missing[id] = m['runId'] as String?;
       }
     }
-    for (final id in missing) {
+    for (final entry in missing.entries) {
       session.messages.add({
         'role': 'tool',
-        'tool_call_id': id,
+        'runId': ?entry.value,
+        'tool_call_id': entry.key,
         'content': jsonEncode({'error': 'interrupted', 'message': reason}),
       });
     }
@@ -1641,4 +1808,41 @@ class LedgerAgentRuntime {
         'propose_budget': '正在准备预算提案',
       }[name] ??
       '正在执行工具';
+}
+
+class _AgentPreview {
+  _AgentPreview(
+    this.revision,
+    this.sessionId,
+    this.runId,
+    this.messageId,
+    this.text,
+  );
+
+  final int revision;
+  final String sessionId, runId, messageId;
+  final StringBuffer text;
+  int textSequence = 0, reasoningVersion = 0, savedVersion = 0;
+  Map<String, dynamic>? _reasoning;
+  int get version => textSequence + reasoningVersion;
+
+  void updateReasoning(Map<String, dynamic> part) {
+    _reasoning = part;
+    reasoningVersion++;
+  }
+
+  static String storageKey(int revision, String sessionId) =>
+      'preview:$revision:$sessionId';
+
+  String get key => storageKey(revision, sessionId);
+
+  Map<String, dynamic> toMap() => {
+    'revision': revision,
+    'sessionId': sessionId,
+    'runId': runId,
+    'messageId': messageId,
+    'sequence': textSequence,
+    'text': text.toString(),
+    if (_reasoning != null) 'reasoning': Map<String, dynamic>.of(_reasoning!),
+  };
 }

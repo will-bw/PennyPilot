@@ -31,8 +31,13 @@ class _NativeStore extends TestLedgerRepository {
   }
   final String contentEncoding;
   int turns = 0;
+  bool foregroundAvailable = true;
   @override
   Future<Object?> invoke(String method, Map<String, dynamic> args) async {
+    if (method == 'startAgentForeground' || method == 'stopAgentForeground') {
+      calls.add((method: method, arguments: args));
+      return method == 'startAgentForeground' ? foregroundAvailable : null;
+    }
     if (method != 'agentModelTurn') return super.invoke(method, args);
     calls.add((method: method, arguments: args));
     expect(args['expectedAccountId'], 'native-account');
@@ -279,7 +284,8 @@ void main() {
     test(
       'Android native tool-only reply continues with $encoding content',
       () async {
-        final store = _NativeStore(contentEncoding: encoding);
+        final store = _NativeStore(contentEncoding: encoding)
+          ..foregroundAvailable = encoding != 'null';
         final agentStore = MemoryAgentStore();
         final credentials = MemoryCredentials();
         final ai = SharedAiService(credentials: credentials);
@@ -298,10 +304,15 @@ void main() {
                 as Map;
         expect(result['isError'], false);
         expect(store.turns, 2);
-        expect(
-          store.calls.map((c) => c.method),
-          everyElement('agentModelTurn'),
-        );
+        expect(store.calls.map((c) => c.method), [
+          'startAgentForeground',
+          'agentModelTurn',
+          'agentModelTurn',
+          'stopAgentForeground',
+        ]);
+        final token = store.calls.first.arguments['runId'];
+        expect(token, isA<String>());
+        expect(store.calls.last.arguments['runId'], token);
         expect((result['session'] as Map)['messages'], hasLength(4));
         final state = await repo.agentState();
         expect((state['session'] as Map)['status'], 'completed');
