@@ -5,7 +5,7 @@ package com.pennypilot.app.data.parser
  * are deliberately separate from order lists, checkout forms and chat/video content.
  */
 object PaymentSceneAdapters {
-    enum class Kind { RESULT, DETAIL, OPAQUE_RECEIPT }
+    enum class Kind { RESULT, DETAIL, OPAQUE_RECEIPT, PARTIAL_RESULT }
     data class Match(val id: String, val kind: Kind, val allowsCloudImage: Boolean = true) {
         val historicalDetail: Boolean get() = kind == Kind.DETAIL
     }
@@ -49,6 +49,8 @@ object PaymentSceneAdapters {
         if (text.length > 12_000 || unrelated.containsMatchIn(text)) return null
         if (packageName == "com.tencent.mm" && WechatTransferReceiptAdapter.isSent(text))
             return Match("微信:本人转账完成", Kind.RESULT)
+        if (packageName == "com.tencent.mm" && WechatTransferReceiptAdapter.isSentResultWithoutAmount(text))
+            return Match("微信:本人转账待补金额", Kind.PARTIAL_RESULT)
         if (packageName == "com.tencent.mm" && WechatTransferReceiptAdapter.isReceived(text))
             return Match("微信:本人收款详情", Kind.DETAIL)
         val facts = PaymentTextParser.receiptFacts(PaymentPageNormalizer.normalize(packageName, text).text)
@@ -76,6 +78,7 @@ object PaymentSceneAdapters {
     fun parseForReview(packageName: String, text: String, now: Long, structure: PaymentScreenStructure? = null,
         activityName: String? = null): NotificationParseResult? {
         val page = match(packageName, text, activityName, structure) ?: return null
+        if (page.kind == Kind.PARTIAL_RESULT) return null
         if (packageName == "com.tencent.mm") WechatTransferReceiptAdapter.parse(text, now, allowHistorical = true)?.let { return it }
         val adapted = PaymentPageNormalizer.normalize(packageName, text)
         return if (page.kind == Kind.DETAIL || isDetailPage(packageName, text))
@@ -87,6 +90,7 @@ object PaymentSceneAdapters {
     fun parse(packageName: String, text: String, now: Long, structure: PaymentScreenStructure? = null,
         activityName: String? = null): NotificationParseResult? {
         val page = match(packageName, text, activityName, structure) ?: return null
+        if (page.kind == Kind.PARTIAL_RESULT) return null
         if (packageName == "com.tencent.mm") WechatTransferReceiptAdapter.parse(text, now)?.let { return it }
         val adapted = PaymentPageNormalizer.normalize(packageName, text)
         return when {

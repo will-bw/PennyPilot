@@ -107,6 +107,9 @@ object PaymentProposalValidator {
         if (template == null && (!directionPattern.containsMatchIn(proposal.directionEvidence!!) ||
                 !directionPattern.containsMatchIn(proposal.statusEvidence!!))) return null
         if (template != null && (template.amountCents != amount || template.direction != proposal.direction)) return null
+        if (template?.scene == "transfer_sent" &&
+            (!completedExpense.containsMatchIn(proposal.directionEvidence!!) ||
+                !completedExpense.containsMatchIn(proposal.statusEvidence!!))) return null
         // A transfer recipient's collection state cannot reverse the sender's payment direction.
         if (proposal.direction == "INCOME" && Regex("对方(?:已|未|尚未)(?:收款|收钱)|转账成功|已转账").containsMatchIn(facts)) return null
         val merchant = proposal.merchant?.takeIf { it.length in 1..120 && backed(proposal.merchantEvidence) && proposal.merchantEvidence!!.contains(it) }
@@ -194,10 +197,12 @@ receipt 中的商品价格、备注提到的收款/退款、订单上下文和�
         if (lines.size !in 2..40 || lines.any { it.length !in 1..300 || it.any(Char::isISOControl) }) return proposal to null
         // A locally verified outgoing transfer may still be waiting for the recipient.
         // Retain that line for identity, but it is neither a failure nor a direction anchor.
-        val facts = if (verified?.scene == "transfer_sent")
-            lines.filterNot { waitingTransferPayee.matches(it) } else lines
-        val receipt = facts.joinToString("\n")
-        val parsed = PaymentProposalValidator.validateImage(packageName, receipt, proposal, observedAt) ?: return proposal to null
+        val receipt = lines.joinToString("\n")
+        val parsed = PaymentProposalValidator.validateImage(packageName, receipt, proposal, observedAt)
+            ?: if (verified?.scene == "transfer_sent") PaymentProposalValidator.validateImage(
+                packageName, lines.filterNot(waitingTransferPayee::matches).joinToString("\n"), proposal, observedAt)
+            else null
+        if (parsed == null) return proposal to null
         val rawDetails = PaymentTextParser.withReceiptDetails(packageName, receipt, parsed, source = "云端视觉")
         val details = parsed.copy(merchant = parsed.merchant ?: rawDetails.merchant,
             details = parsed.details.mergeMissing(rawDetails.details))

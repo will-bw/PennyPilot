@@ -181,6 +181,37 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertEquals(TxStatus.PENDING, row.status)
     }
 
+    @Test fun `wechat transfer result with a split currency amount saves once without cloud recognition`() {
+        connect(enabled = true)
+        window.root = { screen("支付成功\n待测试收款人确认收款\n¥\n2.00\n完成") }
+        sendEvent(className = "com.tencent.mm.framework.app.UIPageFragmentActivity")
+        awaitStatus("saved")
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        drainRetries()
+        val row = rows().single()
+        assertEquals(200L, row.amount)
+        assertEquals(TxType.EXPENSE, row.type)
+        assertEquals("测试收款人", row.merchant)
+        assertEquals(TxSource.ACCESSIBILITY, row.source)
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `wechat result with no readable amount goes to opted-in vision for review`() {
+        connect(enabled = true)
+        runBlocking { preferences.setScreenCloudVisionEnabled(true) }
+        var submitted = 0
+        service.visualCapture = { Bitmap.createBitmap(80, 100, Bitmap.Config.ARGB_8888) }
+        service.receiptImageHandler = { _, _, _, _, _, imageOnly ->
+            assertTrue(imageOnly)
+            submitted++
+            true
+        }
+        window.root = { screen("支付成功\n待测试收款人确认收款\n完成") }
+        sendEvent(className = "com.tencent.mm.framework.app.UIPageFragmentActivity")
+        awaitCondition("wechat receipt without readable amount was not queued") { submitted == 1 }
+        assertTrue(rows().isEmpty())
+    }
+
     @Test fun `system binding without app consent never reads the payment page`() {
         connect(enabled = false)
         window.root = { screen("转账成功\n¥18.00\n完成") }

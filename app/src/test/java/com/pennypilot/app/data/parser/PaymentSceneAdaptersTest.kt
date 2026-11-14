@@ -194,6 +194,53 @@ class PaymentSceneAdaptersTest {
         assertNull(parse("com.tencent.mm", text + "\n聊天记录"))
     }
 
+    @Test fun `wechat transfer result accepts amount and currency exposed by separate nodes`() {
+        val variants = listOf(
+            "支付成功\n待测试收款人确认收款\n¥ 2.00\n完成",
+            "支付成功\n待测试收款人确认收款\n¥\n2.00\n完成",
+            "转账成功。\n等待测试收款人确认收钱\n转账金额：\n￥\n２．００\n查看账单",
+            "已转账\n付款金额：2元\n待测试收款人确认收款\n完成\n查看账单详情"
+        )
+        for (text in variants) {
+            val result = parse("com.tencent.mm", text)!!
+            assertEquals(text, 200L, result.amountCents)
+            assertEquals(text, "EXPENSE", result.direction)
+            assertEquals(text, "transfer_sent", result.scene)
+            assertEquals(text, "测试收款人", result.details.payeeName)
+        }
+    }
+
+    @Test fun `wechat waiting marker is not a payment and receipt amount must be unambiguous`() {
+        val invalid = listOf(
+            "等待测试收款人确认收款\n¥\n2.00\n完成",
+            "转账失败\n待测试收款人确认收款\n转账金额：¥2.00\n完成",
+            "支付成功\n待测试收款人确认收款\n¥\n2.00\n￥18.00\n完成",
+            "¥\n转账金额\n¥\n支付成功\n待测试收款人确认收款\n完成",
+            "支付成功\n转账金额\n待测试收款人确认收款\n2.00\n完成",
+            "支付成功\n待测试收款人确认收款\n¥\n2.00\n输入支付密码",
+            "支付成功\n待测试收款人确认收款\n¥\n2.00\n发送消息",
+            "账单详情\n支付成功\n待测试收款人确认收款\n¥\n2.00"
+        )
+        for (text in invalid) {
+            assertNull(text, parse("com.tencent.mm", text))
+            assertNull(text, PaymentSceneAdapters.parseForReview("com.tencent.mm", text, now))
+        }
+        val unidentified = parse("com.tencent.mm", "支付成功\n¥2.00\n等待对方确认收钱\n完成")!!
+        assertNull(unidentified.merchant)
+    }
+
+    @Test fun `wechat partial result with missing amount can reach opt in vision only`() {
+        val text = "支付成功\n待测试收款人确认收款\n转账金额：\n¥\n完成"
+        val match = PaymentSceneAdapters.match("com.tencent.mm", text)!!
+        assertEquals(PaymentSceneAdapters.Kind.PARTIAL_RESULT, match.kind)
+        assertTrue(match.allowsCloudImage)
+        assertNull(parse("com.tencent.mm", text))
+        assertNull(PaymentSceneAdapters.parseForReview("com.tencent.mm", text, now))
+        assertNull(PaymentSceneAdapters.match("com.tencent.mm", text.replace("支付成功", "确认支付")))
+        assertNull(PaymentSceneAdapters.match("com.tencent.mm", text.replace("完成", "发送消息")))
+        assertNull(PaymentSceneAdapters.match("com.tencent.mm", text + "\n¥2.00\n¥5.00"))
+    }
+
     @Test fun `wechat actual receipt date differs from transfer initiation and historical review stays explicit`() {
         val text = "你已收款\n资金已存入零钱\n￥5.00\n零钱余额\n转账时间\n2026年11月14日 16:54:01\n收款时间\n2026年11月14日 16:55:00\n账单详情"
         val result = parse("com.tencent.mm", text)!!
