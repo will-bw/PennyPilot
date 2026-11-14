@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Receive short-lived window transitions promptly. The service coalesces read requests. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged|typeViewClicked"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="0"
     android:accessibilityFlags="flagIncludeNotImportantViews|flagRetrieveInteractiveWindows|flagReportViewIds"
@@ -9,5 +9,5 @@
     android:canTakeScreenshot="true"
     android:canPerformGestures="false"
     android:isAccessibilityTool="false"
-    android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone,com.unionpay,com.sankuai.meituan,com.sankuai.meituan.takeoutnew,com.ss.android.ugc.aweme,com.ss.android.ugc.aweme.lite"
+    android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone,com.unionpay,com.jd.jrapp,com.huawei.wallet,com.ccb.longjiLife,com.jingdong.app.mall,com.xunmeng.pinduoduo,com.alibaba.wireless,com.taobao.idlefish,com.taobao.taobao,com.sankuai.meituan,com.dianping.v1,com.sankuai.meituan.takeoutnew,me.ele,com.wudaokou.hippo,com.ss.android.ugc.lifeservices,com.smile.gifmaker,com.kuaishou.nebula,com.ss.android.ugc.aweme,com.ss.android.ugc.livelite,com.ss.android.ugc.aweme.lite,com.ss.android.yumme.video"
     android:description="@string/payment_capture_service_description" />

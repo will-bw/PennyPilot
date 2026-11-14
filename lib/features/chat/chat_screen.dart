@@ -235,8 +235,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _image() async {
     final c = widget.controller;
-    if (c.settings['cloudImageParsingEnabled'] != true &&
-        c.capabilities['localReceiptImageSupported'] != true) {
+    if (c.settings['cloudImageParsingEnabled'] != true) {
       await Navigator.push(
         context,
         MaterialPageRoute<void>(

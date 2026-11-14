@@ -8,10 +8,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /** Builds semantic context from source-specific evidence, never the merged ledger row. */
 internal object CaptureReceiptContext {
-    private val detailFields = listOf("merchantName", "payeeName", "productDescription", "remark", "paymentChannel", "fundingAccount")
 
     fun mergeContext(fields: List<PaymentReceiptContext>): List<PaymentReceiptContext> =
         PaymentReceiptDetails.normalizeContext(fields.sortedBy { if (it.label == "交易对方") 0 else 1 })
@@ -32,7 +32,11 @@ internal object CaptureReceiptContext {
         evidence.sortedWith(compareBy<CaptureEvidenceEntity> { it.firstObservedAt }.thenBy { it.eventKey }).forEach { row ->
             val metadata = row.metadataJson?.let { Json.parseToJsonElement(it) as? JsonObject } ?: return@forEach
             val receiptDetails = metadata["receiptDetails"] as? JsonObject
-            detailFields.forEach { field -> string(receiptDetails, field)?.let { details.putIfAbsent(field, it) } }
+            PaymentReceiptDetails.TEXT_FIELDS.forEach { field -> string(receiptDetails, field)?.let { details.putIfAbsent(field, it) } }
+            PaymentReceiptDetails.MONEY_FIELDS.forEach { field ->
+                (receiptDetails?.get(field) as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
+                    ?.takeIf { it >= 0 }?.let { details.putIfAbsent(field, it.toString()) }
+            }
             context += readContext(metadata).filter { includeLocalCheckout || it.source != CheckoutContext.LOCAL_SOURCE }
             occurredAt = occurredAt ?: string(metadata, "receiptOccurredAt")
             scene = scene ?: string(metadata, "scene")

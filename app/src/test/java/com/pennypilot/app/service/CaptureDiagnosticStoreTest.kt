@@ -24,6 +24,21 @@ class CaptureDiagnosticStoreTest {
     private fun record(snapshot: PaymentScreenReader.Snapshot = safe, candidate: Boolean = true) =
         CaptureDiagnosticStore.record("com.tencent.mm", snapshot, 7, 32, "PaymentActivity", candidate)
 
+    @Test fun `an adapted receipt without a parsable amount still completes diagnostics`() {
+        CaptureDiagnosticStore.arm()
+        val snapshot = safe.copy(text = "支付成功\n实付金额\n完成")
+        record(snapshot, candidate = false)
+        assertEquals("ready", CaptureDiagnosticStore.read()["state"])
+        assertTrue((CaptureDiagnosticStore.read()["sample"] as String).contains("\"nodes\""))
+    }
+
+    @Test fun `an adapted detail with unknown values is available for local rule maintenance`() {
+        CaptureDiagnosticStore.arm()
+        record(safe.copy(text = "账单详情\n交易时间\n金额暂未加载\n交易单号"), candidate = false)
+        assertEquals("ready", CaptureDiagnosticStore.read()["state"])
+        assertTrue((CaptureDiagnosticStore.read()["sample"] as String).contains("\"nodes\""))
+    }
+
     @Test fun `normal capture does not preserve diagnostic samples`() {
         record()
         assertEquals("idle", CaptureDiagnosticStore.read()["state"])

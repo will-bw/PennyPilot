@@ -33,6 +33,60 @@ class PaymentScreenReaderTest {
 
     private fun inspect(root: AccessibilityNodeInfo) = PaymentScreenReader.inspect(root, packageName)
 
+    private fun pageWithReceiptAndInput(inputInside: Boolean = false): AccessibilityNodeInfo = node(null).apply {
+        setBoundsInScreen(android.graphics.Rect(0, 0, 1000, 2000))
+        val panel = node(null).apply {
+            viewIdResourceName = "$packageName:id/payment_result_panel"
+            setBoundsInScreen(android.graphics.Rect(30, 100, 970, 1300))
+            add(node("支付成功"))
+            add(node("实付金额：18.00元"))
+            add(node("商户名称：早餐店"))
+        }
+        add(panel)
+        val input = node("private feedback").apply { isEditable = true }
+        if (inputInside) panel.add(input) else add(input)
+    }
+
+    @Test fun `an identified readonly receipt panel excludes an unrelated feedback input`() {
+        val snapshot = inspect(pageWithReceiptAndInput())
+        assertEquals("ready", snapshot.status)
+        assertFalse(snapshot.hasInput)
+        assertTrue(snapshot.text!!.contains("18.00"))
+        assertFalse(snapshot.text!!.contains("private"))
+        assertEquals(1, snapshot.diagnostics["excludedInputNodes"])
+        assertEquals(listOf(30, 100, 970, 1300), snapshot.receiptBounds)
+        assertEquals(listOf(0, 0, 1000, 2000), snapshot.windowBounds)
+        assertNull(snapshot.structure!!.nodes.first().parentId)
+    }
+
+    @Test fun `an input inside the receipt panel still refuses the page`() {
+        val snapshot = inspect(pageWithReceiptAndInput(inputInside = true))
+        assertNull(snapshot.text)
+        assertEquals("input_page", snapshot.status)
+    }
+
+    @Test fun `chat activity cannot qualify a named receipt panel`() {
+        val snapshot = PaymentScreenReader.inspect(pageWithReceiptAndInput(), packageName, "example.ChatActivity")
+        assertEquals("input_page", snapshot.status)
+        assertNull(snapshot.structure)
+    }
+
+    @Test fun `two independent receipt panels beside an input are ambiguous`() {
+        val page = pageWithReceiptAndInput()
+        page.add(node("支付成功\n实付金额：30.00元").apply {
+            viewIdResourceName = "$packageName:id/payment_result_panel"
+        })
+        assertEquals("input_page", inspect(page).status)
+    }
+
+    @Test fun `password outside a valid receipt panel remains protected`() {
+        val page = pageWithReceiptAndInput()
+        page.add(node("secret").apply { isPassword = true })
+        val snapshot = inspect(page)
+        assertEquals("password_page", snapshot.status)
+        assertNull(snapshot.text)
+    }
+
     @Test fun `visible readonly text is available only to matching app`() {
         val root = node()
         val matching = inspect(root)
@@ -335,7 +389,7 @@ class PaymentScreenReaderTest {
                 "visitedNodes" to 1, "textNodes" to 0, "hiddenTextNodes" to 0,
                 "editableNodes" to 0, "passwordNodes" to 0, "hiddenInputNodes" to 0,
                 "missingChildren" to 0, "hiddenNodes" to 0, "foreignNodes" to 0,
-                "unknownOwnerNodes" to 0
+                "unknownOwnerNodes" to 0, "excludedInputNodes" to 0
             ),
             snapshot.diagnostics
         )

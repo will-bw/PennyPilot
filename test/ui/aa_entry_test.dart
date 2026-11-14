@@ -120,13 +120,18 @@ void main() {
       'captured payment details remain readable and survive editing $compact',
       (tester) async {
         final repository = TestLedgerRepository();
-        final details = {
+        final details = <String, dynamic>{
           'merchantName': '测试门店（中心广场店）',
           'payeeName': '测试餐饮管理有限公司',
           'productDescription': '双人午餐套餐：主食两份、饮品两杯\n少冰，不加糖',
           'remark': '',
           'paymentChannel': '微信支付',
           'fundingAccount': '测试银行储蓄卡（1234）',
+          'transferFromAccount': '零钱',
+          'transferToAccount': '测试储蓄卡',
+          'originalAmountCents': 12000,
+          'discountAmountCents': 2000,
+          'feeAmountCents': 0,
         };
         final transaction = _storedSplit(
           repository,
@@ -144,6 +149,9 @@ void main() {
         expect(find.text('支付详情'), findsOneWidget);
         expect(find.text('收款对象'), findsOneWidget);
         expect(find.text(details['productDescription']!), findsOneWidget);
+        expect(find.text('优惠金额'), findsOneWidget);
+        expect(find.text('转入账户'), findsOneWidget);
+        expect(find.text('20.00'), findsOneWidget);
         expect(find.text('付款备注'), findsNothing);
         expect(find.text('识别依据与待核对信息'), findsNothing);
         expect(tester.takeException(), isNull);

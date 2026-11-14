@@ -26,9 +26,13 @@ class RecognitionTaskRunnerTest {
     private var allowed = true
     private var calls = 0
     private var commits = 0
+    private var identityUnavailable = false
     private var response: suspend () -> String = { """{"valid":true,"amount_cents":1800,"direction":"EXPENSE","currency":"CNY","payment_status":"COMPLETED","amount_evidence":"¥18.00","direction_evidence":"转账成功","status_evidence":"转账成功"}""" }
     private val client = object : LLMClient {
-        override suspend fun operationIdentity(role: ModelRole) = config
+        override suspend fun operationIdentity(role: ModelRole): String {
+            check(!identityUnavailable) { "account unavailable" }
+            return config
+        }
         override suspend fun chat(messages: List<Message>, jsonMode: Boolean): String { calls++; return response() }
         override suspend fun chatWithTools(messages: List<Message>, tools: List<ToolDefinition>): ChatResponseWithTools = error("Models must never receive writing tools")
     }
@@ -83,12 +87,22 @@ class RecognitionTaskRunnerTest {
     }
     @Test fun `permanent network failure is bounded and reported`() = runTest {
         enqueue(); response = { error("offline") }
-        repeat(3) { assertFalse(runner().run("task")) }
-        assertTrue(runner().run("task")); assertEquals(3, calls); assertEquals(0, commits); assertNull(store.get("task")); assertTrue(reports.last().contains("重试未完成"))
+        repeat(2) { assertFalse(runner().run("task")) }
+        assertTrue(runner().run("task")); assertEquals(3, calls); assertEquals(0, commits)
+        assertEquals(RecognitionTaskState.NEEDS_ATTENTION, store.get("task")!!.state)
+        assertEquals(RecognitionFailure.NETWORK, store.get("task")!!.failure)
+        assertTrue(reports.last().contains("未识别凭证"))
         assertEquals("model_exhausted", states.last())
+        repeat(3) { assertTrue(runner().run("task")) }
+        assertEquals(3, calls)
     }
     @Test fun `uncertain and injected models cannot write`() = runTest {
         enqueue(); response = { """{"valid":true,"amount_cents":9900,"direction":"EXPENSE","currency":"CNY","payment_status":"COMPLETED","amount_evidence":"99元","direction_evidence":"转账成功","status_evidence":"转账成功"}""" }
+        assertTrue(runner().run("task")); assertEquals(0, commits)
+        assertEquals(RecognitionFailure.INCOMPLETE, store.get("task")!!.failure)
+    }
+    @Test fun `explicit non receipt rejection is not archived`() = runTest {
+        enqueue(); response = { """{"valid":false,"missing_fields":["payment_status"]}""" }
         assertTrue(runner().run("task")); assertEquals(0, commits); assertNull(store.get("task"))
     }
     @Test fun `cancelled task retains encrypted record for OS restart`() = runTest {
@@ -175,16 +189,63 @@ class RecognitionTaskRunnerTest {
     @Test fun `timeout of current evidence still retries and is bounded`() = runTest {
         enqueue()
         response = { delay(60_001); error("timeout must cancel request") }
-        repeat(3) {
+        repeat(2) {
             assertFalse(runner().run("task"))
             assertEquals(it + 1, store.get("task")!!.attempts)
             assertTrue(reports.last().contains("超时"))
             assertEquals("model_failed", states.last())
         }
         assertTrue(runner().run("task"))
-        assertNull(store.get("task"))
+        assertEquals(RecognitionFailure.TIMEOUT, store.get("task")!!.failure)
         assertEquals(3, calls)
         assertEquals("model_exhausted", states.last())
+    }
+
+    @Test fun `explicit retry reuses event and finishes once after automatic budget is exhausted`() = runTest {
+        enqueue(); val valid = response; response = { error("offline") }
+        repeat(3) { runner().run("task") }
+        val failed = store.get("task")!!
+        assertEquals(RecognitionTaskState.NEEDS_ATTENTION, failed.state)
+        val retried = store.retry(failed.id, failed.evidenceVersion)!!
+        assertEquals(failed.eventKey, retried.eventKey)
+        assertEquals(failed.createdAt, retried.createdAt)
+        assertEquals(failed.configurationId, retried.configurationId)
+        assertEquals(0, retried.attempts)
+        assertEquals(failed.evidenceVersion + 1, retried.evidenceVersion)
+        response = valid
+        assertTrue(runner().run("task"))
+        assertTrue(runner().run("task"))
+        assertEquals(1, commits)
+        assertNull(store.get("task"))
+    }
+
+    @Test fun `failed receipt cannot be resent after changing configuration`() = runTest {
+        enqueue(); response = { error("offline") }
+        repeat(3) { runner().run("task") }
+        val failed = store.get("task")!!
+        store.retry(failed.id, failed.evidenceVersion)
+        config = "new account"
+        assertTrue(runner().run("task"))
+        assertEquals(3, calls)
+        assertNull(store.get("task"))
+    }
+
+    @Test fun `revocation during final failed request discards instead of retaining receipt`() = runTest {
+        enqueue(); response = { error("offline") }
+        repeat(2) { runner().run("task") }
+        response = { allowed = false; error("cancelled remote request") }
+        assertTrue(runner().run("task"))
+        assertNull(store.get("task"))
+        assertEquals("model_discarded", states.last())
+    }
+
+    @Test fun `unavailable model identity consumes bounded retry budget without sending`() = runTest {
+        enqueue(); identityUnavailable = true
+        repeat(2) { assertFalse(runner().run("task")) }
+        assertTrue(runner().run("task"))
+        assertEquals(0, calls)
+        assertEquals(RecognitionTaskState.NEEDS_ATTENTION, store.get("task")!!.state)
+        assertEquals(3, store.get("task")!!.attempts)
     }
 
 }

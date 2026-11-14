@@ -26,14 +26,14 @@ class WalletReceiptDetailsParserTest {
         assertNull(parse(income+"\n资金方向\n支出"))
     }
 
-    @Test fun `alipay outgoing signed receipt needs independent expense direction`() {
+    @Test fun `identified alipay signed receipt supplies direction but rejects explicit conflicts`() {
         val text = income.replace("二维码收款", "商品购买").replace("+18.00", "-18.00")
             .replace("收入", "支出").replace("付款方：小明", "收款方：便利店")
         assertEquals("EXPENSE", parse(text)!!.direction)
         assertEquals("expense", parse(text)!!.businessKind)
         assertNull(parse(text.replace("支出", "收入")))
         assertNull(parse(text.replace("-18.00", "+18.00")))
-        assertNull(parse(text.replace("收支类型\n支出", "")))
+        assertEquals("EXPENSE", parse(text.replace("收支类型\n支出", ""))!!.direction)
         assertNull(parse(text.replace("-18.00", "-1,80.00")))
     }
 
@@ -51,8 +51,8 @@ class WalletReceiptDetailsParserTest {
         }
     }
 
-    @Test fun `historical future missing ambiguous or malformed receipt time remains excluded`() {
-        assertNull(parse(income, at = now + 31 * 60_000))
+    @Test fun `historical receipt preserves time while future missing ambiguous or malformed time is excluded`() {
+        assertEquals(now - 90_000, parse(income, at = now + 31 * 60_000)!!.occurredAt)
         assertNull(parse(income.replace("16:58:30", "17:01:00")))
         assertNull(parse(income.replace("2026-10-24 16:58:30", "2026-02-30 16:58:30")))
         assertNull(parse(income.replace("2026-10-24 16:58:30", "今天16:58")))
@@ -64,12 +64,12 @@ class WalletReceiptDetailsParserTest {
 
     @Test fun `user selected older receipt retains verified date without assuming a wallet`() {
         val later = now + 2 * 60 * 60_000L
-        assertNull(parse(income, at = later))
+        assertEquals(now - 90_000, parse(income, at = later)!!.occurredAt)
         val selected = WalletReceiptDetailsParser.parseSelectedReceipt(income, later, zone)!!
         assertEquals(1800L, selected.amountCents)
         assertEquals(now - 90_000, selected.occurredAt)
         assertNull(selected.details.paymentChannel)
-        assertTrue(selected.fieldEvidence.getValue("occurredAt").startsWith("本地OCR"))
+        assertTrue(selected.fieldEvidence.getValue("occurredAt").startsWith("图片凭证"))
         assertNull(WalletReceiptDetailsParser.parseSelectedReceipt(income + "\n交易失败", later, zone))
         assertNull(WalletReceiptDetailsParser.parseSelectedReceipt(income, now - 120_000L, zone))
     }
@@ -80,7 +80,7 @@ class WalletReceiptDetailsParserTest {
         assertNull(parse(income, "com.example.chat"))
     }
 
-    @Test fun `unionpay detail recovery still requires fresh transaction time order and completion`() {
+    @Test fun `unionpay details require real transaction time order and completion`() {
         val text = income.replace("账单详情", "交易详情").replace("二维码收款", "商品购买")
             .replace("+18.00", "-1,234.56").replace("收入", "支出").replace("付款方：小明", "收款方：测试商户")
         val result = parse(text, "com.unionpay")!!
@@ -89,7 +89,7 @@ class WalletReceiptDetailsParserTest {
         assertEquals("云闪付", result.paymentMethod)
         assertEquals(now - 90_000, result.occurredAt)
         assertEquals("20261024000012345678", result.orderId)
-        assertNull(parse(text, "com.unionpay", now + 31 * 60_000))
+        assertEquals(now - 90_000, parse(text, "com.unionpay", now + 31 * 60_000)!!.occurredAt)
         assertNull(parse(text.replace("交易时间", "创建时间"), "com.unionpay"))
         assertNull(parse(text.replace("交易成功", "退款受理"), "com.unionpay"))
         assertNull(parse(text.replace("交易单号20261024000012345678", ""), "com.unionpay"))
@@ -163,7 +163,7 @@ class WalletReceiptDetailsParserTest {
         for (extra in listOf("资金方向：收入", "交易时间：2026-10-24 16:59:00", "交易状态：待支付", "账单列表")) {
             assertNull(extra, WalletReceiptDetailsParser.parse("com.eg.android.AlipayGphone", "$receipt\n$extra", now, structure, zone))
         }
-        assertNull(WalletReceiptDetailsParser.parse("com.eg.android.AlipayGphone", receipt, now + 31 * 60_000, structure, zone))
+        assertEquals(now - 90_000, WalletReceiptDetailsParser.parse("com.eg.android.AlipayGphone", receipt, now + 31 * 60_000, structure, zone)!!.occurredAt)
     }
 
     @Test fun `refund detail only uses completed refund status time and actual refund amount`() {
@@ -177,4 +177,14 @@ class WalletReceiptDetailsParserTest {
         assertNull(parse(receipt.replace("退款到账时间", "交易时间")))
         assertNull(parse(receipt.replace("退款金额：5.00元", "付款金额：30.00元")))
     }
+    @Test fun `refund headline sign must agree with incoming settlement direction`() {
+        val text = "退款详情\n退款成功\n+5.00\n退款到账时间：2026-10-24 16:58:30\n退款单号：RF202610240123"
+        assertEquals("INCOME", parse(text)!!.direction)
+        assertEquals(500L, parse(text)!!.amountCents)
+        for (negative in listOf("-5.00", "−5.00")) {
+            assertNull(parse(text.replace("+5.00", negative)))
+            assertNull(WalletReceiptDetailsParser.parseForReview("com.tencent.mm", text.replace("+5.00", negative), now, zone = zone))
+        }
+    }
+
 }

@@ -666,12 +666,23 @@ class _StoredEvidence extends StatelessWidget {
       'remark': '付款备注',
       'paymentChannel': '支付渠道',
       'fundingAccount': '扣款账户',
+      'transferFromAccount': '转出账户',
+      'transferToAccount': '转入账户',
+    };
+    const moneyLabels = {
+      'originalAmountCents': '原价',
+      'discountAmountCents': '优惠金额',
+      'feeAmountCents': '手续费',
+      'receivedAmountCents': '实际到账',
     };
     final detailRows = [
       for (final entry in detailLabels.entries)
         if (details[entry.key] is String &&
             (details[entry.key] as String).trim().isNotEmpty)
           (label: entry.value, value: (details[entry.key] as String).trim()),
+      for (final entry in moneyLabels.entries)
+        if (details[entry.key] is int && (details[entry.key] as int) >= 0)
+          (label: entry.value, value: formatMoney(details[entry.key] as int)),
       ..._contextRows(metadata['receiptContext'], details),
     ];
     final receiptDetails = detailRows.isEmpty

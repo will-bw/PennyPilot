@@ -208,7 +208,7 @@ void main() {
       expect(tester.widget<SwitchListTile>(automaticVision).value, false);
       await tester.tap(automaticVision);
       await tester.pumpAndSettle();
-      expect(find.textContaining('收付款人姓名、商户、金额和订单号'), findsOneWidget);
+      expect(find.textContaining('收付款人姓名、商户、金额、账户和订单号'), findsOneWidget);
       expect(find.textContaining('你配置的图片模型服务'), findsOneWidget);
       expect(find.textContaining('当前所选服务是 通义千问 / 百炼'), findsOneWidget);
       await tester.tap(find.text('取消'));

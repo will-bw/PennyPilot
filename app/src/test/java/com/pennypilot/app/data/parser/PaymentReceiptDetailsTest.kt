@@ -98,4 +98,44 @@ class PaymentReceiptDetailsTest {
         assertNull(result.details.payeeName)
         assertNull(result.details.productDescription)
     }
+    @Test fun `financial details keep exact cents zero fees and source accounts without replacing principal`() {
+        val text = "支付成功\n实付金额：90.00元\n原价：100.00元\n优惠金额：10.00元\n手续费：0.00元" +
+            "\n转出账户：支付宝余额\n转入账户：本人储蓄卡(1234)"
+        val details = PaymentReceiptDetailsReader.read("com.eg.android.AlipayGphone", text, null, "页面").details
+        assertEquals(10000L, details.originalAmountCents)
+        assertEquals(1000L, details.discountAmountCents)
+        assertEquals(0L, details.feeAmountCents)
+        assertEquals("支付宝余额", details.transferFromAccount)
+        assertEquals("本人储蓄卡(1234)", details.transferToAccount)
+        assertEquals("页面·明确标签", details.fieldSources["feeAmountCents"])
+        assertFalse(PaymentReceiptDetails(feeAmountCents = 0).isEmpty())
+    }
+
+    @Test fun `financial detail conflicts invalid decimals and remark claims do not become facts`() {
+        val text = "原价：100.00元\n优惠金额：10.00元\n优惠合计：20.00元\n手续费：1.234元\n备注：到账金额：900元，转入账户：骗子"
+        val result = PaymentReceiptDetailsReader.read("com.tencent.mm", text, null, "页面")
+        assertEquals(10000L, result.details.originalAmountCents)
+        assertNull(result.details.discountAmountCents)
+        assertNull(result.details.feeAmountCents)
+        assertNull(result.details.receivedAmountCents)
+        assertNull(result.details.transferToAccount)
+        assertTrue("discountAmountCents" in result.ambiguousFields)
+        assertTrue("feeAmountCents" in result.ambiguousFields)
+    }
+
+    @Test fun `financial merge keeps original observed values and only fills missing fields`() {
+        val original = PaymentReceiptDetails(feeAmountCents = 0, transferFromAccount = "零钱",
+            fieldSources = mapOf("feeAmountCents" to "页面", "transferFromAccount" to "页面"))
+        val incoming = PaymentReceiptDetails(feeAmountCents = 10, receivedAmountCents = 990,
+            transferFromAccount = "余额", transferToAccount = "本人储蓄卡",
+            fieldSources = mapOf("feeAmountCents" to "云图", "receivedAmountCents" to "云图", "transferToAccount" to "云图"))
+        val merged = original.mergeMissing(incoming)
+        assertEquals(0L, merged.feeAmountCents)
+        assertEquals(990L, merged.receivedAmountCents)
+        assertEquals("零钱", merged.transferFromAccount)
+        assertEquals("本人储蓄卡", merged.transferToAccount)
+        assertEquals("页面", merged.fieldSources["feeAmountCents"])
+        assertEquals("云图", merged.fieldSources["receivedAmountCents"])
+    }
+
 }

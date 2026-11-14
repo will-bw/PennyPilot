@@ -109,6 +109,47 @@ class CaptureRichContextTest {
         assertEquals(2, Json.parseToJsonElement(saved.metadataJson!!).jsonObject["receiptContext"]!!.jsonArray.size)
     }
 
+    @Test fun `financial detail fields survive persistence merge and semantic context without changing paid amount`() = fixture {
+        val original = receipt().copy(details = PaymentReceiptDetails(
+            originalAmountCents = 2000, discountAmountCents = 200,
+            transferFromAccount = "余额", fieldSources = mapOf("discountAmountCents" to "页面·优惠金额")))
+        processor.processScreen("com.tencent.mm", original, "financial-details", now, LedgerRevision.current,
+            queueSemanticModel = false)
+        val enriched = original.copy(details = PaymentReceiptDetails(
+            originalAmountCents = 9999, discountAmountCents = 999, feeAmountCents = 0,
+            receivedAmountCents = 1800, transferToAccount = "储蓄卡（1234）",
+            fieldSources = mapOf("feeAmountCents" to "云端视觉·手续费")))
+        processor.processScreen("com.tencent.mm", enriched, "financial-details", now + 1, LedgerRevision.current,
+            queueSemanticModel = false)
+        val saved = database.backupDao().transactions().single()
+        assertEquals(1800L, saved.amount)
+        val details = Json.parseToJsonElement(saved.metadataJson!!).jsonObject["receiptDetails"]!!.jsonObject
+        assertEquals(JsonPrimitive(2000), details["originalAmountCents"])
+        assertEquals(JsonPrimitive(200), details["discountAmountCents"])
+        assertEquals(JsonPrimitive(0), details["feeAmountCents"])
+        assertEquals(JsonPrimitive(1800), details["receivedAmountCents"])
+        assertEquals(JsonPrimitive("余额"), details["transferFromAccount"])
+        assertEquals(JsonPrimitive("储蓄卡（1234）"), details["transferToAccount"])
+        val semantic = CaptureReceiptContext.fromEvidence(database.transactionDao().evidenceForTransaction(saved.id)).bounded()
+        assertEquals("1800", semantic.details["receivedAmountCents"])
+        assertEquals("余额", semantic.details["transferFromAccount"])
+    }
+
+    @Test fun `disabling an application prevents new capture and invalidates queued recognition`() = fixture {
+        processor.processScreen("com.tencent.mm", receipt(), "selected-app", now, LedgerRevision.current)
+        val task = store.pending().single()
+        preferences.setCaptureAppPackages(emptySet())
+        try {
+            assertFalse(processor.recognitionTaskAllowed(task))
+            assertFalse(processor.processScreen("com.tencent.mm", receipt(), "disabled-app", now + 1, LedgerRevision.current))
+            assertTrue(processor.processRecognitionTask(task.id))
+            assertEquals(0, calls)
+            assertEquals(1, database.backupDao().transactions().size)
+        } finally {
+            preferences.setCaptureAppPackages(com.pennypilot.app.data.parser.PaymentAppRegistry.packages)
+        }
+    }
+
     @Test fun `verified payment notifies before AI and enrichment updates silently without resurrecting dismissed alert`() = fixture {
         val manager = context.getSystemService(NotificationManager::class.java)
         processor.processScreen("com.tencent.mm", receipt(), "instant-page", now, LedgerRevision.current)

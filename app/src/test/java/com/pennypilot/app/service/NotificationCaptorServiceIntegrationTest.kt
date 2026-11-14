@@ -123,6 +123,19 @@ class NotificationCaptorServiceIntegrationTest {
         assertEquals(2, transactions().size)
     }
 
+    @Test fun `rejected live preparation releases its reserved place before recent recovery`() {
+        runBlocking { preferences.setNotificationCaptureEnabled(true) }
+        start()
+        await { shadow.snapshotReads == 1 }
+        listener.onListenerDisconnected()
+        shadow.active = arrayOf(notice(3))
+        listener.onListenerConnected()
+        listener.onNotificationPosted(notice(4).apply { notification.flags = Notification.FLAG_GROUP_SUMMARY })
+        listener.onNotificationPosted(notice(5))
+        await { transactions().size >= 2 }
+        assertEquals(listOf(5_00L, 3_00L), transactions().sortedBy { it.id }.map { it.amount })
+    }
+
     private fun start(vararg active: StatusBarNotification) {
         controller = Robolectric.buildService(NotificationCaptorService::class.java).also { built ->
             listener = built.get().apply {

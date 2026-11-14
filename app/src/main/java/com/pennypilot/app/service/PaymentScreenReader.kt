@@ -3,6 +3,7 @@ package com.pennypilot.app.service
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import com.pennypilot.app.data.parser.PaymentScreenNode
+import com.pennypilot.app.data.parser.PaymentSceneAdapters
 import com.pennypilot.app.data.parser.PaymentScreenStructure
 
 /** 有界读取可见文本，跳过密码和所有输入控件；不截屏、不操作节点。 */
@@ -18,7 +19,9 @@ object PaymentScreenReader {
         val hasInput: Boolean,
         val status: String,
         val diagnostics: Map<String, Int>,
-        val structure: PaymentScreenStructure? = null
+        val structure: PaymentScreenStructure? = null,
+        val windowBounds: List<Int> = emptyList(),
+        val receiptBounds: List<Int>? = null
     ) {
         /** A small, fully traversed tree can be opaque even when its wrapper nodes are visible. */
         internal val isBoundedOpaqueTree: Boolean
@@ -31,7 +34,7 @@ object PaymentScreenReader {
     fun read(root: AccessibilityNodeInfo, packageName: String): String? = inspect(root, packageName).text
 
     @Suppress("DEPRECATION")
-    fun inspect(root: AccessibilityNodeInfo, packageName: String): Snapshot {
+    fun inspect(root: AccessibilityNodeInfo, packageName: String, activityName: String? = null): Snapshot {
         var visited = 0
         var readable = 0
         var textNodes = 0
@@ -47,6 +50,8 @@ object PaymentScreenReader {
         var refusalStatus: String? = null
         val lines = mutableListOf<String>()
         val facts = mutableListOf<PaymentScreenNode>()
+        val inputParents = mutableSetOf<Int>()
+        val rootBounds = Rect().also(root::getBoundsInScreen).let { listOf(it.left, it.top, it.right, it.bottom) }
         fun visit(node: AccessibilityNodeInfo, depth: Int, parentId: Int? = null) {
             if (refusalStatus != null) return
             if (++visited > MAX_VISITED_NODES || depth > MAX_DEPTH) {
@@ -81,8 +86,11 @@ object PaymentScreenReader {
                 }
                 if (node.isPassword) passwordNodes++
                 if (editable || inputClass) editableNodes++
-                // 同包可见输入框即使为空或未聚焦也整页拒绝，防止把聊天伪凭证入账。
-                if (node.isPassword || editable || inputClass) return
+                // Input contents and descendants are never read, even when a separate receipt panel is accepted.
+                if (node.isPassword || editable || inputClass) {
+                    parentId?.let(inputParents::add)
+                    return
+                }
                 // 部分支付页把状态放 text、金额放 contentDescription；两者都需要读取。
                 val nodeTexts = listOfNotNull(node.text?.toString(), node.contentDescription?.toString())
                     .map(String::trim).filter(String::isNotEmpty).distinct()
@@ -119,17 +127,23 @@ object PaymentScreenReader {
             }
         }
         visit(root, 0)
-        // 完整性不足时不能丢弃尾部“未支付/退款中”等上下文再入账。
-        val hasInput = editableNodes > 0 || passwordNodes > 0
+        // A complete, explicitly identified receipt panel can coexist with an unrelated search
+        // or feedback box. Unknown/chat layouts and any password page still reject the entire read.
+        val panel = if (editableNodes > 0 && passwordNodes == 0 && refusalStatus == null)
+            receiptPanel(facts, inputParents, packageName, activityName) else null
+        val selectedFacts = panel?.second ?: facts
+        val selectedText = if (panel == null) lines.joinToString("\n") else
+            selectedFacts.flatMap { it.labels }.joinToString("\n")
+        val hasInput = (editableNodes > 0 || passwordNodes > 0) && panel == null
         val status = when {
             passwordNodes > 0 -> "password_page"
-            editableNodes > 0 -> "input_page"
+            editableNodes > 0 && panel == null -> "input_page"
             refusalStatus != null -> refusalStatus!!
-            lines.isEmpty() -> "empty_page"
+            selectedText.isEmpty() -> "empty_page"
             else -> "ready"
         }
         return Snapshot(
-            text = if (status == "ready") lines.joinToString("\n") else null,
+            text = if (status == "ready") selectedText else null,
             hasInput = hasInput,
             status = status,
             // 只记录数量，不把页面正文、输入内容或包名放入诊断。
@@ -143,10 +157,45 @@ object PaymentScreenReader {
                 "missingChildren" to missingChildren,
                 "hiddenNodes" to hiddenNodes,
                 "foreignNodes" to foreignNodes,
-                "unknownOwnerNodes" to unknownOwnerNodes
+                "unknownOwnerNodes" to unknownOwnerNodes,
+                "excludedInputNodes" to if (panel != null) editableNodes else 0
             ),
             // Refused pages must expose neither partial text nor partial structured facts.
-            structure = if (status == "ready") PaymentScreenStructure(facts) else null
+            structure = if (status == "ready") PaymentScreenStructure(selectedFacts) else null,
+            windowBounds = rootBounds,
+            receiptBounds = panel?.first?.bounds
         )
     }
+
+    private fun receiptPanel(nodes: List<PaymentScreenNode>, inputParents: Set<Int>, packageName: String,
+        activityName: String?): Pair<PaymentScreenNode, List<PaymentScreenNode>>? {
+        if (activityName?.contains(Regex("chat|conversation|message", RegexOption.IGNORE_CASE)) == true) return null
+        val paymentActivity = activityName?.contains(Regex("wallet|payment|receipt|billdetail|tradedetail|remittance", RegexOption.IGNORE_CASE)) == true
+        val children = nodes.groupBy { it.parentId }
+        fun subtree(root: PaymentScreenNode): List<PaymentScreenNode> {
+            val result = mutableListOf<PaymentScreenNode>()
+            fun walk(node: PaymentScreenNode) { result += node; children[node.id].orEmpty().forEach(::walk) }
+            walk(root)
+            return result
+        }
+        val candidates = nodes.asSequence().filter { it.parentId != null && it.visible }.mapNotNull { node ->
+            val namedPanel = node.resourceId?.substringAfterLast('/')?.matches(
+                Regex("(?:payment_result|receipt|bill_detail|trade_detail|transaction_detail)(?:_panel|_container|_content)?")) == true
+            if (!paymentActivity && !namedPanel) return@mapNotNull null
+            val descendants = subtree(node)
+            if (descendants.any { it.id in inputParents }) return@mapNotNull null
+            val text = descendants.flatMap { it.labels }.joinToString("\n")
+            val match = PaymentSceneAdapters.match(packageName, text, activityName, PaymentScreenStructure(descendants))
+            if (match == null || match.kind == PaymentSceneAdapters.Kind.OPAQUE_RECEIPT) return@mapNotNull null
+            node to descendants
+        }.toList()
+        // Nested candidates are the same receipt; two unrelated receipt panels are ambiguous.
+        val outermost = candidates.filter { candidate -> candidates.none { other ->
+            other.first.id != candidate.first.id && other.second.any { it.id == candidate.first.id }
+        } }
+        return outermost.singleOrNull()?.let { (node, descendants) ->
+            node to descendants.map { if (it.id == node.id) it.copy(parentId = null) else it }
+        }
+    }
+
 }

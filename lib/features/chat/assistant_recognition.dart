@@ -21,17 +21,7 @@ Future<void> stageRecognitionImage(
     });
     return;
   }
-  final receipt = image['localReceipt'];
-  if (receipt is Map) {
-    await controller.addLocalReceiptDraft(
-      stringMap(receipt),
-      expectedRevision: controller.revision,
-    );
-    return;
-  }
-  throw LedgerException(
-    image['localReceiptError'] as String? ?? '请选一张清晰的支付凭证，或打开图片识别设置。',
-  );
+  throw const LedgerException('请在“识别与自动录入”开启云端图片识别，再选择或分享凭证。');
 }
 
 class AssistantRecognition extends StatefulWidget {

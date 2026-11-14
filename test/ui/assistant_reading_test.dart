@@ -436,7 +436,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Android local receipt stays a draft without cloud permission', (
+  testWidgets('image entry requests cloud permission instead of local OCR', (
     tester,
   ) async {
     final repository = _ReadingRepository(
@@ -459,13 +459,8 @@ void main() {
 
     final controller = result.controller;
     expect(controller.assistantAttachment, isNull);
-    expect(controller.drafts.single.amountFen, 1234);
-    expect(controller.drafts.single.merchant, '示例商户');
-    expect(
-      controller.drafts.single.recognitionMetadata['receiptDateUnconfirmed'],
-      isTrue,
-    );
-    await expectLater(controller.saveDrafts(), throwsA(isA<LedgerException>()));
+    expect(controller.drafts, isEmpty);
+    expect(find.text('识别与自动录入'), findsOneWidget);
     expect(
       repository.calls.where(
         (call) =>

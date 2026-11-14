@@ -9,6 +9,24 @@ class PaymentScreenSessionTest {
     private val payment = NotificationParseResult(1800, "麦当劳", "EXPENSE")
     private val pkg = "com.sankuai.meituan"
 
+    @Test fun `new image sample keeps event identity after a previous frame was handled`() {
+        val session = PaymentScreenSession()
+        val key = session.observeCandidate(pkg, 1, "opaque:wallet", 1000, visualVersion = 1)!!
+        session.markHandled(key)
+        assertNull(session.observeCandidate(pkg, 1, "opaque:wallet", 1100, visualVersion = 1))
+        assertEquals(key, session.observeCandidate(pkg, 1, "opaque:wallet", 2000, visualVersion = 2))
+        session.markHandled(key)
+        assertNull(session.observeCandidate(pkg, 1, "opaque:wallet", 2100, visualVersion = 2))
+    }
+
+    @Test fun `handled node receipt cannot revert to unverified image capture on a later sample`() {
+        val session = PaymentScreenSession()
+        val key = session.observe(pkg, 1, payment, 1000)!!
+        session.markHandled(key)
+        assertNull(session.observeCandidate(pkg, 1, "image-only", 2000, visualVersion = 2))
+        assertEquals(payment, session.evidence(key))
+    }
+
     @Test fun `redraws reuse identity and handled result is not submitted again`() {
         val session = PaymentScreenSession()
         val key = session.observe(pkg, 1, payment, 1000)!!

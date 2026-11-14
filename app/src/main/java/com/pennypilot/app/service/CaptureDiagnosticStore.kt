@@ -1,6 +1,7 @@
 package com.pennypilot.app.service
 
 import android.os.SystemClock
+import com.pennypilot.app.data.parser.PaymentSceneAdapters
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -44,6 +45,11 @@ object CaptureDiagnosticStore {
     @Synchronized fun record(packageName: String, snapshot: PaymentScreenReader.Snapshot,
         windowId: Int, eventType: Int, className: String?, paymentCandidate: Boolean) {
         if (read()["state"] != "waiting") return
+        // Qualification is independent of successful amount parsing so new app layouts can be diagnosed.
+        val qualified = paymentCandidate || snapshot.text?.let {
+            PaymentSceneAdapters.match(packageName, it, className, snapshot.structure) != null
+        } == true
+        val includeNodes = qualified && snapshot.status == "ready" && !snapshot.hasInput && snapshot.structure != null
         val payload = buildJsonObject {
             put("format", "pennypilot-payment-sample-v1")
             put("packageName", packageName)
@@ -54,8 +60,8 @@ object CaptureDiagnosticStore {
             put("paymentCandidate", paymentCandidate)
             putJsonObject("counts") { snapshot.diagnostics.forEach { (key, value) -> put(key, value) } }
             // Even with diagnostic consent, never preserve raw chat, inputs or partial trees.
-            if (paymentCandidate && snapshot.status == "ready" && snapshot.structure != null) {
-                put("nodes", JsonArray(snapshot.structure.nodes.map { node ->
+            if (includeNodes) {
+                put("nodes", JsonArray(snapshot.structure!!.nodes.map { node ->
                     buildJsonObject {
                         put("id", node.id)
                         node.parentId?.let { put("parentId", it) }
@@ -73,7 +79,7 @@ object CaptureDiagnosticStore {
         // Keep valid JSON with the reason/counters when a complex tree exceeds the export budget.
         sample = if (encoded.toByteArray(Charsets.UTF_8).size <= MAX_BYTES) encoded else
             JsonObject(payload.filterKeys { it != "nodes" } + ("nodesOmitted" to JsonPrimitive("size_limit"))).toString()
-        completed = paymentCandidate && snapshot.status == "ready"
+        completed = qualified && (snapshot.status == "ready" || snapshot.isBoundedOpaqueTree)
     }
 
     private fun redact(text: String): String = text

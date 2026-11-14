@@ -201,8 +201,8 @@ void main() {
   for (final scenario in [
     (
       'input_page',
-      '已跳过含输入框的页面',
-      '页面包含可见输入框，为避免误读聊天或待支付内容已跳过。请在本次支付完成页停留约 5 秒后再查看诊断；仍无法识别时可手动或语音补记。',
+      '未找到独立的只读凭证区域',
+      '当前页面包含输入区域，且没有找到可独立读取的支付凭证。请打开支付完成页或单笔账单详情。',
     ),
     (
       'password_page',
@@ -232,7 +232,7 @@ void main() {
     (
       'visual_required',
       '此页面需要截图识别',
-      '微信未提供可读取的文字。可以在“识别与自动录入”开启云端支付截图识别或本地支付截图补充，再打开这张成功页。',
+      '当前凭证没有足够的可读文字。可在“识别与自动录入”开启云端支付截图识别，再打开这张凭证。',
     ),
     (
       'visual_not_receipt',
@@ -336,7 +336,11 @@ void main() {
       }),
       '检查 1 个节点 · 可读文字 0 处',
     );
-    expect(screenReadDiagnosticsSummary({'visualOcrTimeout': 1}), '本次截图识别超时');
+    expect(screenReadDiagnosticsSummary({'visualOcrTimeout': 1}), isNull);
+    expect(
+      screenReadDiagnosticsSummary({'visualScreenshotErrorCode': 6}),
+      '系统保护此窗口，无法截图',
+    );
   });
 
   for (final outcome in [('saved', '已保存识别结果'), ('not_receipt', '未识别到完整支付凭证')]) {
@@ -383,7 +387,7 @@ void main() {
       final previous = tester.widget<SettingsRow>(
         find.byKey(const ValueKey('screen-read-history-1')),
       );
-      expect(newest.title, '已跳过含输入框的页面');
+      expect(newest.title, '未找到独立的只读凭证区域');
       expect(
         newest.subtitle,
         '2026年10月24日 10:00:15 · 微信 · 检查 10 个节点 · 输入框 1 处',

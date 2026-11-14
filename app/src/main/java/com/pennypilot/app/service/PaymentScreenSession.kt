@@ -12,6 +12,8 @@ class PaymentScreenSession {
         var handledReceipt: NotificationParseResult? = null,
         var candidateText: String? = null,
         var handledCandidate: String? = null,
+        var candidateVisualVersion: Long? = null,
+        var handledVisualVersion: Long? = null,
         var absentSince: Long? = null,
         var boundary: Boolean = false
     )
@@ -36,6 +38,8 @@ class PaymentScreenSession {
         entry.handledReceipt = null
         entry.candidateText = null
         entry.handledCandidate = null
+        entry.candidateVisualVersion = null
+        entry.handledVisualVersion = null
         entry.absentSince = null
         entry.boundary = false
     }
@@ -69,16 +73,19 @@ class PaymentScreenSession {
     }
 
     /** A completed but unknown layout gets an identity before its async model result exists. */
-    fun observeCandidate(packageName: String, windowId: Int, text: String, now: Long): String? {
+    fun observeCandidate(packageName: String, windowId: Int, text: String, now: Long,
+        visualVersion: Long? = null): String? {
         val entry = entry(packageName, windowId, now)
         if (entry.key == null || entry.boundary || entry.absentSince?.let { now - it >= ABSENCE_MS } == true) {
             newPayment(entry, packageName)
         }
         entry.absentSince = null
         entry.candidateText = text
+        entry.candidateVisualVersion = visualVersion
         // Once rules have safely recognized this payment, a less complete redraw adds no value.
         if (entry.handledReceipt != null) return null
-        return entry.key?.takeIf { entry.handledCandidate != text }
+        return entry.key?.takeIf { entry.handledCandidate != text ||
+            visualVersion != null && entry.handledVisualVersion != visualVersion }
     }
 
     /** Explicit input is a real navigation boundary, even for two fast identical transfers. */
@@ -95,6 +102,7 @@ class PaymentScreenSession {
         windows.values.firstOrNull { it.key == eventKey }?.apply {
             handledReceipt = receipt
             handledCandidate = candidateText
+            handledVisualVersion = candidateVisualVersion
         }
     }
 
