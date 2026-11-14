@@ -13,6 +13,11 @@ object WalletReceiptDetailsParser {
     private val date = "[0-9]{4}[-/年][0-9]{1,2}[-/月][0-9]{1,2}日?\\s+[0-9]{1,2}[:点][0-9]{2}(?:[:分][0-9]{2}秒?|分?)"
     private val signedMoney = Regex("^(?:[¥￥]\\s*)?([-+−]?)\\s*([0-9]+(?:,[0-9]{3})*\\.[0-9]{2})\\s*(?:元)?$")
     private val paymentTimes = setOf("交易时间", "支付时间", "付款时间", "收款时间", "到账时间", "完成时间", "转账时间")
+    private const val creationTimeLabel = "创建时间"
+    private val paymentTimeField = Regex("(?:^|[\\n，,；;])\\s*(?:${paymentTimes.joinToString("|")})(?=[:：\\s0-9]|$)")
+    private val alipayHeaderName = Regex("""^[^\n：:¥￥]{1,60}$""")
+    private val alipayHeaderControls = setOf("支付宝", "返回", "关闭", "更多", "完成", "账单管理", "账单分类", "积分奖励",
+        "标签和备注", "AA收款", "查看往来记录", "交易成功", "支付成功", "付款成功", "收款方", "商户名称")
     private val refundTimes = setOf("退款到账时间", "退款成功时间", "退款完成时间", "退款时间", "到账时间")
     private val directionLabels = setOf("收支类型", "资金方向")
     private val directionLabel = Regex("(?:^|\\n)(?:${directionLabels.joinToString("|")})\\s*[:：]?\\s*(收入|支出)(?=\\s|$)")
@@ -34,9 +39,12 @@ object WalletReceiptDetailsParser {
 
     /** A visible receipt time is optional for notifications, but required to recover a detail page. */
     internal fun completedTime(facts: String, refund: Boolean, observedAt: Long,
-        zone: ZoneId = ZoneId.systemDefault(), allowHistorical: Boolean = false): CompletedTime? {
-        val labels = (if (refund) refundTimes else paymentTimes).joinToString("|")
-        val matches = Regex("(?:^|[\\n，,；;])\\s*($labels)\\s*[:：]?\\s*($date)(?=[ \\t]*(?:[\\n，,；;。！!]|$))")
+        zone: ZoneId = ZoneId.systemDefault(), allowHistorical: Boolean = false): CompletedTime? =
+        readTime(facts, if (refund) refundTimes else paymentTimes, observedAt, zone, allowHistorical)
+
+    private fun readTime(facts: String, labels: Set<String>, observedAt: Long, zone: ZoneId,
+        allowHistorical: Boolean): CompletedTime? {
+        val matches = Regex("(?:^|[\\n，,；;])\\s*(${labels.joinToString("|")})\\s*[:：]?\\s*($date)(?=[ \\t]*(?:[\\n，,；;。！!]|$))")
             .findAll(facts).toList()
         val rawTime = matches.map { it.groupValues[2].replace(Regex("\\s+"), " ") }.distinct().singleOrNull()
             ?: return null
@@ -77,9 +85,15 @@ object WalletReceiptDetailsParser {
         val lines = facts.lines().map(String::trim).filter(String::isNotEmpty)
         val titleIndex = lines.take(6).indexOfFirst { it in titles }
         if (titleIndex < 0 || lines.count { it in titles } != 1) return null
+        val alipayMerchantHeader = if (packageName == "com.eg.android.AlipayGphone" && lines[titleIndex] == "账单详情")
+            alipayMerchantHeader(lines.drop(titleIndex + 1).take(6)) else null
         // Bind only values already present outside descriptions in this receipt. A WebView can
         // expose the value before its label, so traversal order alone is insufficient.
-        val fieldLabels = paymentTimes + refundTimes + directionLabels + statusLabels
+        val allowCreationTime = alipayMerchantHeader != null ||
+            WalletPaymentPageAdapter.allowsCreationTimeFallback(packageName, text)
+        val fieldLabels = (paymentTimes + refundTimes + directionLabels + statusLabels).let {
+            if (allowCreationTime) it + creationTimeLabel else it
+        }
         val factLines = lines.toSet()
         val rows = structure?.labelledTextFields(fieldLabels).orEmpty().filterKeys { label ->
             "$label：" in factLines || "$label:" in factLines || label in factLines
@@ -107,10 +121,18 @@ object WalletReceiptDetailsParser {
         val refund = (lines + completionTitles).any { completedRefund.matches(it.trimEnd('。', '!', '！')) }
         if (lines[titleIndex] == "退款详情" && !refund) return null
         val allFacts = (lines + structuredFields).joinToString("\n")
-        val time = completedTime(allFacts, refund, now, zone, allowHistorical = true) ?: return null
+        val completionTime = completedTime(allFacts, refund, now, zone, allowHistorical = true)
+        // Some completed wallet bills only display when the order was created.
+        // Keep that lower-confidence timestamp distinct from actual payment time.
+        val creationTime = if (completionTime == null && !refund && allowCreationTime &&
+            !paymentTimeField.containsMatchIn(allFacts))
+            readTime(allFacts, setOf(creationTimeLabel), now, zone, allowHistorical = true) else null
+        val time = completionTime ?: creationTime ?: return null
         if (!selectedImage && !refund) PaymentTextParser.parseAccountMovement(packageName, text, structure)?.let { transfer ->
+            if (creationTime != null && (packageName != "com.jd.jrapp" || transfer.details.transferToAccount != "京东白条"))
+                return null
             if (requireIdentity && transfer.orderId == null) return null
-            return transfer.copy(occurredAt = time.occurredAt,
+            return transfer.copy(occurredAt = time.occurredAt, occurredAtIsCreationTime = creationTime != null,
                 fieldEvidence = transfer.fieldEvidence + buildMap {
                     put("occurredAt", "$source·${time.evidence}")
                     if (transfer.orderId == null) put("reviewRequired", "凭证未提供可靠订单标识")
@@ -157,6 +179,8 @@ object WalletReceiptDetailsParser {
         val parsed = (if (selectedImage) PaymentTextParser.analyzeSelectedReceipt(receiptText)
             else PaymentTextParser.analyzeScreen(packageName, receiptText, structure).parsed) ?: return null
         if (requireIdentity && (parsed.orderId == null || refund && parsed.orderIdKind == null)) return null
+        if (creationTime != null && (parsed.scene != "merchant_payment" ||
+                parsed.orderId == null && packageName != "com.jd.jrapp")) return null
         if (refund != (parsed.scene in setOf("refund_received", "red_packet_returned"))) return null
         if (headlineDirection != null && headlineDirection != parsed.direction) return null
         if (explicitDirection != null && (explicitDirection == "收入") != (parsed.direction == "INCOME")) return null
@@ -164,9 +188,12 @@ object WalletReceiptDetailsParser {
                 parsed.direction == "EXPENSE" && amountLabels.any(incomeAmounts::contains))) return null
         // Financial parsing intentionally excludes free-form descriptions. Restore only their
         // descriptive fields after the receipt's time, amount and identity have been validated.
-        return PaymentTextParser.withReceiptDetails(packageName, text, parsed, structure, source)
+        val header = alipayMerchantHeader?.takeIf { parsed.orderId != null && parsed.scene == "merchant_payment" }
+        val receipt = PaymentTextParser.withReceiptDetails(packageName, text, parsed, structure, source, header)
+        return receipt
             .copy(occurredAt = time.occurredAt, ruleVersion = "app-receipt-details-2026-11-14.1",
-            fieldEvidence = parsed.fieldEvidence + buildMap {
+            occurredAtIsCreationTime = creationTime != null,
+            fieldEvidence = receipt.fieldEvidence + buildMap {
                 put("occurredAt", "$source·${time.evidence}")
                 if (parsed.orderId == null) put("reviewRequired", "凭证未提供可靠订单标识")
                 originalMoney?.let { put("amount", "$source·带方向的凭证金额：$it") }
@@ -174,6 +201,12 @@ object WalletReceiptDetailsParser {
                 statuses.firstOrNull()?.let { (label, value) -> put("paymentStatus", "$source·$label：$value") }
             })
     }
+
+    private fun alipayMerchantHeader(lines: List<String>): String? = lines.windowed(3).mapNotNull { (name, amount, state) ->
+        val outgoing = signedMoney.matchEntire(amount)?.groupValues?.get(1) in setOf("-", "−")
+        name.takeIf { outgoing && state.trimEnd('。', '!', '！') == "交易成功" &&
+            alipayHeaderName.matches(it) && it.any(Char::isLetter) && it !in alipayHeaderControls && it !in selectedTitles }
+    }.singleOrNull()
 
     private fun signMatchesDirection(sign: String, incoming: Boolean): Boolean =
         sign.isEmpty() || if (incoming) sign == "+" else sign in setOf("-", "−")

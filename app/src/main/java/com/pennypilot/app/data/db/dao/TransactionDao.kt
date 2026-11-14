@@ -39,6 +39,15 @@ interface TransactionDao {
     @Query("SELECT * FROM capture_events WHERE observed_at BETWEEN :start AND :end AND amount = :amount ORDER BY observed_at DESC")
     suspend fun captureEvidenceNear(start: Long, end: Long, amount: Long): List<CaptureEvidenceEntity>
 
+    @Query("""SELECT e.* FROM transactions t JOIN capture_events e ON e.transaction_id = t.id
+        WHERE t.occurred_at BETWEEN :start AND :end AND e.amount = :amount
+        AND e.package_name = :packageName AND e.source = 'ACCESSIBILITY'""")
+    suspend fun pageEvidenceNearTransactionTime(packageName: String, start: Long, end: Long, amount: Long): List<CaptureEvidenceEntity>
+
+    @Query("""SELECT e.* FROM transactions t JOIN capture_events e ON e.transaction_id = t.id
+        WHERE t.duplicate_of = :id AND e.source = 'ACCESSIBILITY' AND e.order_id IS NOT NULL""")
+    suspend fun linkedPageOrders(id: Long): List<CaptureEvidenceEntity>
+
     @Query("SELECT * FROM transactions WHERE source IN ('MANUAL', 'AI_TEXT', 'AI_VOICE', 'AI_IMAGE', 'BILL_IMPORT') AND status != 'IGNORED' AND occurred_at BETWEEN :start AND :end AND amount = :amount AND type = :type ORDER BY occurred_at DESC, id DESC")
     suspend fun nonCapturedTransactionsNear(start: Long, end: Long, amount: Long, type: TxType): List<TransactionEntity>
 

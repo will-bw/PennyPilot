@@ -7,11 +7,12 @@ internal object PaymentPageNormalizer {
     private val meituan = setOf("com.sankuai.meituan", "com.sankuai.meituan.takeoutnew", "com.dianping.v1")
     private const val DECIMAL = "[0-9]+(?:,[0-9]{3})*(?:\\.[0-9]{1,2})?"
 
-    fun normalize(packageName: String, text: String): Result {
-        val changes = mutableListOf<String>()
+    fun normalize(packageName: String, text: String, activityName: String? = null): Result {
+        val wallet = WalletPaymentPageAdapter.normalize(packageName, text, activityName)
+        val changes = wallet.evidence.toMutableList()
         // Descriptions retain their original wording and can never establish a financial fact.
-        val factLines = PaymentTextParser.receiptFacts(text).lines().map(String::trim).toSet()
-        val original = text.lines().map(String::trim)
+        val factLines = PaymentTextParser.receiptFacts(wallet.text).lines().map(String::trim).toSet()
+        val original = wallet.text.lines().map(String::trim)
         val hasDetail = original.any { it in setOf("账单详情", "交易详情", "余额明细详情", "账单管理") }
         val lines = original.flatMap { line ->
             if (line !in factLines) return@flatMap listOf(line)

@@ -28,12 +28,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.time.Instant
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class CapturePersistenceTest {
     private lateinit var db: AppDatabase
     private val time = 1_790_000_000_000L
+    private val alipay = "com.eg.android.AlipayGphone"
 
     @Before fun setUp() {
         db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext(), AppDatabase::class.java).build()
@@ -158,6 +160,120 @@ class CapturePersistenceTest {
         }
     }
 
+    @Test fun `confirmed shopping page and its explicitly matching wallet receipt only count once`() = runTest {
+        for ((index, pageFirst) in listOf(true, false).withIndex()) {
+            val at = time + index * 600_000
+            val merchant = "样例家电店"
+            val shop = evidence("jd-page-$index", "com.jingdong.app.mall", at,
+                orderId = "JD202611140000$index").copy(metadataJson = paymentMetadata(merchant, "支付宝"))
+            val wallet = evidence("ali-notice-$index", "com.eg.android.AlipayGphone", at + 2_000,
+                orderId = "AL202611140000$index").copy(metadataJson = paymentMetadata(merchant))
+            val page = shop to tx(TxSource.ACCESSIBILITY, merchant).copy(occurredAt = at, status = TxStatus.CONFIRMED)
+            val notice = wallet to tx(TxSource.NOTIFICATION, merchant).copy(occurredAt = at + 2_000, status = TxStatus.CONFIRMED)
+            val inputs = if (pageFirst) listOf(page, notice) else listOf(notice, page)
+            val results = inputs.map { (proof, row) -> capture(proof, row) as CaptureResult.Inserted }
+            assertEquals(results.first().transactionId, results.last().duplicateOf)
+            assertEquals(TxStatus.PENDING, db.transactionDao().getById(results.last().transactionId)?.status)
+            assertEquals(1800L, db.transactionDao().observeMonthExpense(at - 1, at + 10_000).first())
+        }
+    }
+
+    @Test fun `historical shopping receipt opened during a fresh wallet payment is not a cross app match`() = runTest {
+        val shoppingTime = Instant.ofEpochMilli(time - 86_400_000).toString()
+        val shoppingMetadata = paymentMetadata("样例食品店", "支付宝").dropLast(1) +
+            ""","transactionTimeSource":"receipt","receiptOccurredAt":"$shoppingTime"}"""
+        capture(evidence("old-ele-bill", "me.ele", time, orderId = "ELE202611130001").copy(metadataJson = shoppingMetadata),
+            tx(TxSource.ACCESSIBILITY, null).copy(occurredAt = time - 86_400_000))
+        val live = capture(evidence("live-notice", "com.eg.android.AlipayGphone", time + 1000)
+            .copy(metadataJson = paymentMetadata("饿了么")), tx(merchant = null)) as CaptureResult.Inserted
+        assertNull(live.duplicateOf)
+    }
+
+    private fun alipayNotice(event: String, at: Long) = evidence(event, alipay, at,
+        notificationKey = "$event:issued:$at", text = "交易提醒\n你有一笔15.80元的支出，点击领3元电费红包。")
+        .copy(metadataJson = """{"paymentStatus":"COMPLETED","scene":"merchant_payment","transactionTimeSource":"observed","fieldEvidence":{"paymentStatus":"通知·交易动账语句：你有一笔15.80元的支出"}}""")
+
+    private fun alipayPage(event: String, at: Long, receiptTime: Long? = null, orderId: String? = null,
+        timeSource: String = if (receiptTime == null) "observed" else "receipt") =
+        evidence(event, alipay, at, notificationKey = null, text = "支付成功\n实付15.80元", orderId = orderId)
+            .copy(metadataJson = buildJsonObject {
+                put("paymentStatus", "COMPLETED")
+                put("scene", "merchant_payment")
+                put("transactionTimeSource", timeSource)
+                receiptTime?.let { put("receiptOccurredAt", Instant.ofEpochMilli(it).toString()) }
+            }.toString())
+
+    private fun alipayExpense(source: TxSource, at: Long) = tx(source, if (source == TxSource.NOTIFICATION) null else "示例外卖")
+        .copy(amount = 1580, occurredAt = at, status = TxStatus.CONFIRMED, businessKind = "expense")
+
+    @Test fun `alipay amount only notification and result page stay one confirmed expense in either order`() = runTest {
+        listOf(false, true).forEachIndexed { index, noticeFirst ->
+            val at = time + index * 600_000
+            val notice = alipayNotice("notice-$index", at + 2_000) to alipayExpense(TxSource.NOTIFICATION, at + 2_000)
+            val page = alipayPage("result-$index", at) to alipayExpense(TxSource.ACCESSIBILITY, at)
+            val pair = if (noticeFirst) listOf(notice, page) else listOf(page, notice)
+            val results = pair.map { (proof, row) -> capture(proof, row) as CaptureResult.Inserted }
+            val original = db.transactionDao().getById(results.first().transactionId)!!
+            val review = db.transactionDao().getById(results.last().transactionId)!!
+            assertEquals(TxStatus.CONFIRMED, original.status)
+            assertEquals(TxStatus.PENDING, review.status)
+            assertEquals(original.id, review.duplicateOf)
+
+            val detail = alipayPage("bill-$index", at + 180_000, at, "AP20261114000$index")
+            val detailReview = capture(detail, alipayExpense(TxSource.ACCESSIBILITY, at)) as CaptureResult.Inserted
+            assertEquals(original.id, detailReview.duplicateOf)
+            assertEquals(TxStatus.PENDING, db.transactionDao().getById(detailReview.transactionId)!!.status)
+            assertEquals(CaptureResult.Duplicate(detailReview.transactionId), capture(detail.copy(eventKey = "bill-replay-$index"),
+                alipayExpense(TxSource.ACCESSIBILITY, at)))
+        }
+        assertEquals(3160L, db.transactionDao().observeMonthExpense(time - 1, time + 610_000).first())
+    }
+
+    @Test fun `alipay delayed receipt compares completed transaction time and preserves distinct orders`() = runTest {
+        val first = capture(alipayNotice("notice", time), alipayExpense(TxSource.NOTIFICATION, time)) as CaptureResult.Inserted
+        val detail = alipayPage("bill", time + 180_000, time - 5_000, "AP202611140001")
+        val detailRow = alipayExpense(TxSource.ACCESSIBILITY, time - 5_000)
+        val review = capture(detail, detailRow) as CaptureResult.Inserted
+        assertEquals(first.transactionId, review.duplicateOf)
+        val distinct = capture(detail.copy(eventKey = "other-bill", orderId = "AP202611140002"), detailRow) as CaptureResult.Inserted
+        assertNull(distinct.duplicateOf)
+        assertEquals(TxStatus.CONFIRMED, db.transactionDao().getById(distinct.transactionId)!!.status)
+        assertEquals(3160L, db.transactionDao().observeMonthExpense(time - 6_000, time + 1).first())
+    }
+
+    @Test fun `alipay amount only dedupe excludes unrelated observations creation time and non purchase scenes`() = runTest {
+        val cases = listOf("elapsed", "created", "nonpurchase", "two notices", "other app", "no exact timestamp", "different amount", "generic notice")
+        for ((index, reason) in cases.withIndex()) {
+            val at = time + index * 300_000
+            val notice = alipayNotice("notice-$index", at)
+            capture(if (reason == "generic notice") notice.copy(metadataJson = notice.metadataJson!!.replace("通知·交易动账语句：你有一笔", "通知·支付成功")) else notice,
+                alipayExpense(TxSource.NOTIFICATION, at))
+            val page = alipayPage("page-$index", at + 2_000)
+            val proof = when (reason) {
+                "elapsed" -> page.copy(observedAt = at + 30_001)
+                "created" -> alipayPage(page.eventKey, at + 3_000, at, "AP202611140001", "receipt_created")
+                "nonpurchase" -> page.copy(metadataJson = page.metadataJson!!.replace("merchant_payment", "transfer_sent"))
+                "two notices" -> alipayNotice(page.eventKey, at + 1_000).copy(notificationKey = "other-notice")
+                "other app" -> page.copy(packageName = "com.tencent.mm")
+                "no exact timestamp" -> page.copy(metadataJson = page.metadataJson!!.replace("observed", "receipt"))
+                else -> page
+            }
+            val row = alipayExpense(if (reason == "two notices") TxSource.NOTIFICATION else TxSource.ACCESSIBILITY, at)
+                .let { if (reason == "different amount") it.copy(amount = 1581) else it }
+            assertNull(reason, (capture(proof, row) as CaptureResult.Inserted).duplicateOf)
+        }
+    }
+
+    @Test fun `alipay weak association never picks arbitrarily among distinct same value purchases`() = runTest {
+        repeat(2) { index ->
+            val page = alipayPage("page-$index", time, time, "AP20261114000$index")
+            assertNull((capture(page, alipayExpense(TxSource.ACCESSIBILITY, time)) as CaptureResult.Inserted).duplicateOf)
+        }
+        val notice = capture(alipayNotice("notice", time + 1_000), alipayExpense(TxSource.NOTIFICATION, time + 1_000))
+            as CaptureResult.Inserted
+        assertNull(notice.duplicateOf)
+    }
+
     @Test fun `same order from another channel fills missing facts without semantic replacement`() = runTest {
         val original = tx(merchant = " ").copy(accountTag = "", note = " ", businessKind = "transfer",
             metadataJson = """{"fieldEvidence":{"amount":"通知·实付18元","merchant":""}}""")
@@ -225,6 +341,34 @@ class CapturePersistenceTest {
         val replayed = db.transactionDao().getById(first.transactionId)!!
         assertEquals(receiptTime, replayed.occurredAt)
         assertEquals(metadata["transactionTimeSource"], (Json.parseToJsonElement(replayed.metadataJson!!) as JsonObject)["transactionTimeSource"])
+    }
+
+    @Test fun `creation time is only an approximate fallback until verified completion updates the same order`() = runTest {
+        val original = tx().copy(metadataJson = """{"transactionTimeSource":"observed","timePrecision":"unspecified"}""")
+        val first = capture(evidence(orderId = "ORDER202611060019"), original) as CaptureResult.Inserted
+        val created = original.copy(source = TxSource.ACCESSIBILITY, occurredAt = time - 60_000,
+            metadataJson = """{"transactionTimeSource":"receipt_created","timePrecision":"approximate","fieldEvidence":{"occurredAt":"页面·创建时间"}}""")
+        val exact = created.copy(occurredAt = time - 2_000, status = TxStatus.CONFIRMED,
+            metadataJson = """{"transactionTimeSource":"receipt","timePrecision":"exact","fieldEvidence":{"occurredAt":"页面·支付时间"}}""")
+        val page = evidence(event = "created", notificationKey = null, orderId = "ORDER202611060019")
+
+        assertEquals(CaptureResult.Enriched(first.transactionId), capture(page, created))
+        val approximate = db.transactionDao().getById(first.transactionId)!!
+        assertEquals(created.occurredAt, approximate.occurredAt)
+        assertEquals(TxStatus.PENDING, approximate.status)
+        assertEquals(JsonPrimitive("receipt_created"),
+            (Json.parseToJsonElement(approximate.metadataJson!!) as JsonObject)["transactionTimeSource"])
+
+        assertEquals(CaptureResult.Enriched(first.transactionId), capture(page.copy(eventKey = "exact"), exact))
+        val enriched = db.transactionDao().getById(first.transactionId)!!
+        assertEquals(exact.occurredAt, enriched.occurredAt)
+        assertEquals(TxStatus.PENDING, enriched.status)
+        assertEquals(JsonPrimitive("exact"), (Json.parseToJsonElement(enriched.metadataJson!!) as JsonObject)["timePrecision"])
+        assertEquals(CaptureResult.Duplicate(first.transactionId), capture(page, created))
+        val repeat = page.copy(eventKey = "exact-replay")
+        assertEquals(CaptureResult.Duplicate(first.transactionId), CapturePersistence.capture(db,
+            LedgerRevision.current, exact, repeat, enrichSemantics = true))
+        assertEquals(enriched, db.transactionDao().getById(first.transactionId))
     }
 
     @Test fun `receipt does not guess the time source of legacy records`() = runTest {

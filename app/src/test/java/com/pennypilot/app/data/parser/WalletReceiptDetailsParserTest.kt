@@ -37,6 +37,39 @@ class WalletReceiptDetailsParserTest {
         assertNull(parse(text.replace("-18.00", "-1,80.00")))
     }
 
+    @Test fun `completed alipay expense with signed bill header preserves merchant and creation time separately`() {
+        // Layout from Alipay's single-bill help example, with synthetic values.
+        val text = "账单详情\n返回\n饿了么\n-20.70\n交易成功\n付款方式\n花呗\n商品说明\n示例外卖订单" +
+            "\n账单分类\n消费-饮食\n积分奖励\n1积分\n创建时间\n2026-10-24 16:58" +
+            "\n订单号\n20261024000012345678\n商户订单号\n20261024000087654321\n标签和备注\n添加\nAA收款"
+        val result = parse(text)!!
+        assertEquals(2070L, result.amountCents)
+        assertEquals("EXPENSE", result.direction)
+        assertEquals("20261024000087654321", result.orderId)
+        assertEquals("饿了么", result.merchant)
+        assertEquals("饿了么", result.details.merchantName)
+        assertEquals("页面·账单抬头：饿了么", result.fieldEvidence["merchant"])
+        assertEquals("花呗", result.details.fundingAccount)
+        assertEquals("示例外卖订单", result.details.productDescription)
+        assertEquals(now - 120_000, result.occurredAt)
+        assertTrue(result.occurredAtIsCreationTime)
+        assertEquals("页面·创建时间：2026-10-24 16:58", result.fieldEvidence["occurredAt"])
+
+        val paid = parse("$text\n支付时间：2026-10-24 16:58:30")!!
+        assertEquals(now - 90_000, paid.occurredAt)
+        assertFalse(paid.occurredAtIsCreationTime)
+        assertEquals("商户实付名", parse("$text\n商户名称：商户实付名")!!.merchant)
+        assertNull(parse("$text\n商户名称：名称一\n商户名称：名称二")!!.merchant)
+        assertNull(parse(text, "com.unionpay"))
+        for (invalid in listOf(text.replace("交易成功", "交易处理中"),
+                text.replace("-20.70", "+20.70"), text.replace("饿了么", "返回"),
+                text.substringBefore("\n订单号"), text.replace("16:58", "17:01"),
+                "$text\n支付时间：无效", "$text\n创建时间：2026-10-24 16:59",
+                "$text\n支付时间：2026-10-24 16:59\n付款时间：2026-10-24 16:58:30")) {
+            assertNull(invalid, parse(invalid))
+        }
+    }
+
     @Test fun `refund details require their own identity and settlement timestamp not original payment time`() {
         val text = "退款详情\n退款已到账\n退款金额5元\n原支付金额30元\n退款到账时间：2026-10-24 16:58:30\n退款单号RF202610240123\n交易单号PAY202610240123"
         for (pkg in listOf("com.tencent.mm", "com.eg.android.AlipayGphone", "com.unionpay")) {

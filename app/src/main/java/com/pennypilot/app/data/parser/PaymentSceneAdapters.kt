@@ -25,6 +25,9 @@ object PaymentSceneAdapters {
         "com.tencent.mm.plugin.luckymoney.ui.LuckyMoneyNewDetailUI"
     ))
 
+    private fun normalizePage(packageName: String, text: String, activityName: String? = null): PaymentPageNormalizer.Result =
+        CommercePaymentPages.normalize(packageName, PaymentPageNormalizer.normalize(packageName, text, activityName), activityName)
+
     fun detailTitles(packageName: String): Set<String> = when (PaymentAppRegistry.profile(packageName)?.family) {
         PaymentAppRegistry.Family.WALLET -> walletDetails
         PaymentAppRegistry.Family.SHOPPING, PaymentAppRegistry.Family.VIDEO_SHOPPING -> shoppingDetails
@@ -33,10 +36,11 @@ object PaymentSceneAdapters {
     }
 
     /** A detail heading keeps its time/identity requirements even when parsing fails. */
-    fun isDetailPage(packageName: String, text: String): Boolean {
+    fun isDetailPage(packageName: String, text: String, activityName: String? = null): Boolean {
         if (PaymentAppRegistry.profile(packageName) == null) return false
+        if (WalletPaymentPageAdapter.isDedicatedDetailActivity(packageName, activityName)) return true
         if (packageName == "com.tencent.mm" && WechatTransferReceiptAdapter.isReceived(text)) return true
-        val facts = PaymentTextParser.receiptFacts(PaymentPageNormalizer.normalize(packageName, text).text)
+        val facts = PaymentTextParser.receiptFacts(normalizePage(packageName, text, activityName).text)
         // This is a fallback guard, not a template eligibility check: a later detail heading
         // must not turn a failed historical receipt into a newly observed payment.
         return facts.lineSequence().map(String::trim).filter(String::isNotBlank)
@@ -46,14 +50,15 @@ object PaymentSceneAdapters {
     fun match(packageName: String, text: String, activityName: String? = null,
         structure: PaymentScreenStructure? = null): Match? {
         val profile = PaymentAppRegistry.profile(packageName) ?: return null
-        if (text.length > 12_000 || unrelated.containsMatchIn(text)) return null
+        if (text.length > 12_000 || unrelated.containsMatchIn(text) ||
+            CommercePaymentPages.blocksReceipt(packageName, text)) return null
         if (packageName == "com.tencent.mm" && WechatTransferReceiptAdapter.isSent(text))
             return Match("微信:本人转账完成", Kind.RESULT)
         if (packageName == "com.tencent.mm" && WechatTransferReceiptAdapter.isSentResultWithoutAmount(text))
             return Match("微信:本人转账待补金额", Kind.PARTIAL_RESULT)
         if (packageName == "com.tencent.mm" && WechatTransferReceiptAdapter.isReceived(text))
             return Match("微信:本人收款详情", Kind.DETAIL)
-        val facts = PaymentTextParser.receiptFacts(PaymentPageNormalizer.normalize(packageName, text).text)
+        val facts = PaymentTextParser.receiptFacts(normalizePage(packageName, text, activityName).text)
         val outgoingTransfer = facts.lines().any { Regex("^(?:转账(?:已)?成功|转账(?:已)?完成|已转账)[！!。]?$").matches(it.trim()) }
         val gateFacts = if (outgoingTransfer) facts.replace(Regex("(?:待|等待)对方(?:确认)?收款|对方(?:待|未|尚未)收款"), "") else facts
         if (failure.containsMatchIn(gateFacts) || inputPage.containsMatchIn(gateFacts)) return null
@@ -65,6 +70,7 @@ object PaymentSceneAdapters {
             (structure?.labelledAmounts()?.size ?: 0)
         if (detail != null && anchors >= 2)
             return Match("${profile.name}:$detail", Kind.DETAIL)
+        if (WalletPaymentPageAdapter.isDedicatedDetailActivity(packageName, activityName)) return null
         val result = lines.take(6).firstOrNull { title.matches(it) ||
             profile.family == PaymentAppRegistry.Family.WALLET && PaymentTextParser.accountMovementResult.matches(it) }
         if (result != null && (anchors > 0 || lines.any(money::matches) ||
@@ -80,8 +86,8 @@ object PaymentSceneAdapters {
         val page = match(packageName, text, activityName, structure) ?: return null
         if (page.kind == Kind.PARTIAL_RESULT) return null
         if (packageName == "com.tencent.mm") WechatTransferReceiptAdapter.parse(text, now, allowHistorical = true)?.let { return it }
-        val adapted = PaymentPageNormalizer.normalize(packageName, text)
-        return if (page.kind == Kind.DETAIL || isDetailPage(packageName, text))
+        val adapted = normalizePage(packageName, text, activityName)
+        return if (page.kind == Kind.DETAIL || isDetailPage(packageName, text, activityName))
             WalletReceiptDetailsParser.parseForReview(packageName, adapted.text, now, structure)
             else parse(packageName, text, now, structure, activityName)
     }
@@ -92,16 +98,24 @@ object PaymentSceneAdapters {
         val page = match(packageName, text, activityName, structure) ?: return null
         if (page.kind == Kind.PARTIAL_RESULT) return null
         if (packageName == "com.tencent.mm") WechatTransferReceiptAdapter.parse(text, now)?.let { return it }
-        val adapted = PaymentPageNormalizer.normalize(packageName, text)
+        val adapted = normalizePage(packageName, text, activityName)
         return when {
-            page.kind == Kind.DETAIL || isDetailPage(packageName, text) ->
+            page.kind == Kind.DETAIL || isDetailPage(packageName, text, activityName) ->
                 WalletReceiptDetailsParser.parse(packageName, adapted.text, now, structure)
+                    ?: if (WalletPaymentPageAdapter.supportsIdentitylessReview(packageName, adapted.text))
+                        WalletReceiptDetailsParser.parseForReview(packageName, adapted.text, now, structure)
+                    else null
             page.kind == Kind.RESULT -> PaymentTextParser.parseAccountMovement(packageName, adapted.text, structure)
                 ?: PaymentTextParser.analyzeScreen(packageName, adapted.text, structure).parsed
             else -> null
-        }?.let { parsed -> parsed.copy(fieldEvidence = parsed.fieldEvidence + buildMap {
-            put("page", "页面适配·${page.id}")
-            if (adapted.evidence.isNotEmpty()) put("pageMapping", "页面原文：${adapted.evidence.joinToString("；").take(600)}")
-        }) }
+        }?.let { result ->
+            val parsed = if (page.kind == Kind.RESULT && packageName == "com.tencent.mm")
+                WechatMerchantResult.enrich(adapted.text, result) else result
+            parsed.copy(fieldEvidence = parsed.fieldEvidence + buildMap {
+                put("page", "页面适配·${page.id}")
+                if (adapted.evidence.isNotEmpty())
+                    put("pageMapping", "页面原文：${adapted.evidence.joinToString("；").take(600)}")
+            })
+        }
     }
 }

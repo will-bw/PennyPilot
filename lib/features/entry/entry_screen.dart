@@ -656,6 +656,9 @@ class _StoredEvidence extends StatelessWidget {
         .where((question) => question.trim().isNotEmpty);
     final paymentStatus =
         metadata['paymentStatus'] ?? metadata['payment_status'];
+    final paymentStatusLabel = paymentStatus == 'AMOUNT_UNVERIFIED'
+        ? '实付金额待核对'
+        : paymentStatus ?? '请核对凭证';
     final details = metadata['receiptDetails'] is Map
         ? stringMap(metadata['receiptDetails'])
         : <String, dynamic>{};
@@ -727,7 +730,7 @@ class _StoredEvidence extends StatelessWidget {
               contentPadding: EdgeInsets.zero,
               title: Text(transaction.businessLabel),
               subtitle: Text(
-                '${transaction.source.label} · ${paymentStatus ?? '请核对凭证'}',
+                '${transaction.source.label} · $paymentStatusLabel',
               ),
             ),
             for (final question in questions)
@@ -736,12 +739,18 @@ class _StoredEvidence extends StatelessWidget {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text(
-                  const {
+                  {
                         'amount': '金额',
                         'type': '资金方向',
                         'direction': '资金方向',
                         'paymentStatus': '支付状态',
-                        'occurredAt': '交易时间',
+                        'checkoutAmountEstimate': '结账页应付金额',
+                        'reviewRequired': '待核对原因',
+                        'occurredAt':
+                            metadata['transactionTimeSource'] ==
+                                'receipt_created'
+                            ? '订单创建时间'
+                            : '交易时间',
                         'transferTime': '转账时间',
                         'merchant': '交易对方',
                         'refundId': '退款单号',

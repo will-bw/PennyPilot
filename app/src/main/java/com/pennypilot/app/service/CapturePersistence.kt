@@ -3,10 +3,12 @@ package com.pennypilot.app.service
 import androidx.room.withTransaction
 import com.pennypilot.app.data.db.AppDatabase
 import com.pennypilot.app.data.db.LedgerRevision
+import com.pennypilot.app.data.db.dao.TransactionDao
 import com.pennypilot.app.data.db.entity.TransactionEntity
 import com.pennypilot.app.data.db.entity.CaptureEvidenceEntity
 import com.pennypilot.app.data.recognition.CaptureSemanticResolver
 import com.pennypilot.app.data.parser.PaymentReceiptDetails
+import com.pennypilot.app.data.parser.PaymentAppRegistry
 import com.pennypilot.app.domain.model.TxSource
 import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
@@ -17,6 +19,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.encodeToString
+import java.time.Instant
 
 data class CaptureEvidence(
     val packageName: String,
@@ -32,7 +35,7 @@ data class CaptureEvidence(
 
 sealed interface CaptureResult {
     data class Inserted(val transactionId: Long, val duplicateOf: Long? = null) : CaptureResult
-    data class Duplicate(val transactionId: Long) : CaptureResult
+    data class Duplicate(val transactionId: Long, val replacedDraftId: Long? = null) : CaptureResult
     data class Enriched(val transactionId: Long) : CaptureResult
     data class Conflict(val transactionId: Long) : CaptureResult
     data object StaleRevision : CaptureResult
@@ -42,6 +45,9 @@ sealed interface CaptureResult {
 object CapturePersistence {
     internal const val NOTIFICATION_UPDATE_WINDOW_MS = 15_000L
     internal const val POSSIBLE_DUPLICATE_WINDOW_MS = 120_000L
+    private const val CHECKOUT_RECEIPT_WINDOW_MS = 30_000L
+    private const val ALIPAY = "com.eg.android.AlipayGphone"
+    private const val ALIPAY_RECEIPT_WINDOW_MS = 30_000L
 
     /**
      * 检查证据、保存别名及账目在同一事务执行，两个捕获服务并发时也只写入一次。
@@ -83,6 +89,33 @@ object CapturePersistence {
             }
         }
         dao.captureEvidenceByKey(evidence.eventKey)?.let { previous ->
+            val previousMetadata = metadata(previous.metadataJson)
+            if (previousMetadata?.get("checkoutAmountEstimate") == JsonPrimitive(true) &&
+                incoming.source == TxSource.ACCESSIBILITY && incoming.packageName == previous.packageName &&
+                incoming.type == previous.type && isCompletedPurchase(metadata(incoming.metadataJson)) &&
+                incoming.observedAt - previous.firstObservedAt in 0..CHECKOUT_RECEIPT_WINDOW_MS) {
+                val draft = dao.getById(previous.transactionId)
+                if (draft?.status == TxStatus.PENDING && canEnrich(draft)) {
+                    if (!isCurrent()) return@withTransaction CaptureResult.StaleEvidence
+                    val orderMatches = incoming.orderId?.let { dao.captureEvidenceByOrder(incoming.orderDomain, it) }.orEmpty()
+                    val existing = orderMatches.firstOrNull { sameFinancials(it, incoming) }
+                    if (existing != null) {
+                        dao.update(draft.copy(status = TxStatus.IGNORED, duplicateOf = existing.transactionId))
+                        dao.updateCaptureEvidence(incoming.copy(transactionId = existing.transactionId,
+                            firstObservedAt = previous.firstObservedAt))
+                        return@withTransaction CaptureResult.Duplicate(existing.transactionId, replacedDraftId = draft.id)
+                    }
+                    val conflict = orderMatches.firstOrNull { it.type == incoming.type && !sameFinancials(it, incoming) }
+                    val nearby = dao.captureEvidenceNear(incoming.observedAt - POSSIBLE_DUPLICATE_WINDOW_MS,
+                        incoming.observedAt + POSSIBLE_DUPLICATE_WINDOW_MS, incoming.amount)
+                    val duplicateOf = conflict?.transactionId ?: possiblePaymentDuplicate(dao, incoming, nearby)?.transactionId
+                    // A later independently read receipt replaces the unedited estimate atomically.
+                    dao.update(transaction.copy(id = draft.id, createdAt = draft.createdAt, captureEventKey = previous.eventKey,
+                        status = if (duplicateOf != null) TxStatus.PENDING else transaction.status, duplicateOf = duplicateOf))
+                    dao.updateCaptureEvidence(incoming.copy(transactionId = draft.id, firstObservedAt = previous.firstObservedAt))
+                    return@withTransaction CaptureResult.Enriched(draft.id)
+                }
+            }
             if (!sameFinancials(previous, incoming) || conflictingOrders(previous, incoming) ||
                 previous.orderId != null && incoming.orderId != null && previous.orderDomain != incoming.orderDomain) {
                 return@withTransaction CaptureResult.Conflict(previous.transactionId)
@@ -150,13 +183,11 @@ object CapturePersistence {
             }
             return@withTransaction CaptureResult.Duplicate(duplicate.transactionId)
         }
-        val possibleDuplicate = dao.captureEvidenceNear(
+        val nearby = dao.captureEvidenceNear(
             incoming.observedAt - POSSIBLE_DUPLICATE_WINDOW_MS,
             incoming.observedAt + POSSIBLE_DUPLICATE_WINDOW_MS, incoming.amount
-        ).firstOrNull {
-            isPossibleDuplicate(it, incoming) || isPossibleCrossAppPayment(it, incoming) &&
-                dao.getById(it.transactionId)?.duplicateOf == null
-        }
+        )
+        val possibleDuplicate = possiblePaymentDuplicate(dao, incoming, nearby)
         // 用户可能已先手记/AI 补记，再收到迟到通知；仅用具体商户完全匹配给出弱提示。
         val manuallyRecorded = if (possibleDuplicate == null && incoming.merchantFingerprint != null) {
             dao.nonCapturedTransactionsNear(
@@ -185,6 +216,16 @@ object CapturePersistence {
     private fun canEnrich(transaction: TransactionEntity): Boolean =
         transaction.source in setOf(TxSource.NOTIFICATION, TxSource.ACCESSIBILITY) &&
             transaction.editVersion == 0L && transaction.status != TxStatus.IGNORED && transaction.duplicateOf == null
+
+    private suspend fun possiblePaymentDuplicate(dao: TransactionDao, incoming: CaptureEvidenceEntity,
+        nearby: List<CaptureEvidenceEntity>): CaptureEvidenceEntity? =
+        nearby.firstOrNull { isPossibleDuplicate(it, incoming) }
+            ?: nearby.filter { isPossibleCrossAppPayment(it, incoming) }
+                .distinctBy(CaptureEvidenceEntity::transactionId)
+                .filter { evidence ->
+                    dao.getById(evidence.transactionId)?.let { it.duplicateOf == null && it.status != TxStatus.IGNORED } == true
+                }.singleOrNull()
+            ?: possibleAlipayDuplicate(dao, incoming, nearby)
 
     private suspend fun enrichTransaction(database: AppDatabase, existing: TransactionEntity, incoming: TransactionEntity,
         enrichSemantics: Boolean): TransactionEntity {
@@ -225,8 +266,12 @@ object CapturePersistence {
             retained["assumptions"] = JsonArray(assumptions)
             JsonObject(retained).toString()
         } else incoming.metadataJson
-        // 只升级明确标记为采集时间的回退值；旧记录缺少来源时，不靠时间相等猜测。
+        // 保留来源优先级；旧记录缺少来源时，不靠时间相等猜测。
         val replaceTransactionTime = isReceiptTimeUpgrade(oldMetadata, newMetadata)
+        val requiresReview = existing.status == TxStatus.PENDING &&
+            (oldMetadata?.get("transactionTimeSource") == JsonPrimitive("receipt_created") ||
+                oldMetadata?.get("creationTimeReview") == JsonPrimitive(true) ||
+                oldMetadata?.get("captureRequiresReview") == JsonPrimitive(true))
         fun String?.nonBlank(): String? = this?.takeIf { it.isNotBlank() }
         fun fillMissing(previous: String?, fresh: String?): String? = previous.nonBlank() ?: fresh.nonBlank() ?: previous
         val oldDetails = oldMetadata?.get("receiptDetails") as? JsonObject
@@ -260,7 +305,8 @@ object CapturePersistence {
                 replaceCategory = upgradeCategory && !replaceSemantics),
             businessKind = if (replaceSemantics && !keepKnownMeaning || existing.businessKind == "unknown")
                 incoming.businessKind else existing.businessKind,
-            status = if (replaceSemantics && incoming.status == TxStatus.CONFIRMED) TxStatus.CONFIRMED else existing.status
+            status = if (!requiresReview && replaceSemantics && incoming.status == TxStatus.CONFIRMED)
+                TxStatus.CONFIRMED else existing.status
         )
     }
 
@@ -273,9 +319,15 @@ object CapturePersistence {
         runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull()
     }
 
-    private fun isReceiptTimeUpgrade(previous: JsonObject?, incoming: JsonObject?): Boolean =
-        previous?.get("transactionTimeSource") == JsonPrimitive("observed") &&
-            incoming?.get("transactionTimeSource") == JsonPrimitive("receipt")
+    private fun isReceiptTimeUpgrade(previous: JsonObject?, incoming: JsonObject?): Boolean {
+        val oldSource = detailValue(previous, "transactionTimeSource")
+        val newSource = detailValue(incoming, "transactionTimeSource")
+        return when (oldSource) {
+            "observed" -> newSource in setOf("receipt_created", "receipt")
+            "receipt_created" -> newSource == "receipt"
+            else -> false
+        }
+    }
 
     private fun mergeMetadata(previous: String?, incoming: String?, preferIncoming: Boolean = false,
         replaceTransactionTime: Boolean = false, replaceCategory: Boolean = false): String? {
@@ -293,6 +345,10 @@ object CapturePersistence {
                 merged["assumptions"] = JsonArray(
                     (old["assumptions"] as? JsonArray).orEmpty().filterNot(::isCategoryAssumption) +
                         (fresh["assumptions"] as? JsonArray).orEmpty().filter(::isCategoryAssumption))
+            }
+            if (old["creationTimeReview"] == JsonPrimitive(true) ||
+                replaceTransactionTime && old["transactionTimeSource"] == JsonPrimitive("receipt_created")) {
+                merged["creationTimeReview"] = JsonPrimitive(true)
             }
             val timeKeys = setOf("transactionTimeSource", "timePrecision", "observedAt", "receiptOccurredAt")
             timeKeys.forEach { key ->
@@ -359,32 +415,126 @@ object CapturePersistence {
             (previous.packageName != incoming.packageName || previous.source != incoming.source ||
                 incoming.source == TxSource.ACCESSIBILITY)
 
+    /** An amount-only wallet notification can link a review, never identify an order. */
+    private suspend fun possibleAlipayDuplicate(dao: TransactionDao, incoming: CaptureEvidenceEntity,
+        nearby: List<CaptureEvidenceEntity>): CaptureEvidenceEntity? {
+        if (incoming.packageName != ALIPAY || incoming.type != TxType.EXPENSE) return null
+        val incomingMetadata = metadata(incoming.metadataJson)
+        if (!isCompletedPurchase(incomingMetadata)) return null
+        val incomingIsNotice = incoming.source == TxSource.NOTIFICATION
+        if (incomingIsNotice && !isAlipayAmountOnlyNotice(incoming, incomingMetadata)) return null
+        val time = capturedPaymentTime(incoming, incomingMetadata) ?: return null
+        val start = time - ALIPAY_RECEIPT_WINDOW_MS
+        val end = time + ALIPAY_RECEIPT_WINDOW_MS
+        // A bill can be opened well after payment. Compare its explicit payment time
+        // with the notice, never the time the user happened to open the old bill.
+        val candidates = if (incomingIsNotice) {
+            nearby + dao.pageEvidenceNearTransactionTime(ALIPAY, start, end, incoming.amount)
+        } else if (time != incoming.firstObservedAt) {
+            dao.captureEvidenceNear(start, end, incoming.amount)
+        } else nearby
+        val matches = candidates.asSequence().distinctBy { it.eventKey }.mapNotNull { previous ->
+            if (previous.packageName != ALIPAY || previous.source == incoming.source || !sameFinancials(previous, incoming))
+                return@mapNotNull null
+            val previousMetadata = metadata(previous.metadataJson)
+            if (!isCompletedPurchase(previousMetadata) || !incomingIsNotice && !isAlipayAmountOnlyNotice(previous, previousMetadata))
+                return@mapNotNull null
+            val otherTime = capturedPaymentTime(previous, previousMetadata) ?: return@mapNotNull null
+            previous.takeIf { otherTime in start..end }
+        }.distinctBy { it.transactionId }
+        val eligible = linkedMapOf<Long, CaptureEvidenceEntity>()
+        for (previous in matches) {
+            val original = dao.getById(previous.transactionId) ?: continue
+            if (original.status == TxStatus.IGNORED) continue
+            if (original.duplicateOf == null) {
+                if (incomingIsNotice || incoming.orderId == null ||
+                    dao.linkedPageOrders(original.id).none { conflictingOrders(it, incoming) }) eligible[original.id] = previous
+                continue
+            }
+            // If the result page arrived first and the notice is already held for review,
+            // route its later bill to that first page rather than chain two pending rows.
+            if (incomingIsNotice) continue
+            val primary = dao.getById(original.duplicateOf) ?: continue
+            if (primary.status == TxStatus.IGNORED || primary.duplicateOf != null || primary.source != TxSource.ACCESSIBILITY) continue
+            val proofs = dao.evidenceForTransaction(primary.id)
+            if (proofs.none { it.packageName == ALIPAY && it.source == TxSource.ACCESSIBILITY } ||
+                (proofs + dao.linkedPageOrders(primary.id)).any { conflictingOrders(it, incoming) }) continue
+            eligible[primary.id] = previous.copy(transactionId = primary.id)
+        }
+        // Different same-value purchases may exist in the same time window.
+        return eligible.values.singleOrNull()
+    }
+
+    private fun isAlipayAmountOnlyNotice(evidence: CaptureEvidenceEntity, details: JsonObject?): Boolean =
+        evidence.orderId == null && evidence.merchantFingerprint == null &&
+            detailValue(details?.get("fieldEvidence") as? JsonObject, "paymentStatus")
+                ?.startsWith("通知·交易动账语句：你有一笔") == true
+
+    private fun capturedPaymentTime(evidence: CaptureEvidenceEntity, details: JsonObject?): Long? =
+        when (detailValue(details, "transactionTimeSource")) {
+            "observed" -> evidence.firstObservedAt
+            "receipt" -> detailValue(details, "receiptOccurredAt")?.let { value ->
+                runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+            }?.takeIf { it in 1..evidence.observedAt }
+            else -> null
+        }
+
+    private fun isCompletedPurchase(details: JsonObject?): Boolean =
+        detailValue(details, "paymentStatus") == "COMPLETED" && detailValue(details, "scene") == "merchant_payment"
+
     private fun isPossibleCrossAppPayment(previous: CaptureEvidenceEntity, incoming: CaptureEvidenceEntity): Boolean {
         if (!sameFinancials(previous, incoming) || incoming.type != TxType.EXPENSE ||
-            previous.source != TxSource.NOTIFICATION || incoming.source != TxSource.NOTIFICATION ||
+            previous.packageName == incoming.packageName ||
             incoming.firstObservedAt - previous.firstObservedAt !in
                 -POSSIBLE_DUPLICATE_WINDOW_MS..POSSIBLE_DUPLICATE_WINDOW_MS) return false
+        fun isCommerce(packageName: String) = PaymentAppRegistry.profile(packageName)?.family?.let {
+            it != PaymentAppRegistry.Family.WALLET
+        } == true
         val pair = when {
-            CaptureEventIdentity.domainFor(previous.packageName) == "meituan" && incoming.packageName == "com.tencent.mm" -> previous to incoming
-            CaptureEventIdentity.domainFor(incoming.packageName) == "meituan" && previous.packageName == "com.tencent.mm" -> incoming to previous
+            isCommerce(previous.packageName) && incoming.packageName in supportedWalletChannels -> previous to incoming
+            isCommerce(incoming.packageName) && previous.packageName in supportedWalletChannels -> incoming to previous
             else -> return false
         }
         val shopping = metadata(pair.first.metadataJson)
         val wallet = metadata(pair.second.metadataJson)
-        if (listOf(shopping, wallet).any {
-                detailValue(it, "paymentStatus") != "COMPLETED" || detailValue(it, "scene") != "merchant_payment"
-            }) return false
+        if (!isCompletedPurchase(shopping) || !isCompletedPurchase(wallet)) return false
+        // An old bill opened around a fresh payment is not fresh payment evidence.
+        val shoppingTime = capturedPaymentTime(pair.first, shopping)
+        val walletTime = capturedPaymentTime(pair.second, wallet)
+        val start = minOf(pair.first.firstObservedAt, pair.second.firstObservedAt) - POSSIBLE_DUPLICATE_WINDOW_MS
+        if (shoppingTime != null && shoppingTime < start || walletTime != null && walletTime < start ||
+            detailValue(shopping, "transactionTimeSource") == "receipt_created" ||
+            detailValue(wallet, "transactionTimeSource") == "receipt_created") return false
         val shoppingDetails = shopping?.get("receiptDetails") as? JsonObject
         val channel = detailValue(shoppingDetails, "paymentChannel")
-        if (channel != null) return channel in setOf("微信", "微信支付")
+        val walletChannels = supportedWalletChannels.getValue(pair.second.packageName)
+        if (channel != null && channel !in walletChannels) return false
+        val sameParty = pair.first.merchantFingerprint != null &&
+            pair.first.merchantFingerprint == pair.second.merchantFingerprint
+        if (sameParty && channel != null) return true
 
-        // 微信可能只写平台收款方，美团则写实际店铺。仅将明确的平台身份用于待核对，
-        // 商品和备注中提到“美团”不构成关联，也不能把两端各自的订单号直接当作同一编号。
+        // A wallet can show the platform as payee while the order page shows a store.
+        // Only receipt party fields count as platform evidence; descriptions do not.
         val walletDetails = wallet?.get("receiptDetails") as? JsonObject
         val parties = listOfNotNull(detailValue(walletDetails, "merchantName"), detailValue(walletDetails, "payeeName")) +
             CaptureReceiptContext.readContext(wallet).filter { it.label == "交易对方" }.map { it.value }
-        return parties.any { CaptureEventIdentity.normalize(it) in setOf("美团", "美团外卖", "美团支付", "美团闪购", "美团团购") }
+        val profileName = PaymentAppRegistry.displayName(pair.first.packageName)
+        val meituanWechat = CaptureEventIdentity.domainFor(pair.first.packageName) == "meituan" &&
+            pair.second.packageName == "com.tencent.mm" &&
+            pair.first.source == TxSource.NOTIFICATION && pair.second.source == TxSource.NOTIFICATION
+        if (meituanWechat && channel != null) return true
+        if (!meituanWechat && channel == null && (pair.first.orderId == null || pair.second.orderId == null)) return false
+        val platformNames = if (CaptureEventIdentity.domainFor(pair.first.packageName) == "meituan")
+            setOf("美团", "美团外卖", "美团支付", "美团闪购", "美团团购")
+        else setOf(profileName, "${profileName}支付")
+        return parties.any { CaptureEventIdentity.normalize(it) in platformNames }
     }
+
+    private val supportedWalletChannels = mapOf(
+        "com.tencent.mm" to setOf("微信", "微信支付"),
+        "com.eg.android.AlipayGphone" to setOf("支付宝", "支付宝支付"),
+        "com.unionpay" to setOf("云闪付", "银联云闪付")
+    )
 
     private fun sameFinancials(a: CaptureEvidenceEntity, b: CaptureEvidenceEntity): Boolean =
         a.amount == b.amount && a.type == b.type

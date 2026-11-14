@@ -93,23 +93,23 @@ internal object PaymentReceiptSections {
     private val names = labels.sortedByDescending(String::length).joinToString("|") { Regex.escape(it) }
     private val marker = Regex("(?:^|[\\s，,；;。])($names)\\s*[:：]")
     private val heading = Regex("^($names)\\s*[:：]?$")
-    private val receiptBoundary = Regex("^(?:商户名称|商户全称|收款商户|商家名称|店铺名称|门店名称|品牌名称|商户|商家|店铺|门店|品牌|收款方|收款人|付款方|付款人|付款对象|支付方式|付款方式|支付渠道|付款渠道|扣款账户|付款账户|支付账户|付款银行卡|扣款银行卡|交易时间|支付时间|付款时间|收款时间|到账时间|完成时间|退款到账时间|退款成功时间|退款完成时间|收支类型|资金方向|交易状态|支付状态|付款状态|收款状态|退款状态|订单状态|当前状态|状态|实际支付|实际付款|实付款|实付金额|实付|实扣金额|实扣|支付金额|付款金额|交易金额|消费金额|转账金额|收款金额|退款金额|退回金额|退还金额|订单金额|商品金额|原支付金额|原价|商品原价|订单原价|总价|优惠金额|已优惠|优惠合计|共优惠|总优惠|配送费|运费|手续费|服务费|提现手续费|实际到账金额|实际到账|到账金额|提现到账金额|转出账户|转出账号|转出银行卡|转入账户|转入账号|收款账户|到账账户|提现账户|转入银行卡|订单编号|商户订单号|商家订单号|支付订单号|交易订单号|${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|流水号|退款单号|退款编号|商户退款单号)(?:\\s*[:：]|\\s*$|\\s*[¥￥0-9])")
+    private val receiptBoundary = Regex("^(?:商户名称|商户全称|收款商户|商家名称|店铺名称|门店名称|品牌名称|商户|商家|店铺|门店|品牌|收款方|收款人|付款方|付款人|付款对象|支付方式|付款方式|支付渠道|付款渠道|扣款账户|付款账户|支付账户|付款银行卡|扣款银行卡|创建时间|交易时间|支付时间|付款时间|收款时间|到账时间|完成时间|退款到账时间|退款成功时间|退款完成时间|收支类型|资金方向|交易状态|支付状态|付款状态|收款状态|退款状态|订单状态|当前状态|状态|实际支付|实际付款|实付款|实付金额|实付|实扣金额|实扣|支付金额|付款金额|交易金额|消费金额|转账金额|收款金额|退款金额|退回金额|退还金额|订单金额|商品金额|原支付金额|原价|商品原价|订单原价|总价|优惠金额|已优惠|优惠合计|共优惠|总优惠|配送费|运费|手续费|服务费|提现手续费|实际到账金额|实际到账|到账金额|提现到账金额|转出账户|转出账号|转出银行卡|转入账户|转入账号|收款账户|到账账户|提现账户|转入银行卡|订单编号|商户订单号|商家订单号|支付订单号|交易订单号|${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|流水号|退款单号|退款编号|商户退款单号)(?:\\s*[:：]|\\s*$|\\s*[¥￥0-9])")
     private val otherField = Regex("^[\\p{L}\\p{N}（）() _-]{1,40}[:：]")
     private val privateHeading = Regex("^(?:收货地址|联系地址|收货人|联系人|联系电话|手机号码|手机号|身份证号|验证码|密码)(?:[:：\\s]|$)")
-    private val inlineReceiptBoundary = Regex("[，,；;]\\s*(?:商户名称|商户全称|商家名称|店铺名称|门店名称|商户|商家|店铺|门店|收款方|收款人|付款方|付款人|支付方式|付款方式|支付渠道|付款渠道|扣款账户|付款账户|交易时间|支付时间|付款时间|收款时间|到账时间|交易状态|支付状态|实付金额|实付|支付金额|付款金额|交易金额|订单编号|商户订单号|商家订单号|支付订单号|交易订单号|${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|流水号|退款单号|退款编号|联系电话|手机号|收货地址|联系地址|收货人)\\s*[:：]")
+    private val inlineReceiptBoundary = Regex("[，,；;]\\s*(?:商户名称|商户全称|商家名称|店铺名称|门店名称|商户|商家|店铺|门店|收款方|收款人|付款方|付款人|支付方式|付款方式|支付渠道|付款渠道|扣款账户|付款账户|创建时间|交易时间|支付时间|付款时间|收款时间|到账时间|交易状态|支付状态|实付金额|实付|支付金额|付款金额|交易金额|订单编号|商户订单号|商家订单号|支付订单号|交易订单号|${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|流水号|退款单号|退款编号|联系电话|手机号|收货地址|联系地址|收货人)\\s*[:：]")
     private val identityBoundary = Regex("^(?:订单编号|商户订单号|商家订单号|支付订单号|交易订单号|${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|流水号|退款单号|退款编号|商户退款单号)\\s*[:：]?\\s*[A-Za-z0-9]{10,64}$")
     private val financialAssertion = Regex("(?:支付|付款|消费|收款|转账|退款|退回|到账|入账|交易)(?:已)?(?:成功|失败|受理|完成|取消|处理中|到账)|(?:未|待)(?:支付|付款|到账)|(?:${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|退款单号)")
-    private val controls = Regex("^(?:完成|返回|关闭|查看(?:订单|账单|交易)?详情|联系商家|联系客服|推荐|更多推荐|点击领取优惠券|领取优惠券|立即领取|领券|限时福利|支付立减|消费立减|待领取).*$")
+    private val controls = Regex("^(?:完成|返回|关闭|查看(?:订单|账单|交易)?详情|联系商家|联系客服|推荐|更多推荐|点击领取优惠券|领取优惠券|立即领取|领券|限时福利|支付立减|消费立减|待领取).*$|^(?:账单分类|积分奖励|标签和备注)(?:[:：].*)?$")
     // A standalone negative state after a description still blocks a receipt. A product line
     // containing such words is semantic text and cannot establish or reverse a money movement.
     private val negativeState = Regex("^(?:(?:支付|付款|交易|收款|转账|退款)(?:已)?(?:失败|取消|关闭|处理中|受理中)|待支付|待付款|未支付|未付款|退款申请中|申请退款)[!！。]?$")
-    private val financialValue = Regex("^(?:实际支付|实际付款|实付款|实付金额|实付|实扣金额|实扣|支付金额|付款金额|交易金额|消费金额|转账金额|收款金额|退款金额|退回金额|退还金额|订单金额|商品金额|原支付金额|原价|商品原价|订单原价|总价|优惠金额|已优惠|优惠合计|共优惠|总优惠|配送费|运费|手续费|服务费|提现手续费|实际到账金额|实际到账|到账金额|提现到账金额|转出账户|转出账号|转出银行卡|转入账户|转入账号|收款账户|到账账户|提现账户|转入银行卡|订单编号|商户订单号|商家订单号|支付订单号|交易订单号|${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|流水号|退款单号|退款编号|商户退款单号|交易时间|支付时间|付款时间|收款时间|到账时间|完成时间|退款到账时间|退款成功时间|退款完成时间)")
+    private val financialValue = Regex("^(?:实际支付|实际付款|实付款|实付金额|实付|实扣金额|实扣|支付金额|付款金额|交易金额|消费金额|转账金额|收款金额|退款金额|退回金额|退还金额|订单金额|商品金额|原支付金额|原价|商品原价|订单原价|总价|优惠金额|已优惠|优惠合计|共优惠|总优惠|配送费|运费|手续费|服务费|提现手续费|实际到账金额|实际到账|到账金额|提现到账金额|转出账户|转出账号|转出银行卡|转入账户|转入账号|收款账户|到账账户|提现账户|转入银行卡|订单编号|商户订单号|商家订单号|支付订单号|交易订单号|${PaymentTextParser.WECHAT_PAYMENT_ORDER_LABELS}|订单号|交易单号|交易号|流水号|退款单号|退款编号|商户退款单号|创建时间|交易时间|支付时间|付款时间|收款时间|到账时间|完成时间|退款到账时间|退款成功时间|退款完成时间)")
 
     data class Result(val facts: String, val fields: List<PaymentReceiptContext>)
 
     private fun isReceiptBoundary(line: String): Boolean = receiptBoundary.containsMatchIn(line) || identityBoundary.matches(line)
 
-    fun split(text: String): Result {
+    fun split(text: String, additionalBoundaries: Set<String> = emptySet()): Result {
         val facts = mutableListOf<String>()
         val fields = mutableListOf<PaymentReceiptContext>()
         var activeLabel: String? = null
@@ -157,7 +157,12 @@ internal object PaymentReceiptSections {
                 // Later explicit receipt rows delimit the section; unrelated labelled fields
                 // are not pulled into the model's payment context.
                 val protectedBoundary = privateHeading.containsMatchIn(line) || controls.matches(line) || negativeState.matches(line)
-                val boundary = protectedBoundary || ((isReceiptBoundary(line) || otherField.containsMatchIn(line)) &&
+                val sourceBoundary = activeLines.isNotEmpty() && additionalBoundaries.any { label ->
+                    line.startsWith(label) && line.getOrNull(label.length).let {
+                        it == null || it == ':' || it == '：' || it.isWhitespace()
+                    }
+                }
+                val boundary = protectedBoundary || sourceBoundary || ((isReceiptBoundary(line) || otherField.containsMatchIn(line)) &&
                     (activeLines.isNotEmpty() || !financialValue.containsMatchIn(line)))
                 if (boundary) {
                     flush()

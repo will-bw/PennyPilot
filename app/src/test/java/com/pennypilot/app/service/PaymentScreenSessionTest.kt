@@ -106,6 +106,28 @@ class PaymentScreenSessionTest {
         assertEquals(1200L, session.evidence(second)?.occurredAt)
     }
 
+    @Test fun `alipay same order keeps time provenance through partial and more precise redraws`() {
+        val session = PaymentScreenSession()
+        val alipay = "com.eg.android.AlipayGphone"
+        val order = payment.copy(orderId = "20261114000001")
+        val created = order.copy(occurredAt = 800L, occurredAtIsCreationTime = true,
+            fieldEvidence = mapOf("occurredAt" to "页面·创建时间"))
+        val key = session.observe(alipay, 1, created, 1000)!!
+        session.markHandled(key)
+
+        assertNull(session.observe(alipay, 1, order, 1100))
+        assertEquals(created, session.evidence(key))
+
+        val completed = order.copy(occurredAt = 900L, fieldEvidence = mapOf("occurredAt" to "页面·付款时间"))
+        assertEquals(key, session.observe(alipay, 1, completed, 1200))
+        assertEquals(completed, session.evidence(key))
+        session.markHandled(key)
+
+        assertNull(session.observe(alipay, 1, created, 1300))
+        assertEquals(completed, session.evidence(key))
+        assertNotEquals(key, session.observe(alipay, 1, created.copy(orderId = "20261114000002"), 1400))
+    }
+
     @Test fun `late receipt details enrich one session and survive incomplete or conflicting redraws`() {
         val session = PaymentScreenSession()
         val key = session.observe(pkg, 1, payment, 1000)!!

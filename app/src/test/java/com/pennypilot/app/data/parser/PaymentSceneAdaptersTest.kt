@@ -31,6 +31,20 @@ class PaymentSceneAdaptersTest {
         assertNull(parse("com.tencent.mm", historicalExpense.replace("支付成功", "支付失败")))
     }
 
+    @Test fun `wechat short payment result captures a merchant heading and split amount`() {
+        val text = "支付成功\n样例便利店\n¥\n18.00\n完成"
+        val receipt = requireNotNull(parse("com.tencent.mm", text))
+        assertEquals(1800L, receipt.amountCents)
+        assertEquals("样例便利店", receipt.merchant)
+        assertEquals("样例便利店", receipt.details.merchantName)
+        assertTrue(receipt.fieldEvidence.getValue("merchant").contains("支付结果抬头"))
+        assertNull(parse("com.eg.android.AlipayGphone", text)?.merchant)
+        assertNull(parse("com.tencent.mm", text.replace("样例便利店", "优惠活动"))?.merchant)
+        assertNull(parse("com.tencent.mm", text.replace("完成", "请输入密码")))
+        assertNull(parse("com.tencent.mm", text.replace("18.00", "18.00\n¥20.00")))
+        assertEquals("另一家店", parse("com.tencent.mm", text.replace("完成", "收款方：另一家店\n完成"))?.merchant)
+    }
+
     @Test fun `detail without reliable identity is eligible for cloud review but never a local entry`() {
         val missingId = historicalExpense.replace("交易单号：20251024000012345678", "")
         val match = PaymentSceneAdapters.match("com.tencent.mm", missingId)!!

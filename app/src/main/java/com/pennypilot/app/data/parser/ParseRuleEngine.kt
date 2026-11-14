@@ -17,7 +17,8 @@ data class NotificationParseResult(
     val occurredAt: Long? = null,
     // Refund identities use a separate namespace; the original payment is only related evidence.
     val orderIdKind: String? = null,
-    val details: PaymentReceiptDetails = PaymentReceiptDetails()
+    val details: PaymentReceiptDetails = PaymentReceiptDetails(),
+    val occurredAtIsCreationTime: Boolean = false
 )
 
 object ParseRuleEngine {
