@@ -16,6 +16,8 @@ import com.pennypilot.app.data.llm.LLMClient
 import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ToolDefinition
 import com.pennypilot.app.data.settings.AppPreferences
+import com.pennypilot.app.domain.model.TxSource
+import com.pennypilot.app.domain.model.TxStatus
 import com.pennypilot.app.domain.model.TxType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -26,6 +28,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -134,6 +137,41 @@ class NotificationCaptorServiceIntegrationTest {
         listener.onNotificationPosted(notice(5))
         await { transactions().size >= 2 }
         assertEquals(listOf(5_00L, 3_00L), transactions().sortedBy { it.id }.map { it.amount })
+    }
+
+    @Test fun `Alipay transaction reminder with a reward records the debit once from notification alone`() {
+        runBlocking {
+            preferences.setNotificationCaptureEnabled(true)
+            preferences.setCaptureAutoRecordEnabled(true)
+            database.categoryDao().insert(CategoryEntity(name = "居住", icon = "", colorIndex = 0,
+                type = TxType.EXPENSE, sortOrder = 1))
+            database.categoryDao().insert(CategoryEntity(name = "人情", icon = "", colorIndex = 0,
+                type = TxType.EXPENSE, sortOrder = 2))
+        }
+        val manager = context.getSystemService(NotificationManager::class.java)
+        shadowOf(manager).setNotificationsEnabled(true)
+        start()
+        await { shadow.snapshotReads == 1 }
+        val reminder = notice(7).apply {
+            notification.extras.putCharSequence(Notification.EXTRA_TITLE, "交易提醒")
+            notification.extras.putCharSequence(Notification.EXTRA_TEXT, "你有一笔15.80元的支出，点击领3元电费红包。")
+        }
+
+        listener.onNotificationPosted(reminder)
+        await { manager.activeNotifications.isNotEmpty() }
+        listener.onNotificationPosted(reminder)
+        await { monitor.health.value.duplicateCount == 1 }
+
+        val saved = transactions().single()
+        assertEquals(1580L, saved.amount)
+        assertEquals(TxType.EXPENSE, saved.type)
+        assertEquals(TxSource.NOTIFICATION, saved.source)
+        assertEquals(TxStatus.CONFIRMED, saved.status)
+        assertNull(saved.merchant)
+        assertEquals("其他", runBlocking { database.categoryDao().getById(saved.categoryId)?.name })
+        val alert = manager.activeNotifications.single().notification
+        assertTrue(alert.extras.getString(Notification.EXTRA_TITLE).orEmpty().contains("15.80"))
+        assertTrue(alert.extras.getString(Notification.EXTRA_TEXT).orEmpty().contains("已记账"))
     }
 
     private fun start(vararg active: StatusBarNotification) {

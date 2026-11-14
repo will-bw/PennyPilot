@@ -22,6 +22,7 @@ import com.pennypilot.app.data.llm.Message
 import com.pennypilot.app.data.llm.ModelRole
 import com.pennypilot.app.data.llm.ToolDefinition
 import com.pennypilot.app.data.parser.NotificationParseResult
+import com.pennypilot.app.data.parser.PaymentSceneAdapters
 import com.pennypilot.app.data.parser.PaymentScreenNode
 import com.pennypilot.app.data.parser.PaymentScreenStructure
 import com.pennypilot.app.data.parser.PaymentTextParser
@@ -549,6 +550,39 @@ class CaptureProcessorTest {
                 assertEquals(TxStatus.PENDING, rows[1].status)
                 assertEquals(rows[0].id, rows[1].duplicateOf)
                 assertEquals(1800L, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+            }
+        }
+    }
+
+    @Test fun `alipay notification and accessible result only count one expense in either order`() = runBlocking {
+        for (noticeFirst in listOf(true, false)) {
+            withAutomaticNotificationCapture { database, processor ->
+                preferences.setScreenCaptureEnabled(true)
+                val now = System.currentTimeMillis()
+                val packageName = "com.eg.android.AlipayGphone"
+                val notice = CapturedNotification(packageName, "alipay-reminder", now, "交易提醒",
+                    "你有一笔15.80元的支出，点击领3元电费红包。")
+                val page = checkNotNull(PaymentSceneAdapters.parse(packageName,
+                    "支付成功\n实付金额：15.80元\n商户名称：测试商户\n完成", now))
+                suspend fun captureNotice() = processor.processNotification(notice, LedgerRevision.current)
+                suspend fun capturePage() = processor.processScreen(packageName, page, "alipay-result",
+                    now + 2_000, LedgerRevision.current)
+                if (noticeFirst) {
+                    captureNotice()
+                    assertTrue(capturePage())
+                } else {
+                    assertTrue(capturePage())
+                    captureNotice()
+                }
+
+                val rows = database.backupDao().transactions().sortedBy { it.id }
+                assertEquals(2, rows.size)
+                assertEquals(TxStatus.CONFIRMED, rows[0].status)
+                assertEquals(TxStatus.PENDING, rows[1].status)
+                assertEquals(rows[0].id, rows[1].duplicateOf)
+                assertEquals(1580L, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+                assertEquals("测试商户", rows.single { it.source == TxSource.ACCESSIBILITY }.merchant)
+                assertEquals(0, cloudCalls)
             }
         }
     }

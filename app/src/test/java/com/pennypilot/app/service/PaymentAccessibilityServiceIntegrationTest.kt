@@ -486,6 +486,75 @@ class PaymentAccessibilityServiceIntegrationTest {
         assertTrue(window.screenshotWindows.isEmpty())
     }
 
+    @Test fun `wechat scan result reads merchant and split amount with no model and records redraw once`() {
+        runBlocking { preferences.setCaptureAutoRecordEnabled(true) }
+        connect(enabled = true)
+        window.root = {
+            screen("支付成功").apply {
+                listOf("样例便利店", "¥", "18.00", "完成").forEach { value ->
+                    shadowOf(this).addChild(screen(value))
+                }
+            }
+        }
+        sendEvent()
+        awaitStatus("saved")
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        drainRetries()
+        val saved = rows().single()
+        assertEquals(1800L, saved.amount)
+        assertEquals("样例便利店", saved.merchant)
+        assertEquals(TxStatus.CONFIRMED, saved.status)
+        assertEquals("样例便利店", receiptDetail("merchantName"))
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `wallet content event is retried when the Alipay result window becomes active later`() {
+        runBlocking { preferences.setCaptureAutoRecordEnabled(true) }
+        connect(enabled = true)
+        val shopping = "com.sankuai.meituan"
+        val wallet = "com.eg.android.AlipayGphone"
+        window.root = { screen("正在打开支付", packageName = shopping, windowId = 7) }
+        sendEvent(packageName = shopping)
+        awaitStatus("not_receipt")
+
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = wallet, windowId = 9)
+        scheduler.runCurrent()
+        assertTrue(rows().isEmpty())
+        val receipt = screen("支付成功\n实付金额：15.80元\n商户名称：测试商户\n完成", packageName = wallet, windowId = 9)
+        window.setWindows(listOf(applicationWindow(receipt, active = true)))
+        scheduler.advanceTimeBy(1_000)
+        scheduler.runCurrent()
+
+        awaitCondition("Alipay result should be captured after the original content event") { rows().size == 1 }
+        val saved = rows().single()
+        assertEquals(1580L, saved.amount)
+        assertEquals(TxStatus.CONFIRMED, saved.status)
+        assertEquals(TxSource.ACCESSIBILITY, saved.source)
+        assertEquals("测试商户", receiptDetail("merchantName"))
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `delayed wallet content cannot capture a background Alipay receipt`() {
+        connect(enabled = true)
+        val shopping = "com.sankuai.meituan"
+        val wallet = "com.eg.android.AlipayGphone"
+        window.root = { screen("正在打开支付", packageName = shopping, windowId = 7) }
+        sendEvent(packageName = shopping)
+        awaitStatus("not_receipt")
+
+        val receipt = screen("支付成功\n实付金额：15.80元\n完成", packageName = wallet, windowId = 9)
+        window.setWindows(listOf(
+            applicationWindow(screen("正在打开支付", packageName = shopping, windowId = 7), active = true),
+            applicationWindow(receipt, focused = true)
+        ))
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = wallet, windowId = 9)
+        drainRetries()
+
+        assertTrue(rows().isEmpty())
+        assertTrue(window.screenshotWindows.isEmpty())
+        assertEquals(0, cloudCalls)
+    }
+
     @Test fun `exact window lookup refuses background receipts and roots without matching ownership`() {
         connect(enabled = true)
         val previous = screen("页面正在加载", windowId = 7)
@@ -737,6 +806,98 @@ class PaymentAccessibilityServiceIntegrationTest {
         sendEvent(packageName="com.eg.android.AlipayGphone")
         awaitCondition("historical identified receipt was not captured") { rows().size == 2 }
         assertEquals((startedAt-31*60_000)/1_000*1_000, rows().last().occurredAt)
+    }
+
+    @Test fun `Alipay single bill with a merchant headline and creation time is captured locally once`() {
+        runBlocking { preferences.setCaptureAutoRecordEnabled(true) }
+        connect(enabled = true)
+        val wallet = "com.eg.android.AlipayGphone"
+        val openedAt = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm")
+            .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(startedAt - 86_400_000))
+        val orderId = "2026111321001000000012345678"
+        val merchantOrderId = "1113000012345"
+        val detail = "账单详情\n饿了么\n-20.70\n交易成功\n付款方式\n花呗\n商品说明\n外卖订单\n" +
+            "账单分类\n消费-饮食\n积分奖励\n1积分\n创建时间\n$openedAt\n订单号\n$orderId\n" +
+            "商户订单号\n$merchantOrderId"
+        window.root = { screen(detail, packageName = wallet) }
+        sendEvent(packageName = wallet)
+        awaitStatus("saved")
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = wallet)
+        drainRetries()
+
+        val saved = rows().single()
+        assertEquals(2070L, saved.amount)
+        assertEquals(TxType.EXPENSE, saved.type)
+        assertEquals(TxSource.ACCESSIBILITY, saved.source)
+        assertEquals(TxStatus.PENDING, saved.status)
+        assertEquals("饿了么", saved.merchant)
+        assertEquals("饿了么", receiptDetail("merchantName"))
+        assertEquals("外卖订单", receiptDetail("productDescription"))
+        assertEquals("花呗", receiptDetail("fundingAccount"))
+        assertEquals(merchantOrderId, runBlocking { database.backupDao().captureEvents() }.first().orderId)
+        val metadata = Json.parseToJsonElement(requireNotNull(saved.metadataJson)) as JsonObject
+        assertEquals(JsonPrimitive("receipt_created"), metadata["transactionTimeSource"])
+        assertEquals(JsonPrimitive("approximate"), metadata["timePrecision"])
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `idlefish checkout supplies context only after the same window shows an actual debit`() {
+        runBlocking { preferences.setCaptureAutoRecordEnabled(true) }
+        connect(enabled = true)
+        val pkg = "com.taobao.idlefish"
+        window.root = {
+            screen("确认订单", packageName = pkg).apply {
+                listOf("提交订单", "应付金额：18.00元", "商品名称：二手台灯", "商品规格：暖白").forEach { value ->
+                    shadowOf(this).addChild(screen(value, packageName = pkg))
+                }
+            }
+        }
+        sendEvent(packageName = pkg)
+        awaitStatus("not_receipt")
+        assertTrue(rows().isEmpty())
+
+        window.root = { screen("支付成功\n实付金额：18.00元\n完成", packageName = pkg) }
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = pkg)
+        awaitStatus("saved")
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = pkg)
+        drainRetries()
+
+        val row = rows().single()
+        assertEquals(1800L, row.amount)
+        assertEquals(TxStatus.CONFIRMED, row.status)
+        val metadata = requireNotNull(row.metadataJson)
+        assertTrue(metadata.contains("二手台灯"))
+        assertTrue(metadata.contains("暖白"))
+        assertEquals(0, cloudCalls)
+    }
+
+    @Test fun `checkout estimate stays out of totals and a late different paid amount replaces it`() {
+        runBlocking { preferences.setCaptureAutoRecordEnabled(true) }
+        connect(enabled = true)
+        val pkg = "com.taobao.idlefish"
+        window.root = { screen("确认订单\n提交订单\n应付金额：18.00元\n商品名称：二手台灯", packageName = pkg) }
+        sendEvent(packageName = pkg)
+        awaitStatus("not_receipt")
+        assertTrue(rows().isEmpty())
+
+        window.root = { screen("支付成功\n完成", packageName = pkg) }
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = pkg)
+        awaitCondition("checkout draft was not captured") { rows().size == 1 }
+        val draft = rows().single()
+        assertEquals(TxStatus.PENDING, draft.status)
+        assertEquals(1800L, draft.amount)
+        assertTrue(requireNotNull(draft.metadataJson).contains("AMOUNT_UNVERIFIED"))
+
+        scheduler.advanceTimeBy(3_000)
+        scheduler.runCurrent()
+        window.root = { screen("支付成功\n实付金额：16.00元\n完成", packageName = pkg) }
+        sendEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, packageName = pkg)
+        awaitCondition("verified payment did not replace its estimate") { rows().singleOrNull()?.amount == 1600L }
+        val paid = rows().single()
+        assertEquals(draft.id, paid.id)
+        assertEquals(TxStatus.CONFIRMED, paid.status)
+        assertFalse(requireNotNull(paid.metadataJson).contains("AMOUNT_UNVERIFIED"))
+        assertEquals(0, cloudCalls)
     }
 
     @Test fun `read only checkout enriches its verified same order without creating a payment before completion`() {
@@ -1009,7 +1170,7 @@ class PaymentAccessibilityServiceIntegrationTest {
         var submitted = 0
         service.receiptImageHandler = { _, _, _, _, _, _ -> submitted++; true }
         sendEvent()
-        awaitCondition("display image was not requested") { captures == 1 }
+        awaitCondition("display image was not discarded") { captures == 1 && frame.isRecycled }
         drainRetries()
         assertEquals(0, submitted)
         assertNull(monitor.health.value.lastError)

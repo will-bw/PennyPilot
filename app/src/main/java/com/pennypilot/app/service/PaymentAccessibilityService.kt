@@ -11,6 +11,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.pennypilot.app.data.db.LedgerRevision
+import com.pennypilot.app.data.parser.CommercePaymentPages
 import com.pennypilot.app.data.parser.PaymentAppRegistry
 import com.pennypilot.app.data.parser.PaymentTextParser
 import com.pennypilot.app.data.parser.NotificationParseResult
@@ -35,6 +36,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import java.util.concurrent.atomic.AtomicLong
@@ -59,6 +61,7 @@ class PaymentAccessibilityService : AccessibilityService() {
     private data class ReadRequest(val packageName: String, val windowId: Int, val revision: Long,
         val epoch: Long, val eventType: Int = 0, val className: String? = null)
     private data class ActiveRead(val epoch: Long, val job: Job)
+    private data class PendingContentWindow(val packageName: String, val windowId: Int, val job: Job)
     private val windowEpoch = AtomicLong()
     private val readStateLock = Any()
     private var activeRead: ActiveRead? = null
@@ -72,6 +75,7 @@ class PaymentAccessibilityService : AccessibilityService() {
     private val requests = Channel<ReadRequest>(Channel.CONFLATED)
     private var readJob: Job? = null
     private var preferenceJob: Job? = null
+    private var pendingContentWindow: PendingContentWindow? = null
     private data class ReceiptImage(val data: String, val authorizationId: String)
     private data class ImageAttempt(val firstAt: Long, val lastAt: Long, val failures: Int = 0)
     private val imageAttempts = linkedMapOf<String, ImageAttempt>()
@@ -110,6 +114,7 @@ class PaymentAccessibilityService : AccessibilityService() {
                 }
                 enabled = allow && selectedPackages.isNotEmpty()
                 readJob?.cancel()
+                cancelContentWindowRetry()
                 replaceWindow(null)
                 visualGeneration.incrementAndGet()
                 while (requests.tryReceive().isSuccess) { /* 开关切换前的事件不能在恢复后补读。 */ }
@@ -175,7 +180,10 @@ class PaymentAccessibilityService : AccessibilityService() {
                 walletPreparationAt = null
                 opaqueHandoffWindow = null
                 visualGeneration.incrementAndGet()
-                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) replaceWindow(null)
+                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                    cancelContentWindowRetry()
+                    replaceWindow(null)
+                }
             }
             return
         }
@@ -184,8 +192,12 @@ class PaymentAccessibilityService : AccessibilityService() {
         // only replace the current payment surface once it is the active application root.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && previous != null &&
             (previous.packageName != packageName || previous.windowId != event.windowId) &&
-            !activeWindowMatches(packageName, event.windowId)) return
-        visualGeneration.incrementAndGet()
+            !activeWindowMatches(packageName, event.windowId)) {
+            retryContentWindow(packageName, event.windowId, previous.epoch)
+            return
+        }
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            previous == null || previous.packageName != packageName || previous.windowId != event.windowId) cancelContentWindowRetry()
         val eventClass = event.className?.toString()
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             if (packageName == WECHAT && eventClass in walletPreparationActivities) {
@@ -205,10 +217,46 @@ class PaymentAccessibilityService : AccessibilityService() {
         val pageClass = if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             previous?.let { it.packageName == packageName && it.windowId == event.windowId } == true)
             previous.className else eventClass
+        enqueueWindow(packageName, event.windowId, event.eventType, pageClass)
+    }
+
+    private fun retryContentWindow(packageName: String, windowId: Int, previousEpoch: Long) {
+        if (windowId < 0) return
+        val pending = pendingContentWindow
+        if (pending?.packageName == packageName && pending.windowId == windowId && pending.job.isActive) return
+        cancelContentWindowRetry()
         val revision = LedgerRevision.current
-        val epoch = previous?.takeIf { it.packageName == packageName && it.windowId == event.windowId &&
+        val job = scope.launch {
+            // The first redraw can arrive before Android exposes the new active root.
+            // Retry only this exact, allowlisted event window, never inspect a background tree.
+            for (pause in longArrayOf(250, 750, 1_500)) {
+                delay(pause)
+                if (revision != LedgerRevision.current || latestWindow?.epoch != previousEpoch) return@launch
+                val active = withContext(readDispatcher) {
+                    runCatching { activeWindowMatches(packageName, windowId) }.getOrDefault(false)
+                }
+                if (!enabled || packageName !in selectedPackages || revision != LedgerRevision.current ||
+                    latestWindow?.epoch != previousEpoch) return@launch
+                if (active) {
+                    enqueueWindow(packageName, windowId, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, null, revision)
+                    return@launch
+                }
+            }
+        }
+        pendingContentWindow = PendingContentWindow(packageName, windowId, job)
+    }
+
+    private fun cancelContentWindowRetry() {
+        pendingContentWindow?.job?.cancel()
+        pendingContentWindow = null
+    }
+
+    private fun enqueueWindow(packageName: String, windowId: Int, eventType: Int, pageClass: String?,
+        revision: Long = LedgerRevision.current) {
+        visualGeneration.incrementAndGet()
+        val epoch = latestWindow?.takeIf { it.packageName == packageName && it.windowId == windowId &&
             it.revision == revision && it.className == pageClass }?.epoch ?: windowEpoch.incrementAndGet()
-        val request = ReadRequest(packageName, event.windowId, revision, epoch, event.eventType, pageClass)
+        val request = ReadRequest(packageName, windowId, revision, epoch, eventType, pageClass)
         replaceWindow(request)
         entryPoint.monitor().onScreenEvent(packageName)
         requests.trySend(request)
@@ -347,17 +395,19 @@ class PaymentAccessibilityService : AccessibilityService() {
                 entryPoint.monitor().onScreenRead(snapshot.status, snapshot.diagnostics, request.packageName)
                 return false
             }
-            if (CheckoutContext.isPreview(request.packageName, text)) {
-                val preview = snapshot.structure?.let { CheckoutContext.parse(request.packageName, text, it) }
+            if (CheckoutContext.isPreview(request.packageName, text, activityName = request.className)) {
+                val preview = snapshot.structure?.let {
+                    CheckoutContext.parse(request.packageName, text, it, activityName = request.className)
+                }
                 if (!isCurrent(request)) return true
                 synchronized(session) { session.onInputPage(request.packageName, actualWindowId, elapsedMillis()) }
                 synchronized(checkoutContext) {
                     if (isCurrent(request)) {
                         if (preview == null) checkoutContext.reset()
-                        else if (checkoutContext.remember(preview, request.revision, elapsedMillis())) {
+                        else if (checkoutContext.remember(preview, request.revision, elapsedMillis(), windowId = actualWindowId)) {
                             checkoutExpiry?.cancel()
                             checkoutExpiry = scope.launch {
-                                delay(CheckoutContext.TTL_MS)
+                                delay(CheckoutContext.retentionMillis(preview))
                                 synchronized(checkoutContext) { checkoutContext.expire(LedgerRevision.current, elapsedMillis()) }
                             }
                         }
@@ -376,7 +426,8 @@ class PaymentAccessibilityService : AccessibilityService() {
                 modelCandidate = false, evidenceText = text) }
                 ?: if (adapter?.kind == PaymentSceneAdapters.Kind.PARTIAL_RESULT)
                     PaymentTextParser.ScreenRecognition(null, "transfer_sent", modelCandidate = false, evidenceText = text)
-                else if (PaymentSceneAdapters.isDetailPage(request.packageName, text))
+                else if (PaymentSceneAdapters.isDetailPage(request.packageName, text, request.className) ||
+                    CommercePaymentPages.blocksReceipt(request.packageName, text))
                     PaymentTextParser.ScreenRecognition(null, "receipt_detail", modelCandidate = false, evidenceText = text)
                 else PaymentTextParser.analyzeScreen(request.packageName, text, snapshot.structure)
             val parsed = recognition.parsed
@@ -386,6 +437,32 @@ class PaymentAccessibilityService : AccessibilityService() {
             entryPoint.monitor().onScreenRead(if (parsed != null) "parsed" else "not_receipt",
                 snapshot.diagnostics, request.packageName)
             if (parsed == null) {
+                val checkoutDraft = synchronized(checkoutContext) {
+                    if (!isCurrent(request)) return true
+                    checkoutContext.observeNonResult(request.packageName, text, request.revision, elapsed)
+                    checkoutContext.pendingResult(request.packageName, text, request.revision, elapsed,
+                        actualWindowId, activityName = request.className)
+                }
+                if (checkoutDraft != null) {
+                    val key = synchronized(session) {
+                        session.observeCandidate(request.packageName, actualWindowId, text, elapsed)
+                    } ?: return false
+                    val saved = entryPoint.captureProcessor().processScreen(request.packageName, checkoutDraft, key,
+                        now, request.revision, queueSemanticModel = false, expectedAuthorizationId = textAuthorization)
+                    if (saved) {
+                        synchronized(session) {
+                            session.markHandled(key)
+                            session.markCheckoutDraft(key)
+                        }
+                        synchronized(checkoutContext) {
+                            if (isCurrent(request)) checkoutContext.consumePendingResult(request.packageName, request.revision, actualWindowId)
+                        }
+                    }
+                    return false
+                }
+                if (synchronized(session) { session.hasCheckoutDraft(request.packageName, actualWindowId) } &&
+                    CommercePaymentPages.isPaymentCompletionWithoutAmount(request.packageName, text, request.className))
+                    return false
                 if (imageCandidate && cloudVisionAllowed()) {
                     val key = synchronized(session) {
                         session.observeCandidate(request.packageName, actualWindowId, text, elapsed, sampleVersion)
@@ -410,7 +487,8 @@ class PaymentAccessibilityService : AccessibilityService() {
                 return false
             }
             val withCheckout = synchronized(checkoutContext) {
-                checkoutContext.enrich(request.packageName, snapshot.structure, parsed, request.revision, elapsed)
+                checkoutContext.enrich(request.packageName, snapshot.structure, parsed, request.revision, elapsed,
+                    windowId = actualWindowId, liveResult = adapter?.kind == PaymentSceneAdapters.Kind.RESULT)
             }
             val cloudEnrichment: (suspend (String) -> Boolean)? = if (cloudVisionAllowed() &&
                 (Build.VERSION.SDK_INT >= 34 || displayWindowUnoccluded(request, snapshot.windowBounds))) { key ->
@@ -732,6 +810,7 @@ class PaymentAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         enabled = false
         visualGeneration.incrementAndGet()
+        cancelContentWindowRetry()
         replaceWindow(null)
         readJob?.cancel()
         preferenceJob?.cancel()
@@ -743,6 +822,7 @@ class PaymentAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         enabled = false
         visualGeneration.incrementAndGet()
+        cancelContentWindowRetry()
         replaceWindow(null)
         clearCheckoutContext()
         scope.cancel()

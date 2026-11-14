@@ -57,8 +57,13 @@ object PaymentTextParser {
         "com.ss.android.ugc.aweme.lite" to setOf("抖音", "抖音极速版", "抖音支付", "抖音商城", "抖音订单", "抖音生活服务")
     )
     private val receiptTitle = Regex("""^(?:订单)?(?:支付|付款|消费|扣款|交易|退款|收款|收钱)(?:已)?(?:成功|到账|完成)(?:通知)?(?:\s*[:：]?\s*(?:[¥￥]\s*$RAW_AMOUNT(?:\s*元)?|$RAW_AMOUNT\s*元))?[!！。]?$""")
+    private val alipayStatementTitles = setOf("支付宝", "支付宝通知", "交易提醒")
     private val alipayTransactionStatement = Regex(
         """^(你有一笔\s*$RAW_AMOUNT\s*元的(支出|收入))[。!！]?$"""
+    )
+    private val alipayElectricityCoupon = Regex(
+        """^\h*(你有一笔\h*$RAW_AMOUNT\h*元的支出)(?:[，,]\h*(?:\r?\n\h*)?|[。!！]?\h*\r?\n\h*)点击领(?:取)?\h*[0-9]{1,6}(?:\.[0-9]{1,2})?\h*元电费红包[。!！]?\h*$""",
+        RegexOption.MULTILINE
     )
     private val alipayAutoDebitStatement = Regex(
         """^(你在([^\n，,。；;]{1,64}?)有一笔\s*($RAW_AMOUNT)\s*元的免密[/／]自动扣款支付)(?:[，,]\s*点击领取[0-9]{1,6}个支付宝积分)?[。!！]?$"""
@@ -145,7 +150,7 @@ object PaymentTextParser {
         return parseReceipt(packageName, validationText)?.let { withReceiptDetails(packageName, normalized, it) }
     }
 
-    internal val accountMovementResult = Regex("^(?:提现|(?:零钱|余额|钱包|账户|储值)充值|(?:零钱通|余额宝)(?:转入|转出)|信用卡还款)(?:已)?(?:成功|完成|到账)[！!。]?$")
+    internal val accountMovementResult = Regex("^(?:提现|(?:零钱|余额|钱包|账户|储值)充值|(?:零钱通|余额宝)(?:转入|转出)|信用卡还款|本人账户转账|(?:京东)?白条还款)(?:已)?(?:成功|完成|到账)[！!。]?$")
     private val accountPrincipalLabels = setOf("提现金额", "充值金额", "转入金额", "转出金额", "还款金额", "转账金额")
 
     /** Wallet account movements have separate principal, fee and credited amount roles. */
@@ -287,7 +292,7 @@ object PaymentTextParser {
     // Match a receipt action or labelled transaction type. A funding account such as 零钱通,
     // a merchant name, or the word 还款 in a transfer remark is not proof of an account movement.
     private val accountMovement = Regex(
-        """(?:^|[\n，,；;])\s*(?:(?:交易类型|业务类型|资金用途|交易场景)\s*[:：]\s*)?(?:(?:(?:本人)?账户(?:间)?(?:互转|调拨)|本人(?:账户|银行卡)(?:转入|转出)|转(?:账)?给自己(?:的)?(?:账户|银行卡|微信|支付宝)?|(?:零钱通|余额宝)(?:转入|转出)|(?:零钱|余额|储值|账户|钱包)充值|信用卡还款|还信用卡)(?:已)?(?:成功|完成|到账)?|提现(?:已)?(?:成功|完成|到账)|(?:收款方|收款人|转入账户)\s*[:：]\s*(?:本人|自己)(?:的)?(?:账户|银行卡|微信|支付宝)?)(?=$|[\s，,。；;！!])"""
+        """(?:^|[\n，,；;])\s*(?:(?:交易类型|业务类型|资金用途|交易场景)\s*[:：]\s*)?(?:(?:(?:本人)?账户(?:间)?(?:互转|调拨)|本人(?:账户|银行卡)(?:转入|转出)|转(?:账)?给自己(?:的)?(?:账户|银行卡|微信|支付宝)?|(?:零钱通|余额宝)(?:转入|转出)|(?:零钱|余额|储值|账户|钱包)充值|信用卡还款|还信用卡|本人账户转账|(?:京东)?白条还款)(?:已)?(?:成功|完成|到账)?|提现(?:已)?(?:成功|完成|到账)|(?:收款方|收款人|转入账户)\s*[:：]\s*(?:本人|自己)(?:的)?(?:账户|银行卡|微信|支付宝)?)(?=$|[\s，,。；;！!])"""
     )
 
     internal fun isAccountMovement(facts: String): Boolean = accountMovement.containsMatchIn(facts)
@@ -344,6 +349,14 @@ object PaymentTextParser {
                 put("originalOrderId", reference(it))
             }
         }
+    }
+
+    /** A recognized coupon offer adds no facts to the Alipay debit statement. */
+    internal fun notificationReceiptContent(packageName: String, title: String, content: String): String {
+        if (packageName != "com.eg.android.AlipayGphone" || normalize(title) !in alipayStatementTitles) return content
+        val normalized = normalize(content)
+        val receipt = alipayElectricityCoupon.replace(normalized, "\$1")
+        return if (receipt == normalized) content else receipt
     }
 
     internal fun isNotificationCandidate(packageName: String, title: String, content: String): Boolean {
@@ -408,7 +421,7 @@ object PaymentTextParser {
             // The notice only gives day/hour/minute. Leave the year/month and actual timestamp unknown.
             return NotificationStatement("EXPENSE", proof, fundingAccount = "${card}（尾号 $tail）")
         }
-        if (packageName != "com.eg.android.AlipayGphone" || title !in setOf("支付宝", "支付宝通知", "交易提醒")) return null
+        if (packageName != "com.eg.android.AlipayGphone" || title !in alipayStatementTitles) return null
         val lines = receiptFacts(body).lines().map(String::trim).filter(String::isNotEmpty)
         val statements = lines.mapIndexedNotNull { index, line ->
             alipayTransactionStatement.matchEntire(line)?.let { match ->
@@ -469,13 +482,17 @@ object PaymentTextParser {
 
     /** The caller must validate payment facts before enriching its descriptive fields. */
     internal fun withReceiptDetails(packageName: String, text: String, parsed: NotificationParseResult,
-        structure: PaymentScreenStructure? = null, source: String = "页面"): NotificationParseResult {
+        structure: PaymentScreenStructure? = null, source: String = "页面", headerMerchant: String? = null): NotificationParseResult {
         val extracted = PaymentReceiptDetailsReader.read(packageName, text, structure, source)
-        val details = extracted.details
+        val header = headerMerchant?.takeIf { !extracted.ambiguousParty &&
+            extracted.details.merchantName == null && extracted.details.payeeName == null }
+        val details = if (header == null) extracted.details else extracted.details.copy(merchantName = header,
+            fieldSources = extracted.details.fieldSources + ("merchantName" to "$source·账单抬头"))
         val merchant = if (parsed.direction == "EXPENSE") details.merchantName ?: details.payeeName ?:
             parsed.merchant.takeUnless { extracted.ambiguousParty }
             else parsed.merchant ?: details.merchantName
-        return parsed.copy(merchant = merchant, details = details)
+        return parsed.copy(merchant = merchant, details = details,
+            fieldEvidence = if (header == null) parsed.fieldEvidence else parsed.fieldEvidence + ("merchant" to "$source·账单抬头：$header"))
     }
 
     private fun parseReceipt(packageName: String, text: String, statedDirection: String? = null): NotificationParseResult? {

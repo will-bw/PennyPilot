@@ -231,6 +231,48 @@ class NotificationParserTest {
     }
 
     @Test
+    fun `alipay transaction reminder records the expense and ignores its electricity coupon`() = runTest {
+        val pkg = "com.eg.android.AlipayGphone"
+        val title = "交易提醒"
+        val statement = "你有一笔15.80元的支出"
+        val offer = "点击领3元电费红包。"
+        for (separator in listOf("，", "，\n", "。\n", "\n")) {
+            val body = "$statement$separator$offer"
+            val result = NotificationParser.parse(pkg, title, body, emptyList(), true) {
+                error("支付宝动账通知应在本机识别")
+            }
+            assertNotNull(body, result)
+            requireNotNull(result)
+            assertEquals(body, 1580L, result.amountCents)
+            assertEquals("EXPENSE", result.direction)
+            assertEquals("merchant_payment", result.scene)
+            assertEquals("支付宝", result.paymentMethod)
+            assertNull(result.merchant)
+            assertNull(result.details.discountAmountCents)
+            assertTrue(result.fieldEvidence.getValue("paymentStatus").contains(statement))
+            assertFalse(result.fieldEvidence.values.any { it.contains("电费红包") })
+        }
+    }
+
+    @Test
+    fun `alipay electricity coupon cannot supply or override transaction evidence`() = runTest {
+        val pkg = "com.eg.android.AlipayGphone"
+        val title = "交易提醒"
+        val statement = "你有一笔15.80元的支出"
+        val offer = "点击领3元电费红包。"
+        val rules = listOf(ParseRuleEntity(appPackage = pkg, regexAmount = """(\d+)"""))
+        for (body in listOf(offer, "如果$statement，$offer", "${statement}后，$offer",
+                "${statement}，另收3元电费红包。", "$statement，$offer 实际未扣款",
+                "$statement，$offer\n实际未扣款", "$statement，$offer\n交易状态：处理中",
+                "$statement，$offer\n你有一笔15.80元的支出")) {
+            assertNull(body, NotificationParser.parse(pkg, title, body, rules, true) {
+                error("推广及不明确的动账通知不应进入云端识别")
+            })
+            assertFalse(body, NotificationParser.isCloudCandidate(pkg, title, body))
+        }
+    }
+
+    @Test
     fun `transaction statement expansion rejects quoted hypothetical conflicting and malformed evidence`() = runTest {
         val pkg = "com.eg.android.AlipayGphone"
         val rules = listOf(ParseRuleEntity(appPackage = pkg, regexAmount = """(\d+)"""))

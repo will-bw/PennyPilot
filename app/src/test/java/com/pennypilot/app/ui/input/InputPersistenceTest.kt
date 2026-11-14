@@ -285,6 +285,9 @@ class InputPersistenceTest {
         override suspend fun captureEvidenceByOrder(domain: String, orderId: String) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun captureEvidenceByNotification(packageName: String, notificationKey: String, start: Long, end: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun captureEvidenceNear(start: Long, end: Long, amount: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
+        override suspend fun pageEvidenceNearTransactionTime(packageName: String, start: Long, end: Long, amount: Long) =
+            emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
+        override suspend fun linkedPageOrders(id: Long) = emptyList<com.pennypilot.app.data.db.entity.CaptureEvidenceEntity>()
         override suspend fun nonCapturedTransactionsNear(start: Long, end: Long, amount: Long, type: TxType) = emptyList<TransactionEntity>()
         override suspend fun relatedCaptureHistory(merchant: String, type: TxType) = saved.filter {
             it.merchant == merchant && it.type == type && it.status == TxStatus.CONFIRMED && it.duplicateOf == null &&

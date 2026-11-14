@@ -342,8 +342,10 @@ void main() {
       metadataJson: jsonEncode({
         'aaSplit': {'totalAmountFen': 10000, 'participantCount': 4},
         'paymentStatus': 'completed',
+        'transactionTimeSource': 'receipt_created',
         'fieldEvidence': {
           'amount': {'quote': '实际付款100元', 'source': 'image'},
+          'occurredAt': '页面·创建时间：2026-11-14 18:32',
         },
       }),
     );
@@ -354,6 +356,7 @@ void main() {
     await tester.tap(find.text('识别依据与待核对信息'));
     await tester.pumpAndSettle();
     expect(find.text('实际付款100元'), findsOneWidget);
+    expect(find.text('订单创建时间'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

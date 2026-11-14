@@ -81,6 +81,8 @@ class CaptureProcessor internal constructor(
         if (!isCurrent() || revision != LedgerRevision.current || !preferences.notificationCaptureEnabled.first()) return
         val text = "${input.title}\n${input.content}".trim()
         if (parsed != null) {
+            val receiptContent = NotificationParser.receiptContent(input.packageName, input.title, input.content)
+            val semanticText = "${input.title}\n$receiptContent".trim()
             val saved = recognitionCommitMutex.withLock {
                 val supplemental = if (liveArrival != null && preferences.screenCaptureEnabled.first())
                     checkoutContext.enrichNotification(input, parsed, liveArrival, revision, SystemClock.elapsedRealtime()) else null
@@ -88,7 +90,7 @@ class CaptureProcessor internal constructor(
                     allowed: suspend () -> Boolean = { true }) = save(receipt, input.packageName, text, input.postedAt,
                     TxSource.NOTIFICATION, eventKey, input.updateIdentity, revision, verifiedRule = true,
                     businessKind = receipt.businessKind, metadata = captureMetadata(receipt, "notification"),
-                    isCurrent = current, isAllowed = allowed)
+                    semanticText = semanticText, isCurrent = current, isAllowed = allowed)
                 if (supplemental == null) record(parsed) else {
                     val current = { isCurrent() && checkoutContext.remainsAuthorized(supplemental.authorization) }
                     record(supplemental.receipt, current) { current() && preferences.screenCaptureEnabled.first() } || record(parsed)
@@ -284,6 +286,7 @@ class CaptureProcessor internal constructor(
             ruleVersion = CaptureReceiptContext.string(metadata, "ruleVersion"),
             fieldEvidence = strings(metadata?.get("fieldEvidence") as? JsonObject),
             occurredAt = time,
+            occurredAtIsCreationTime = CaptureReceiptContext.string(metadata, "transactionTimeSource") == "receipt_created",
             orderIdKind = CaptureReceiptContext.string(metadata, "transactionIdentityKind"),
             details = PaymentReceiptDetails(fields["merchantName"], fields["payeeName"], fields["productDescription"],
                 fields["remark"], fields["paymentChannel"], fields["fundingAccount"],
@@ -376,7 +379,8 @@ class CaptureProcessor internal constructor(
                 eventKey, null, revision, verifiedRule = true, businessKind = parsed.businessKind,
                 metadata = captureMetadata(parsed, "page"))
         }
-        if (saved && queueSemanticModel && preferences.screenCloudParsingEnabled.first() && savedReceiptMatches(eventKey, parsed))
+        if (saved && queueSemanticModel && "reviewRequired" !in parsed.fieldEvidence &&
+            preferences.screenCloudParsingEnabled.first() && savedReceiptMatches(eventKey, parsed))
             enqueueRecognition(packageName, receipt, eventKey, observedAt, revision, TxSource.ACCESSIBILITY, null,
                 enrichExisting = true, authorizationIdOverride = authorizationId)
         return saved
@@ -449,6 +453,11 @@ class CaptureProcessor internal constructor(
     private fun captureMetadata(parsed: NotificationParseResult, source: String): String = buildJsonObject {
         put("scene", parsed.scene); put("ruleVersion", parsed.ruleVersion)
         put("source", source); put("paymentStatus", "COMPLETED"); put("currency", "CNY")
+        if ("reviewRequired" in parsed.fieldEvidence) put("captureRequiresReview", true)
+        if ("checkoutAmountEstimate" in parsed.fieldEvidence) {
+            put("checkoutAmountEstimate", true)
+            put("paymentStatus", "AMOUNT_UNVERIFIED")
+        }
         parsed.occurredAt?.let { put("receiptOccurredAt", java.time.Instant.ofEpochMilli(it).toString()) }
         parsed.orderIdKind?.let { put("transactionIdentityKind", it) }
         putJsonObject("fieldEvidence") { parsed.fieldEvidence.entries.take(12).forEach { (key, value) -> put(key.take(40), value.take(300)) } }
@@ -497,6 +506,7 @@ class CaptureProcessor internal constructor(
         semanticFingerprint: String? = null,
         sourceMetadata: String? = null,
         forceReview: Boolean = false,
+        semanticText: String = text,
         isCurrent: () -> Boolean = { true },
         isAllowed: suspend () -> Boolean = { true }
     ): Boolean {
@@ -509,10 +519,10 @@ class CaptureProcessor internal constructor(
         val dao = database.transactionDao()
         val existingId = dao.captureEvidenceByKey(eventKey)?.transactionId ?: dao.getByCaptureEvent(eventKey)?.id
         val semantics = CaptureSemanticResolver.resolve(parsed.copy(businessKind = businessKind), packageName,
-            text, captureSemanticContext(parsed.merchant, parsed.direction, existingId).copy(receipt = semanticReceipt), proposal)
+            semanticText, captureSemanticContext(parsed.merchant, parsed.direction, existingId).copy(receipt = semanticReceipt), proposal)
         val kind = semantics.businessKind
         val category = categories.firstOrNull { it.id == semantics.categoryId && it.enabled && it.type == type }
-            ?: CategoryInferrer.infer("${parsed.merchant.orEmpty()} $text", categories, type)
+            ?: CategoryInferrer.infer("${parsed.merchant.orEmpty()} $semanticText", categories, type)
             ?: categories.firstOrNull { it.enabled && it.name == "其他" && it.type == type }
             ?: categories.firstOrNull { it.enabled && it.type == type }
         if (category == null) {
@@ -528,9 +538,13 @@ class CaptureProcessor internal constructor(
                 if (source == TxSource.NOTIFICATION) "notification" else "page")) as JsonObject)
                 .forEach { (key, value) -> put(key, value) }
             metadata?.let { raw -> (Json.parseToJsonElement(raw) as JsonObject).forEach { (key, value) -> put(key, value) } }
-            // Only a validated receipt time can replace an observation-time fallback.
-            put("transactionTimeSource", if (parsed.occurredAt != null) "receipt" else "observed")
-            put("timePrecision", if (parsed.occurredAt != null) "exact" else "unspecified")
+            val (timeSource, timePrecision) = when {
+                parsed.occurredAt == null -> "observed" to "unspecified"
+                parsed.occurredAtIsCreationTime -> "receipt_created" to "approximate"
+                else -> "receipt" to "exact"
+            }
+            put("transactionTimeSource", timeSource)
+            put("timePrecision", timePrecision)
             put("observedAt", occurredAt)
             put("semanticBusinessKind", kind)
             put("semanticCategoryId", category.id)
@@ -546,7 +560,9 @@ class CaptureProcessor internal constructor(
         val tx = TransactionEntity(amount = amount, type = type, categoryId = category.id,
             merchant = parsed.merchant, accountTag = semantics.accountTag ?: parsed.paymentMethod,
             note = semantics.note, occurredAt = parsed.occurredAt ?: occurredAt,
-            source = source, status = if (!forceReview && (verifiedRule || proposal != null) && semantics.autoEligible &&
+            source = source, status = if (!forceReview && !parsed.occurredAtIsCreationTime &&
+                "reviewRequired" !in parsed.fieldEvidence &&
+                (verifiedRule || proposal != null) && semantics.autoEligible &&
                 kind != "unknown" && preferences.captureAutoRecordEnabled.first()) TxStatus.CONFIRMED else TxStatus.PENDING,
             rawPayload = text, captureEventKey = eventKey, businessKind = kind, metadataJson = enrichedMetadata)
         if (!isCurrent() || !isAllowed()) return false
@@ -560,6 +576,7 @@ class CaptureProcessor internal constructor(
             is CaptureResult.Duplicate -> {
                 trace(eventKey, source, CaptureLatencyTrace.Stage.SAVED)
                 NotificationHelper.cancelRecognitionPending(context, eventKey)
+                result.replacedDraftId?.let { NotificationHelper.cancelCaptureNotification(context, it, eventKey) }
                 monitor.onDuplicate()
                 if (source == TxSource.ACCESSIBILITY) monitor.onScreenStatus("duplicate", packageName)
                 return true
@@ -612,8 +629,12 @@ class CaptureProcessor internal constructor(
             else "$categoryName · ${if (type == TxType.EXPENSE) "支出" else "收入"} · ${if (stored.status == TxStatus.CONFIRMED) "已记账" else "待确认"}"
         try {
             val storedEventKey = stored.captureEventKey ?: eventKey
+            val awaitingAmount = stored.metadataJson?.let { raw ->
+                (Json.parseToJsonElement(raw) as? JsonObject)?.get("checkoutAmountEstimate") == JsonPrimitive(true)
+            } == true
             val posted = NotificationHelper.postCaptureNotification(context, transactionId, storedEventKey, title,
-                content, allowQuickConfirm = stored.status == TxStatus.PENDING && stored.duplicateOf == null &&
+                if (awaitingAmount) "订单金额待核对 · 尚未计入支出" else content,
+                allowQuickConfirm = !awaitingAmount && stored.status == TxStatus.PENDING && stored.duplicateOf == null &&
                     stored.businessKind !in setOf("unknown", "transfer", "receivable", "payable"),
                 recorded = stored.status == TxStatus.CONFIRMED, updateOnly = updateOnly, pendingEventKey = eventKey)
             trace(eventKey, source, if (posted) CaptureLatencyTrace.Stage.NOTIFICATION_SUBMITTED else CaptureLatencyTrace.Stage.NOTIFICATION_SKIPPED)
