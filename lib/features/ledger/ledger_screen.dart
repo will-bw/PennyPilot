@@ -672,7 +672,7 @@ class PendingScreen extends StatelessWidget {
     builder: (context, _) {
       final rows = controller.pendingTransactions;
       final confirmable = rows
-          .where((tx) => tx.effectiveKind != 'unknown')
+          .where((tx) => tx.effectiveKind != 'unknown' && tx.duplicateOf == null)
           .toList();
       final displayedRevision = controller.revision;
       return Scaffold(
@@ -707,7 +707,7 @@ class PendingScreen extends StatelessWidget {
                                           '确认这 ${confirmable.length} 笔已分类账单？',
                                         ),
                                         content: const Text(
-                                          '请确保已核对金额、用途和重复记录。待分类转账不会批量确认。',
+                                          '请核对金额和用途。待分类转账和疑似重复的账单需要逐笔核对。',
                                         ),
                                         actions: [
                                           TextButton(

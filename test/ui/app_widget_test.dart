@@ -347,6 +347,41 @@ void main() {
   );
 
   testWidgets(
+    'bulk confirmation leaves suspected duplicate payments pending',
+    (tester) async {
+      final repository = TestLedgerRepository(populated: true);
+      final source = repository.data['transactions'] as List;
+      repository.data['transactions'] = [
+        ...source,
+        {
+          ...fixtureTransaction(
+            id: 6,
+            amount: 2800,
+            categoryId: 1,
+            merchant: '测试疑似重复支付',
+            status: 'PENDING',
+            source: 'ACCESSIBILITY',
+          ),
+          'duplicateOf': 1,
+        },
+      ];
+      await pumpApp(tester, repository);
+      await tester.tap(find.text('2 笔账单等待确认'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确认已分类的 1 笔'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '全部确认'));
+      await tester.pumpAndSettle();
+
+      expect(repository.calls.single.arguments['id'], 4);
+      expect(find.text('测试待确认商户'), findsNothing);
+      expect(find.text('测试疑似重复支付'), findsOneWidget);
+      expect(find.text('可能与已有账单重复'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'restoring a ledger closes an open editor before it can save stale values',
     (tester) async {
       final repository = TestLedgerRepository();

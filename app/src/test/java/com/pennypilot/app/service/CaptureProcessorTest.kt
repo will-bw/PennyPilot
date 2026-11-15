@@ -3,6 +3,7 @@ package com.pennypilot.app.service
 import android.app.Application
 import android.app.NotificationManager
 import android.content.Context
+import android.os.SystemClock
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Clock
@@ -550,6 +551,99 @@ class CaptureProcessorTest {
                 assertEquals(TxStatus.PENDING, rows[1].status)
                 assertEquals(rows[0].id, rows[1].duplicateOf)
                 assertEquals(1800L, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+            }
+        }
+    }
+
+    @Test fun `meituan and wechat merchantless receipts count once across capture sources`() = runBlocking {
+        for (shoppingFacts in listOf(emptyList(), listOf("支付方式：微信支付"))) {
+            assertMeituanWechatPairAcrossSources(shoppingFacts = shoppingFacts, suspectedDuplicate = true)
+        }
+    }
+
+    @Test fun `same amount meituan and wechat receipts with separate merchants or channels count twice`() = runBlocking {
+        assertMeituanWechatPairAcrossSources(
+            shoppingFacts = listOf("商家：小王面馆"), walletFacts = listOf("收款方：小林便利店"), suspectedDuplicate = false)
+        assertMeituanWechatPairAcrossSources(shoppingFacts = listOf("支付方式：支付宝"), suspectedDuplicate = false)
+        assertMeituanWechatPairAcrossSources(shoppingFacts = listOf("付款方式：支付宝支付"), suspectedDuplicate = false)
+        assertMeituanWechatPairAcrossSources(shoppingFacts = listOf("付款方式：银联云闪付"), suspectedDuplicate = false)
+        assertMeituanWechatPairAcrossSources(shoppingFacts = listOf("商家：小王面馆", "支付方式：支付宝"),
+            walletFacts = listOf("收款方：小王面馆"), suspectedDuplicate = false)
+    }
+
+    @Test fun `four payment signals for one meituan and wechat purchase still count once`() = runBlocking {
+        for (first in 0..3) {
+            withAutomaticNotificationCapture { database, processor ->
+                preferences.setScreenCaptureEnabled(true)
+                val now = System.currentTimeMillis() - 5_000
+                val shopping = CaptureFixture("com.sankuai.meituan", "meituan-notice", "美团支付", TxSource.NOTIFICATION, now,
+                    listOf("订单支付成功", "实付29.90元"), listOf("支付成功", "实付金额：29.90元", "完成"))
+                val wallet = CaptureFixture("com.tencent.mm", "wechat-notice", "微信支付", TxSource.NOTIFICATION, now + 2_000,
+                    listOf("支付成功", "实付29.90元"), listOf("支付成功", "¥29.90", "完成"))
+                val captures = listOf(shopping, wallet,
+                    shopping.copy(eventKey = "meituan-page", source = TxSource.ACCESSIBILITY),
+                    wallet.copy(eventKey = "wechat-page", source = TxSource.ACCESSIBILITY))
+                (captures.drop(first) + captures.take(first)).forEach { it.deliver(processor) }
+
+                val rows = database.backupDao().transactions().sortedBy { it.id }
+                assertEquals(4, rows.size)
+                assertEquals(TxStatus.CONFIRMED, rows.first().status)
+                assertTrue(rows.drop(1).all { it.status == TxStatus.PENDING && it.duplicateOf == rows.first().id })
+                assertEquals(2990L, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+            }
+        }
+    }
+
+    private suspend fun assertMeituanWechatPairAcrossSources(
+        shoppingFacts: List<String>, walletFacts: List<String> = emptyList(), suspectedDuplicate: Boolean
+    ) {
+        val sources = listOf(TxSource.NOTIFICATION, TxSource.ACCESSIBILITY)
+        for (shoppingSource in sources) for (walletSource in sources) for (walletFirst in listOf(false, true)) {
+            withAutomaticNotificationCapture { database, processor ->
+                preferences.setScreenCaptureEnabled(true)
+                val now = System.currentTimeMillis() - 5_000
+                val shopping = CaptureFixture("com.sankuai.meituan", "meituan", "美团支付", shoppingSource, now,
+                    listOf("订单支付成功", "实付29.90元") + shoppingFacts,
+                    listOf("支付成功", "实付金额：29.90元") + shoppingFacts + "完成")
+                val wallet = CaptureFixture("com.tencent.mm", "wechat", "微信支付", walletSource, now + 2_000,
+                    listOf("支付成功", "实付29.90元") + walletFacts,
+                    listOf("支付成功", "¥29.90") + walletFacts + "完成")
+                val captures = if (walletFirst) listOf(wallet, shopping) else listOf(shopping, wallet)
+                val label = "${shopping.source} → ${wallet.source}, walletFirst=$walletFirst, $shoppingFacts, $walletFacts"
+                captures.forEach { it.deliver(processor) }
+
+                val rows = database.backupDao().transactions().sortedBy { it.id }
+                assertEquals(label, 2, rows.size)
+                assertEquals(label, captures.map { it.source }, rows.map { it.source })
+                assertTrue(label, rows.all { it.amount == 2990L && it.type == TxType.EXPENSE })
+                assertEquals(label, TxStatus.CONFIRMED, rows[0].status)
+                assertEquals(label, if (suspectedDuplicate) TxStatus.PENDING else TxStatus.CONFIRMED, rows[1].status)
+                assertEquals(label, rows[0].id.takeIf { suspectedDuplicate }, rows[1].duplicateOf)
+                val total = if (suspectedDuplicate) 2990L else 5980L
+                assertEquals(label, total, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+
+                captures.asReversed().forEach { it.deliver(processor) }
+                assertEquals(label, rows, database.backupDao().transactions().sortedBy { it.id })
+                assertEquals(label, total, database.transactionDao().observeMonthExpense(now - 1, now + 10_000).first())
+                assertEquals(label, 0, cloudCalls)
+            }
+        }
+    }
+
+    private data class CaptureFixture(
+        val packageName: String, val eventKey: String, val title: String, val source: TxSource, val observedAt: Long,
+        val notificationLines: List<String>, val screenLines: List<String>
+    ) {
+        suspend fun deliver(processor: CaptureProcessor) {
+            val revision = LedgerRevision.current
+            if (source == TxSource.NOTIFICATION) {
+                processor.processNotification(CapturedNotification(packageName, eventKey, observedAt, title,
+                    notificationLines.joinToString("，")), revision,
+                    liveArrival = CheckoutContext.LiveNotification(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+            } else {
+                val receipt = checkNotNull(PaymentSceneAdapters.parse(packageName, screenLines.joinToString("\n"), observedAt))
+                assertTrue(processor.processScreen(packageName, receipt, eventKey, observedAt, revision,
+                    queueSemanticModel = false))
             }
         }
     }
