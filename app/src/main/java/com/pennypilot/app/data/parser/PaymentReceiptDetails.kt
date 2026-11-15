@@ -309,8 +309,12 @@ internal object PaymentReceiptDetailsReader {
             transferFrom, transferTo), ambiguous, merchantFromStore)
     }
 
-    private fun channel(value: String?): String? = channels.firstOrNull { it == value }
-        ?.let { if (it == "微信") "微信支付" else it }
+    private fun channel(value: String?): String? = when (value) {
+        "微信" -> "微信支付"
+        "支付宝支付" -> "支付宝"
+        "银联云闪付" -> "云闪付"
+        else -> channels.firstOrNull { it == value }
+    }
 
     private fun isFundingAccount(value: String): Boolean = value in balanceAccounts ||
         Regex("银行|信用卡|储蓄卡|借记卡").containsMatchIn(value)

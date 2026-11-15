@@ -143,6 +143,45 @@ class CapturePersistenceTest {
         assertEquals(TxStatus.CONFIRMED, db.transactionDao().getById(next.transactionId)!!.status)
     }
 
+    @Test fun `wechat first does not hold a distinct second meituan order for the same wallet payment`() = runTest {
+        val metadata = """{"paymentStatus":"COMPLETED","scene":"merchant_payment","transactionTimeSource":"observed"}"""
+        val row = tx(merchant = null).copy(status = TxStatus.CONFIRMED)
+        val wallet = capture(evidence("wallet", "com.tencent.mm").copy(metadataJson = metadata), row) as CaptureResult.Inserted
+        val shopping = evidence("shopping", orderId = "MT202611150001").copy(metadataJson = metadata)
+        val first = capture(shopping, row) as CaptureResult.Inserted
+        assertEquals(wallet.transactionId, first.duplicateOf)
+
+        val second = capture(shopping.copy(eventKey = "next-order", orderId = "MT202611150002", observedAt = time + 1_000),
+            row.copy(occurredAt = time + 1_000)) as CaptureResult.Inserted
+        assertNull(second.duplicateOf)
+        assertEquals(3600L, db.transactionDao().observeMonthExpense(time - 1, time + 2_000).first())
+    }
+
+    @Test fun `an anonymous wallet proof does not hold two independent shopping notifications`() = runTest {
+        val metadata = """{"paymentStatus":"COMPLETED","scene":"merchant_payment","transactionTimeSource":"observed"}"""
+        val row = tx(merchant = null).copy(status = TxStatus.CONFIRMED)
+        val wallet = capture(evidence("wallet", "com.tencent.mm").copy(metadataJson = metadata), row) as CaptureResult.Inserted
+        val shopping = evidence("shopping", notificationKey = "shopping-notice").copy(metadataJson = metadata)
+        val first = capture(shopping, row) as CaptureResult.Inserted
+        assertEquals(wallet.transactionId, first.duplicateOf)
+
+        val second = capture(shopping.copy(eventKey = "next-order", notificationKey = "next-notice", observedAt = time + 1_000,
+            orderId = "MT202611150002", orderDomain = "meituan:payment"),
+            row.copy(occurredAt = time + 1_000)) as CaptureResult.Inserted
+        assertNull(second.duplicateOf)
+        assertEquals(3600L, db.transactionDao().observeMonthExpense(time - 1, time + 2_000).first())
+    }
+
+    @Test fun `anonymous meituan and wechat observations beyond the short matching window remain separate`() = runTest {
+        val metadata = """{"paymentStatus":"COMPLETED","scene":"merchant_payment","transactionTimeSource":"observed"}"""
+        val row = tx(merchant = null).copy(status = TxStatus.CONFIRMED)
+        capture(evidence().copy(metadataJson = metadata), row)
+        val wallet = capture(evidence("wallet", "com.tencent.mm", time + 16_000).copy(metadataJson = metadata),
+            row.copy(occurredAt = time + 16_000)) as CaptureResult.Inserted
+        assertNull(wallet.duplicateOf)
+        assertEquals(3600L, db.transactionDao().observeMonthExpense(time - 1, time + 17_000).first())
+    }
+
     @Test fun `cross app hint requires matching expense notifications within the original time window`() = runTest {
         capture(evidence().copy(metadataJson = paymentMetadata("小王面馆")))
         val walletEvidence = evidence(event = "wallet", packageName = "com.tencent.mm", at = time + 1_000)
@@ -187,6 +226,18 @@ class CapturePersistenceTest {
         val live = capture(evidence("live-notice", "com.eg.android.AlipayGphone", time + 1000)
             .copy(metadataJson = paymentMetadata("饿了么")), tx(merchant = null)) as CaptureResult.Inserted
         assertNull(live.duplicateOf)
+    }
+
+    @Test fun `old meituan receipt cannot hold a fresh equal payment at the same merchant`() = runTest {
+        val priorTime = time - 600_000
+        val shoppingMetadata = paymentMetadata("小王面馆", "微信支付").dropLast(1) +
+            ""","transactionTimeSource":"receipt","receiptOccurredAt":"${Instant.ofEpochMilli(priorTime)}"}"""
+        capture(evidence("old-meituan").copy(metadataJson = shoppingMetadata),
+            tx(TxSource.ACCESSIBILITY).copy(occurredAt = priorTime, status = TxStatus.CONFIRMED))
+        val live = capture(evidence("live", "com.tencent.mm", time + 1_000)
+            .copy(metadataJson = paymentMetadata("小王面馆")), tx().copy(status = TxStatus.CONFIRMED)) as CaptureResult.Inserted
+        assertNull(live.duplicateOf)
+        assertEquals(3600L, db.transactionDao().observeMonthExpense(priorTime - 1, time + 2_000).first())
     }
 
     private fun alipayNotice(event: String, at: Long) = evidence(event, alipay, at,

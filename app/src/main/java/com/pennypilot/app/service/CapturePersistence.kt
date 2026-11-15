@@ -47,7 +47,9 @@ object CapturePersistence {
     internal const val POSSIBLE_DUPLICATE_WINDOW_MS = 120_000L
     private const val CHECKOUT_RECEIPT_WINDOW_MS = 30_000L
     private const val ALIPAY = "com.eg.android.AlipayGphone"
+    private const val WECHAT = "com.tencent.mm"
     private const val ALIPAY_RECEIPT_WINDOW_MS = 30_000L
+    private const val MEITUAN_WECHAT_RECEIPT_WINDOW_MS = 15_000L
 
     /**
      * 检查证据、保存别名及账目在同一事务执行，两个捕获服务并发时也只写入一次。
@@ -219,11 +221,21 @@ object CapturePersistence {
 
     private suspend fun possiblePaymentDuplicate(dao: TransactionDao, incoming: CaptureEvidenceEntity,
         nearby: List<CaptureEvidenceEntity>): CaptureEvidenceEntity? =
-        nearby.firstOrNull { isPossibleDuplicate(it, incoming) }
-            ?: nearby.filter { isPossibleCrossAppPayment(it, incoming) }
+        nearby.firstOrNull { isPossibleDuplicate(it, incoming) && checkoutWalletPair(it, incoming) == null }
+            ?: nearby.filter { isPossibleDuplicate(it, incoming) || isPossibleCrossAppPayment(it, incoming) ||
+                isPossibleMeituanWechatNoticeAndPage(it, incoming) }
                 .distinctBy(CaptureEvidenceEntity::transactionId)
                 .filter { evidence ->
-                    dao.getById(evidence.transactionId)?.let { it.duplicateOf == null && it.status != TxStatus.IGNORED } == true
+                    val original = dao.getById(evidence.transactionId)
+                    original != null && original.duplicateOf == null && original.status != TxStatus.IGNORED &&
+                        nearby.none { other ->
+                            // Another event of the same kind may be a second purchase.
+                            val distinctCapture = other.source == incoming.source &&
+                                CaptureEventIdentity.domainFor(other.packageName) == CaptureEventIdentity.domainFor(incoming.packageName)
+                            val distinctOrder = conflictingOrders(other, incoming)
+                            if (other.transactionId == original.id) distinctOrder
+                            else (distinctCapture || distinctOrder) && dao.getById(other.transactionId)?.duplicateOf == original.id
+                        }
                 }.singleOrNull()
             ?: possibleAlipayDuplicate(dao, incoming, nearby)
 
@@ -413,7 +425,12 @@ object CapturePersistence {
             !conflictingOrders(previous, incoming) &&
             // 页面重新进入/进程重建可能换会话身份，只提示核对，不能按文本静默吞单。
             (previous.packageName != incoming.packageName || previous.source != incoming.source ||
-                incoming.source == TxSource.ACCESSIBILITY)
+                incoming.source == TxSource.ACCESSIBILITY) &&
+            checkoutWalletPair(previous, incoming)?.let { (shopping, wallet) ->
+                val details = metadata(shopping.metadataJson)
+                isCompatibleWallet(receiptChannel(details), wallet.packageName) &&
+                    freshCheckoutReceipts(shopping, details, wallet, metadata(wallet.metadataJson))
+            } != false
 
     /** An amount-only wallet notification can link a review, never identify an order. */
     private suspend fun possibleAlipayDuplicate(dao: TransactionDao, incoming: CaptureEvidenceEntity,
@@ -482,33 +499,66 @@ object CapturePersistence {
     private fun isCompletedPurchase(details: JsonObject?): Boolean =
         detailValue(details, "paymentStatus") == "COMPLETED" && detailValue(details, "scene") == "merchant_payment"
 
+    private fun isPossibleMeituanWechatNoticeAndPage(previous: CaptureEvidenceEntity, incoming: CaptureEvidenceEntity): Boolean {
+        if (previous.packageName != incoming.packageName || incoming.packageName != WECHAT && !isMeituan(incoming.packageName) ||
+            previous.source == incoming.source || incoming.type != TxType.EXPENSE || !sameFinancials(previous, incoming) ||
+            previous.merchantFingerprint != null || incoming.merchantFingerprint != null || conflictingOrders(previous, incoming)) return false
+        val first = metadata(previous.metadataJson)
+        val second = metadata(incoming.metadataJson)
+        val firstChannel = receiptChannel(first)
+        val secondChannel = receiptChannel(second)
+        return isCompletedPurchase(first) && isCompletedPurchase(second) &&
+            (firstChannel == null || secondChannel == null || firstChannel == secondChannel) &&
+            sameShortPaymentWindow(previous, incoming, capturedPaymentTime(previous, first), capturedPaymentTime(incoming, second))
+    }
+
+    private fun receiptChannel(details: JsonObject?): String? =
+        detailValue(details?.get("receiptDetails") as? JsonObject, "paymentChannel")
+
+    private fun checkoutWalletPair(first: CaptureEvidenceEntity, second: CaptureEvidenceEntity): Pair<CaptureEvidenceEntity, CaptureEvidenceEntity>? {
+        fun isCommerce(packageName: String) = PaymentAppRegistry.profile(packageName)?.family?.let {
+            it != PaymentAppRegistry.Family.WALLET
+        } == true
+        return when {
+            isCommerce(first.packageName) && second.packageName in supportedWalletChannels -> first to second
+            isCommerce(second.packageName) && first.packageName in supportedWalletChannels -> second to first
+            else -> null
+        }
+    }
+
+    private fun isCompatibleWallet(channel: String?, walletPackage: String): Boolean =
+        channel == null || channel in supportedWalletChannels.getValue(walletPackage)
+
+    private fun freshCheckoutReceipts(first: CaptureEvidenceEntity, firstDetails: JsonObject?,
+        second: CaptureEvidenceEntity, secondDetails: JsonObject?): Boolean {
+        val start = minOf(first.firstObservedAt, second.firstObservedAt) - POSSIBLE_DUPLICATE_WINDOW_MS
+        // Opening an old bill near a new payment does not provide fresh payment evidence.
+        return listOf(first to firstDetails, second to secondDetails).all { (receipt, details) ->
+            detailValue(details, "transactionTimeSource") != "receipt_created" &&
+                capturedPaymentTime(receipt, details)?.let { it >= start } != false
+        }
+    }
+
+    private fun isMeituan(packageName: String): Boolean = CaptureEventIdentity.domainFor(packageName) == "meituan"
+
+    private fun sameShortPaymentWindow(first: CaptureEvidenceEntity, second: CaptureEvidenceEntity, firstTime: Long?, secondTime: Long?): Boolean {
+        val window = -MEITUAN_WECHAT_RECEIPT_WINDOW_MS..MEITUAN_WECHAT_RECEIPT_WINDOW_MS
+        return firstTime != null && secondTime != null && firstTime - secondTime in window &&
+            first.firstObservedAt - second.firstObservedAt in window
+    }
+
     private fun isPossibleCrossAppPayment(previous: CaptureEvidenceEntity, incoming: CaptureEvidenceEntity): Boolean {
         if (!sameFinancials(previous, incoming) || incoming.type != TxType.EXPENSE ||
             previous.packageName == incoming.packageName ||
             incoming.firstObservedAt - previous.firstObservedAt !in
                 -POSSIBLE_DUPLICATE_WINDOW_MS..POSSIBLE_DUPLICATE_WINDOW_MS) return false
-        fun isCommerce(packageName: String) = PaymentAppRegistry.profile(packageName)?.family?.let {
-            it != PaymentAppRegistry.Family.WALLET
-        } == true
-        val pair = when {
-            isCommerce(previous.packageName) && incoming.packageName in supportedWalletChannels -> previous to incoming
-            isCommerce(incoming.packageName) && previous.packageName in supportedWalletChannels -> incoming to previous
-            else -> return false
-        }
+        val pair = checkoutWalletPair(previous, incoming) ?: return false
         val shopping = metadata(pair.first.metadataJson)
         val wallet = metadata(pair.second.metadataJson)
         if (!isCompletedPurchase(shopping) || !isCompletedPurchase(wallet)) return false
-        // An old bill opened around a fresh payment is not fresh payment evidence.
-        val shoppingTime = capturedPaymentTime(pair.first, shopping)
-        val walletTime = capturedPaymentTime(pair.second, wallet)
-        val start = minOf(pair.first.firstObservedAt, pair.second.firstObservedAt) - POSSIBLE_DUPLICATE_WINDOW_MS
-        if (shoppingTime != null && shoppingTime < start || walletTime != null && walletTime < start ||
-            detailValue(shopping, "transactionTimeSource") == "receipt_created" ||
-            detailValue(wallet, "transactionTimeSource") == "receipt_created") return false
-        val shoppingDetails = shopping?.get("receiptDetails") as? JsonObject
-        val channel = detailValue(shoppingDetails, "paymentChannel")
-        val walletChannels = supportedWalletChannels.getValue(pair.second.packageName)
-        if (channel != null && channel !in walletChannels) return false
+        if (!freshCheckoutReceipts(pair.first, shopping, pair.second, wallet)) return false
+        val channel = receiptChannel(shopping)
+        if (!isCompatibleWallet(channel, pair.second.packageName)) return false
         val sameParty = pair.first.merchantFingerprint != null &&
             pair.first.merchantFingerprint == pair.second.merchantFingerprint
         if (sameParty && channel != null) return true
@@ -519,19 +569,26 @@ object CapturePersistence {
         val parties = listOfNotNull(detailValue(walletDetails, "merchantName"), detailValue(walletDetails, "payeeName")) +
             CaptureReceiptContext.readContext(wallet).filter { it.label == "交易对方" }.map { it.value }
         val profileName = PaymentAppRegistry.displayName(pair.first.packageName)
-        val meituanWechat = CaptureEventIdentity.domainFor(pair.first.packageName) == "meituan" &&
-            pair.second.packageName == "com.tencent.mm" &&
+        val isMeituan = isMeituan(pair.first.packageName)
+        val meituanWechat = isMeituan && pair.second.packageName == WECHAT
+        val bothNotifications =
             pair.first.source == TxSource.NOTIFICATION && pair.second.source == TxSource.NOTIFICATION
-        if (meituanWechat && channel != null) return true
-        if (!meituanWechat && channel == null && (pair.first.orderId == null || pair.second.orderId == null)) return false
-        val platformNames = if (CaptureEventIdentity.domainFor(pair.first.packageName) == "meituan")
+        if (meituanWechat && bothNotifications && channel != null) return true
+        val platformNames = if (isMeituan)
             setOf("美团", "美团外卖", "美团支付", "美团闪购", "美团团购")
         else setOf(profileName, "${profileName}支付")
-        return parties.any { CaptureEventIdentity.normalize(it) in platformNames }
+        val platformPayee = parties.any { CaptureEventIdentity.normalize(it) in platformNames }
+        if (meituanWechat && sameShortPaymentWindow(pair.first, pair.second,
+            capturedPaymentTime(pair.first, shopping), capturedPaymentTime(pair.second, wallet))) {
+            val anonymous = pair.first.merchantFingerprint == null && pair.second.merchantFingerprint == null
+            if (channel != null || platformPayee || anonymous) return true
+        }
+        return platformPayee && (meituanWechat && bothNotifications || channel != null ||
+            pair.first.orderId != null && pair.second.orderId != null)
     }
 
     private val supportedWalletChannels = mapOf(
-        "com.tencent.mm" to setOf("微信", "微信支付"),
+        WECHAT to setOf("微信", "微信支付"),
         "com.eg.android.AlipayGphone" to setOf("支付宝", "支付宝支付"),
         "com.unionpay" to setOf("云闪付", "银联云闪付")
     )
